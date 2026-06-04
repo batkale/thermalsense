@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+websockets
+httpx
+xgboost
+scikit-learn
+pandas
+numpy
+geopandas
+rasterio
+scipy
+python-dotenv
+apscheduler
+# ogn-client removed — pure-Python APRS client in data/ogn_client.py
+pytest
+pytest-asyncio
