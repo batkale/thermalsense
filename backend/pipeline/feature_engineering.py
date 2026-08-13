@@ -14,11 +14,29 @@ _LAND_USE = {
     "default":    (0.4, 0.20),
 }
 
-def _slope_aspect(elev_grid: np.ndarray, cell_size_m: float = _CELL_SIZE_M):
-    """Return (slope_deg, aspect_deg) arrays from an elevation grid."""
-    dy, dx = np.gradient(elev_grid, cell_size_m)
+def _slope_aspect(elev_grid: np.ndarray, cell_size_m: float = _CELL_SIZE_M,
+                  lat_deg: float | None = None):
+    """
+    Return (slope_deg, aspect_deg) arrays from an elevation grid.
+
+    Grid convention: row index increases NORTH, column index increases EAST.
+    Aspect is the compass bearing the slope faces — i.e. the downhill direction —
+    with 0=N, 90=E, 180=S, 270=W.
+
+    cell_size_m is the north-south cell size.  A degree of longitude shrinks as
+    cos(latitude), so the east-west size is scaled by cos(lat_deg); pass
+    lat_deg=None to skip the correction (square cells).
+    """
+    ns_m = cell_size_m
+    ew_m = cell_size_m if lat_deg is None else max(
+        cell_size_m * float(np.cos(np.radians(lat_deg))), 1e-6   # guard near the poles
+    )
+    dy, dx = np.gradient(elev_grid, ns_m, ew_m)
     slope = np.degrees(np.arctan(np.sqrt(dx**2 + dy**2)))
-    aspect = np.degrees(np.arctan2(-dx, dy)) % 360
+    # Downhill vector is -grad, so the bearing is atan2(east, north) = atan2(-dx, -dy).
+    # Negating only dx mirrors the result north-south and reports shaded northern
+    # slopes as sun-facing.
+    aspect = np.degrees(np.arctan2(-dx, -dy)) % 360
     return slope, aspect
 
 def _wind_components(speed: float, direction_deg: float):
@@ -74,7 +92,10 @@ def build_feature_matrix(meteo: dict, elev_grid: np.ndarray,
     lons = np.linspace(lon_bounds[0], lon_bounds[1], cols) if lon_bounds else np.linspace(0, cols - 1, cols)
     lat_grid, lon_grid = np.meshgrid(lats, lons, indexing="ij")
 
-    slope, aspect = _slope_aspect(elev_grid)
+    # Longitude cells narrow with latitude — scale east-west spacing accordingly
+    slope, aspect = _slope_aspect(
+        elev_grid, lat_deg=(sum(lat_bounds) / 2 if lat_bounds else None)
+    )
     wind_u, wind_v = _wind_components(meteo["wind_speed"], meteo["wind_dir"])
     heat, albedo = _LAND_USE.get(land_use, _LAND_USE["default"])
 

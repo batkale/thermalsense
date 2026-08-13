@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react';
 import { fetchElevation } from '../services/api.js';
+import { useLang } from '../i18n/LanguageContext.jsx';
 
 export default function PinnedGliderCard({ glider, onUnpin }) {
+  const { t } = useLang();
   const [groundElev,  setGroundElev]  = useState(null);
   const [elevLoading, setElevLoading] = useState(false);
 
@@ -20,30 +22,30 @@ export default function PinnedGliderCard({ glider, onUnpin }) {
   if (!glider) return null;
 
   const varioSign = glider.vario >= 0 ? '+' : '';
-  const latDir    = glider.lat >= 0 ? 'N' : 'S';
-  const lonDir    = glider.lon >= 0 ? 'E' : 'W';
+  const latDir    = glider.lat >= 0 ? t('latN') : t('latS');
+  const lonDir    = glider.lon >= 0 ? t('lonE') : t('lonW');
   const agl       = groundElev != null ? glider.alt - groundElev : null;
 
   return (
     <div className="pin-card">
       <div className="pin-card-header">
         <span className="pin-callsign">{glider.id}</span>
-        <button className="pin-close" onClick={onUnpin} title="Unpin">&times;</button>
+        <button className="pin-close" onClick={onUnpin} title={t('unpin')}>&times;</button>
       </div>
 
       <div className="pin-metrics">
         <div className="pin-metric">
-          <span className="pin-metric-label">Alt MSL</span>
+          <span className="pin-metric-label">{t('altMsl')}</span>
           <span className="pin-metric-value">{glider.alt} m</span>
         </div>
         <div className="pin-metric">
-          <span className="pin-metric-label">Ground</span>
+          <span className="pin-metric-label">{t('ground')}</span>
           <span className="pin-metric-value">
             {elevLoading ? '…' : groundElev != null ? `${groundElev} m` : '--'}
           </span>
         </div>
         <div className="pin-metric">
-          <span className="pin-metric-label">AGL</span>
+          <span className="pin-metric-label">{t('agl')}</span>
           <span className={`pin-metric-value ${agl != null && agl < 200 ? 'agl-low' : ''}`}>
             {elevLoading ? '…' : agl != null ? `${agl} m` : '--'}
           </span>
@@ -52,13 +54,13 @@ export default function PinnedGliderCard({ glider, onUnpin }) {
 
       <div className="pin-metrics">
         <div className="pin-metric">
-          <span className="pin-metric-label">Vario</span>
+          <span className="pin-metric-label">{t('vario')}</span>
           <span className={`pin-metric-value ${glider.vario > 0 ? 'vario-up' : glider.vario < 0 ? 'vario-down' : ''}`}>
             {varioSign}{glider.vario} m/s
           </span>
         </div>
         <div className="pin-metric">
-          <span className="pin-metric-label">Hdg</span>
+          <span className="pin-metric-label">{t('heading')}</span>
           <span className="pin-metric-value">
             {glider.heading != null ? `${glider.heading}°` : '--'}
           </span>
@@ -67,11 +69,11 @@ export default function PinnedGliderCard({ glider, onUnpin }) {
 
       <div className="pin-status">
         <span className={glider.is_tow ? 'pin-tow' : 'pin-glider'}>
-          {glider.is_tow ? 'tow plane' : 'glider'}
+          {glider.is_tow ? t('towPlane') : t('glider')}
         </span>
         {glider.circling
-          ? <span className="pin-circling">circling</span>
-          : <span className="pin-straight">straight</span>
+          ? <span className="pin-circling">{t('circling')}</span>
+          : <span className="pin-straight">{t('straight')}</span>
         }
       </div>
 

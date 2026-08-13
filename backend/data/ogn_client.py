@@ -13,9 +13,9 @@ import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from config import LAT_MIN, LAT_MAX, LON_MIN, LON_MAX, OGN_FILTER_RADIUS
+from config import DB_PATH as _DB_PATH
 
-# Every parsed beacon is appended here — the seed script reads it for training
-_DB_PATH = Path("data/ogn_history.db")
+# Every parsed beacon is appended to _DB_PATH — the seed script reads it for training
 
 def _init_db() -> None:
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -33,6 +33,14 @@ def _init_db() -> None:
             )
         """)
         con.execute("CREATE INDEX IF NOT EXISTS idx_ts ON beacons(ts)")
+
+        # Migration: rows written before aircraft-type filtering have no ac_type.
+        # They stay NULL, which the training query treats as "unclassifiable" and
+        # skips — those rows may contain jets, helicopters and ground receivers.
+        cols = {r[1] for r in con.execute("PRAGMA table_info(beacons)")}
+        if "ac_type" not in cols:
+            con.execute("ALTER TABLE beacons ADD COLUMN ac_type INTEGER")
+
         # Purge any beacons outside the Europe/GB bounding box left from previous sessions
         con.execute(
             "DELETE FROM beacons WHERE lat < ? OR lat > ? OR lon < ? OR lon > ?",
@@ -42,13 +50,17 @@ def _init_db() -> None:
 def _log_beacon(beacon: dict) -> None:
     try:
         with sqlite3.connect(_DB_PATH) as con:
+            # Named columns, not positional VALUES — the table gained ac_type and
+            # a bare INSERT would silently shift every field on the next change.
             con.execute(
-                "INSERT INTO beacons VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO beacons (ts, id, lat, lon, alt, vario, circling, is_tow, ac_type)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
                 (
                     datetime.now(timezone.utc).isoformat(),
                     beacon["id"], beacon["lat"], beacon["lon"],
                     beacon["alt"], beacon["vario"],
                     int(beacon["circling"]), int(beacon["is_tow"]),
+                    beacon.get("ac_type"),
                 )
             )
     except Exception:
@@ -66,8 +78,18 @@ _lock = threading.Lock()
 # Keyed by glider id; each value is a list of {lat, lon, alt} dicts.
 # This lets the WebSocket send every intermediate position, not just the latest snapshot,
 # which is what makes thermalling spirals visible in the frontend.
+#
+# Only the WebSocket drains this, so with no browser attached every glider would
+# fill to _BBUF_MAX and stay there — hundreds of MB across a Europe-wide feed.
+# When nothing has drained recently we keep only a short tail; a client that
+# connects later backfills its track from SQLite via fetch_glider_track anyway.
+_BBUF_MAX          = 600   # positions per glider while a client is consuming
+_BBUF_IDLE_MAX     = 20    # positions per glider when nothing is consuming
+_BBUF_IDLE_AFTER_S = 30    # no drain within this window => assume no consumer
+
 _beacon_buffers: dict[str, list[dict]] = {}
 _bbuf_lock = threading.Lock()
+_last_drain = 0.0
 
 _active_filter = ""
 _active_socket: socket.socket | None = None
@@ -88,6 +110,44 @@ _VARIO_RE  = re.compile(r'([+-]\d+)fpm')               # vertical speed in ft/mi
 _ROT_RE    = re.compile(r'([+-]\d+(?:\.\d+)?)rot')     # turn rate in half-turns/min
 _COURSE_RE = re.compile(r'[EW][^\s/\\](\d{3})/(\d{3})') # symbol-char + course(deg)/speed(kts)
 _ID_RE     = re.compile(r'\bid([0-9A-Fa-f]{2})[0-9A-Fa-f]{6}')  # OGN aircraft-type byte
+
+# --- Aircraft types (OGN id-byte, bits 5-2) ----------------------------------
+AC_TYPE_NAMES = {
+    0x0: "unknown",       0x1: "glider",          0x2: "tow plane",
+    0x3: "helicopter",    0x4: "skydiver",        0x5: "drop plane",
+    0x6: "hang glider",   0x7: "paraglider",      0x8: "powered aircraft",
+    0x9: "jet aircraft",  0xA: "ufo",             0xB: "balloon",
+    0xC: "airship",       0xD: "uav",             0xE: "reserved",
+    0xF: "static object",
+}
+
+# Types that climb under engine power, or are not aircraft at all.  The OGN feed
+# is ~53% these — a jet in a holding pattern circling with positive vario is a
+# textbook false "confirmed thermal".  Dropped at the parse boundary so they
+# never reach the map, the beacon DB, thermal clustering or the training labels.
+EXCLUDED_AC_TYPES = frozenset({
+    0x2,  # tow plane — climbs under power, exactly the false signal to avoid
+    0x3,  # helicopter
+    0x8,  # powered aircraft
+    0x9,  # jet aircraft
+    0xB,  # balloon
+    0xD,  # uav / drone
+    0xF,  # static object — a ground receiver, not an aircraft
+})
+
+# Aircraft that gain height by soaring.  A circling one is genuine lift evidence,
+# so only these may produce a positive thermal label.  Paragliders and hang
+# gliders count: they are slower than sailplanes and core a thermal tightly.
+SOARING_AC_TYPES = frozenset({
+    0x1,  # glider / motor glider
+    0x6,  # hang glider
+    0x7,  # paraglider
+})
+
+
+def is_soaring(beacon: dict) -> bool:
+    """True when a beacon came from an aircraft that climbs on lift alone."""
+    return beacon.get("ac_type") in SOARING_AC_TYPES
 
 
 def _parse_beacon(line: str) -> dict | None:
@@ -134,11 +194,12 @@ def _parse_beacon(line: str) -> dict | None:
             heading    = raw_course if raw_course > 0 else None
             speed_kmh  = round(int(cm.group(2)) * 1.852)  # knots → km/h
 
-        # aircraft type: bits 5-2 of the OGN id-byte; 2 = tow plane
-        is_tow = False
+        # aircraft type: bits 5-2 of the OGN id-byte
+        ac_type = None
         if im := _ID_RE.search(payload):
-            id_byte = int(im.group(1), 16)
-            is_tow  = ((id_byte >> 2) & 0x0F) == 2
+            ac_type = (int(im.group(1), 16) >> 2) & 0x0F
+            if ac_type in EXCLUDED_AC_TYPES:
+                return None   # powered / non-aircraft — never enters the system
 
         return {
             "id":        callsign,
@@ -149,7 +210,11 @@ def _parse_beacon(line: str) -> dict | None:
             "heading":   heading,
             "speed_kmh": speed_kmh,
             "circling":  abs(turn_rate) > 8,
-            "is_tow":    is_tow,
+            "ac_type":   ac_type,
+            "ac_type_name": AC_TYPE_NAMES.get(ac_type, "unknown"),
+            # Retained for the historical DB column; always False now that tow
+            # planes are rejected above.
+            "is_tow":    False,
         }
     except Exception:
         return None
@@ -191,8 +256,13 @@ def _stream_thread() -> None:
                             with _bbuf_lock:
                                 bbuf = _beacon_buffers.setdefault(beacon["id"], [])
                                 bbuf.append({"lat": beacon["lat"], "lon": beacon["lon"], "alt": beacon["alt"]})
-                                if len(bbuf) > 600:
-                                    _beacon_buffers[beacon["id"]] = bbuf[-600:]
+                                cap = (
+                                    _BBUF_MAX
+                                    if time.monotonic() - _last_drain < _BBUF_IDLE_AFTER_S
+                                    else _BBUF_IDLE_MAX
+                                )
+                                if len(bbuf) > cap:
+                                    _beacon_buffers[beacon["id"]] = bbuf[-cap:]
                             _log_beacon(beacon)
 
         except Exception as exc:
@@ -253,7 +323,9 @@ def drain_beacon_buffers() -> dict[str, list[dict]]:
     position (not just the latest snapshot), which is what produces circular thermalling
     spirals instead of coarse zigzags.
     """
+    global _last_drain
     with _bbuf_lock:
+        _last_drain = time.monotonic()
         out = {k: v[:] for k, v in _beacon_buffers.items() if v}
         for k in out:
             _beacon_buffers[k] = []
@@ -267,4 +339,12 @@ async def fetch_ogn_gliders() -> list[dict]:
         stale = [k for k, v in _live_gliders.items() if now - v["seen_at"] >= _GLIDER_TTL_S]
         for k in stale:
             del _live_gliders[k]
-        return list(_live_gliders.values())
+        snapshot = list(_live_gliders.values())
+
+    # Drop the position buffers too, else the dict keeps a key for every glider
+    # ever seen.  Done outside _lock to keep the two locks unnested.
+    if stale:
+        with _bbuf_lock:
+            for k in stale:
+                _beacon_buffers.pop(k, None)
+    return snapshot

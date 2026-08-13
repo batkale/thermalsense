@@ -1,20 +1,22 @@
 const NOMINATIM = 'https://nominatim.openstreetmap.org/search';
 
-// Europe + Great Britain bounding box for search hints
-const EU_LON_MIN = -15.0;
-const EU_LAT_MAX =  72.0;
-const EU_LON_MAX =  45.0;
-const EU_LAT_MIN =  35.0;
+// Türkiye bounding box — biases results locally; bounded=0 still allows
+// the rest of Europe through, just ranked lower.
+const TR_LON_MIN =  25.6;
+const TR_LAT_MAX =  42.2;
+const TR_LON_MAX =  45.0;
+const TR_LAT_MIN =  35.8;
 
-export async function geocodeQuery(query) {
+export async function geocodeQuery(query, lang = 'tr') {
   if (!query.trim()) return [];
   const params = new URLSearchParams({
     q:            query,
     format:       'json',
     limit:        '6',
-    viewbox:      `${EU_LON_MIN},${EU_LAT_MAX},${EU_LON_MAX},${EU_LAT_MIN}`,
+    viewbox:      `${TR_LON_MIN},${TR_LAT_MAX},${TR_LON_MAX},${TR_LAT_MIN}`,
     bounded:      '0',
     addressdetails: '0',
+    'accept-language': lang,
   });
   const r = await fetch(`${NOMINATIM}?${params}`);
   if (!r.ok) throw new Error(`Nominatim ${r.status}`);

@@ -1,4 +1,4 @@
-import { API_BASE } from '../config.js';
+import { API_BASE, ADMIN_TOKEN } from '../config.js';
 
 export async function fetchPrediction(lat, lon, forecastH = 0) {
   const params = new URLSearchParams({ lat, lon, forecast_h: forecastH });
@@ -22,7 +22,10 @@ export async function fetchGliderTrack(gliderId) {
 }
 
 export async function triggerRetrain() {
-  const res = await fetch(`${API_BASE}/train`, { method: 'POST' });
+  const res = await fetch(`${API_BASE}/train`, {
+    method: 'POST',
+    headers: ADMIN_TOKEN ? { 'X-Admin-Token': ADMIN_TOKEN } : {},
+  });
   if (!res.ok) throw new Error(`Retrain failed: ${res.statusText}`);
   return res.json(); // { status: 'started' | 'already_running' }
 }

@@ -1,0 +1,21 @@
+# SITE_ADDRESS is supplied by docker-compose from .env
+#   a hostname  -> automatic Let's Encrypt TLS
+#   :80         -> plain HTTP (use only before DNS is pointed at the VM)
+{$SITE_ADDRESS} {
+	# reverse_proxy passes Upgrade/Connection headers through unchanged, so the
+	# /ws/live socket works without extra configuration.
+	reverse_proxy app:8000
+
+	encode gzip
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

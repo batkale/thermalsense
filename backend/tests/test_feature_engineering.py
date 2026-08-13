@@ -64,10 +64,37 @@ def test_slope_flat_grid():
 
 
 def test_slope_inclined_grid():
-    # Uniform north-facing slope
+    # High in the north, falling away to the south — a south-facing slope
     rows = np.tile(np.arange(5, dtype=float) * 100, (5, 1)).T
     slope, _ = _slope_aspect(rows)
     assert np.all(slope > 0)
+
+
+@pytest.mark.parametrize("build, expected_aspect", [
+    (lambda r, c: r,   180.0),   # high north  → faces south
+    (lambda r, c: -r,    0.0),   # high south  → faces north
+    (lambda r, c: -c,   90.0),   # high west   → faces east
+    (lambda r, c: c,   270.0),   # high east   → faces west
+])
+def test_aspect_points_downhill(build, expected_aspect):
+    """
+    Aspect must be the compass bearing the slope faces (row=north, col=east).
+    Negating only the east gradient mirrors north and south, which makes the
+    terrain multiplier boost shaded slopes instead of sun-facing ones.
+    """
+    n = 5
+    r, c = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+    _, aspect = _slope_aspect(build(r.astype(float), c.astype(float)))
+    centre = aspect[n // 2, n // 2]                       # clear of edge effects
+    assert abs((centre - expected_aspect + 180) % 360 - 180) < 1.0
+
+
+def test_east_west_spacing_scales_with_latitude():
+    """A longitude degree shrinks as cos(lat), so an east-west slope steepens with latitude."""
+    grid = np.tile(np.arange(5, dtype=float) * 100, (5, 1))   # varies along columns (east)
+    slope_equator, _ = _slope_aspect(grid, lat_deg=0.0)
+    slope_high, _    = _slope_aspect(grid, lat_deg=60.0)
+    assert np.all(slope_high > slope_equator)
 
 
 def test_cyclic_time_columns_in_range():

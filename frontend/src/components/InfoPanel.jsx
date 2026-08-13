@@ -1,3 +1,5 @@
+import { useLang } from '../i18n/LanguageContext.jsx';
+
 export default function InfoPanel({
   thermalBase, cape, heatmapMax,
   gliders, totalGliders,
@@ -5,6 +7,8 @@ export default function InfoPanel({
   showOgnHeatmap, onOgnHeatmapToggle,
   onRetrain,
 }) {
+  const { t, locale } = useLang();
+
   const circling = gliders.filter(g => g.circling).length;
   const tow      = gliders.filter(g => g.is_tow).length;
   const filtered = showAirborneOnly && totalGliders !== gliders.length;
@@ -13,6 +17,10 @@ export default function InfoPanel({
     ? Math.round(heatmapMax * 100)
     : null;
 
+  const gliderLabel = filtered
+    ? t('gliderCount', { n: `${gliders.length} / ${totalGliders}` })
+    : t('gliderCount', { n: gliders.length });
+
   return (
     <div className="panel">
 
@@ -20,7 +28,7 @@ export default function InfoPanel({
       {heatmapMax != null && (
         <div className="metrics">
           <div className="metric">
-            <span className="metric-label">Thermal peak</span>
+            <span className="metric-label">{t('thermalPeak')}</span>
             <span className="metric-value"
               style={{ color: heatmapPct > 60 ? '#FC8181' : heatmapPct > 30 ? '#F6AD55' : '#9ae6b4' }}>
               {heatmapPct}%
@@ -28,8 +36,8 @@ export default function InfoPanel({
           </div>
           {thermalBase != null && (
             <div className="metric">
-              <span className="metric-label">Thermal base</span>
-              <span className="metric-value">{thermalBase.toLocaleString()} m</span>
+              <span className="metric-label">{t('thermalBase')}</span>
+              <span className="metric-value">{thermalBase.toLocaleString(locale)} m</span>
             </div>
           )}
           {cape != null && (
@@ -43,17 +51,15 @@ export default function InfoPanel({
 
       {/* Glider counts */}
       <div className="glider-row">
-        <span>
-          ✈{' '}
-          {filtered ? `${gliders.length} / ${totalGliders}` : gliders.length}
-          {' '}gliders
-        </span>
-        {circling > 0 && <span className="circling">↻ {circling} circling</span>}
+        <span>✈ {gliderLabel}</span>
+        {circling > 0 && (
+          <span className="circling">↻ {t('circlingCount', { n: circling })}</span>
+        )}
       </div>
 
       {tow > 0 && (
         <div className="glider-row">
-          <span style={{ color: '#FFFFFF' }}>⊕ {tow} tow plane{tow > 1 ? 's' : ''}</span>
+          <span style={{ color: '#FFFFFF' }}>⊕ {t('towPlaneCount', { n: tow })}</span>
         </div>
       )}
 
@@ -63,7 +69,7 @@ export default function InfoPanel({
           checked={showAirborneOnly}
           onChange={e => onAirborneToggle(e.target.checked)}
         />
-        Airborne only <span className="toggle-hint">(AGL &gt; 10 m)</span>
+        {t('airborneOnly')} <span className="toggle-hint">{t('airborneHint')}</span>
       </label>
 
       <label className="toggle-row">
@@ -72,13 +78,16 @@ export default function InfoPanel({
           checked={showOgnHeatmap}
           onChange={e => onOgnHeatmapToggle(e.target.checked)}
         />
-        Live activity layer <span className="toggle-hint">(OGN density)</span>
+        {t('liveActivityLayer')} <span className="toggle-hint">{t('ognDensityHint')}</span>
       </label>
 
-      <button className="btn-secondary" onClick={onRetrain}
-        title="Trigger model retraining on latest OGN data">
-        Retrain model
-      </button>
+      {/* Hidden in production unless an admin token is configured — the endpoint
+          rejects unauthenticated calls, so an always-visible button would just fail. */}
+      {onRetrain && (
+        <button className="btn-secondary" onClick={onRetrain} title={t('retrainTitle')}>
+          {t('retrainModel')}
+        </button>
+      )}
 
     </div>
   );

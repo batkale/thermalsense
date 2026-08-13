@@ -34,9 +34,17 @@ Thumbs.db
 # Data / DB
 backend/data/*.db
 backend/data/*.sqlite
+backend/data/*.db-journal
+
+# Model/buffer snapshots taken before a rebuild
+*.bak-*
+*.contaminated
 
 # Secrets
 .env
 .env.*
+# ...but the templates must be committed — they hold no secrets
+!.env.example
+!**/.env.example
 *.key
 *.pem

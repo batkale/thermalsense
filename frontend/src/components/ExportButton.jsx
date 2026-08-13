@@ -1,4 +1,5 @@
 import { GRID_RES } from '../config.js';
+import { useLang } from '../i18n/LanguageContext.jsx';
 
 /**
  * Converts the current heatmap into a GeoJSON FeatureCollection
@@ -6,6 +7,7 @@ import { GRID_RES } from '../config.js';
  * Compatible with XCSoar / SkyDemon custom overlay import.
  */
 export default function ExportButton({ heatmap, gridMeta, thermalBase, cape }) {
+  const { t } = useLang();
   const disabled = !heatmap || !gridMeta;
 
   function handleExport() {
@@ -50,7 +52,7 @@ export default function ExportButton({ heatmap, gridMeta, thermalBase, cape }) {
 
   return (
     <button className="btn-primary" onClick={handleExport} disabled={disabled}>
-      ↓ Export GeoJSON
+      ↓ {t('exportGeoJSON')}
     </button>
   );
 }

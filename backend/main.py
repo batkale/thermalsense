@@ -1,16 +1,31 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
+import secrets
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import asyncio, json, logging
 import numpy as np
 from datetime import datetime, timezone, timedelta
-from data.ogn_client      import fetch_ogn_gliders, start_ogn_stream, fetch_glider_track, drain_beacon_buffers
+from data.ogn_client      import fetch_ogn_gliders, start_ogn_stream, fetch_glider_track, drain_beacon_buffers, is_soaring
+from data import meteo_client, terrain_client
 from data.meteo_client    import fetch_meteo_features
 from data.terrain_client  import fetch_elevation_grid, fetch_elevation_point, fetch_elevation_batch
 from pipeline.feature_engineering import build_feature_matrix
 from models.thermal_model import ThermalModel
-from config import UPDATE_INTERVAL, GRID_RES
+from config import UPDATE_INTERVAL, GRID_RES, GRID_RADIUS, CORS_ORIGINS, ADMIN_TOKEN, STATIC_DIR
+
+# Without this the app's own loggers inherit root's WARNING level, so every
+# progress line from the long-running seed/retrain jobs is silently dropped and
+# a multi-minute rebuild looks indistinguishable from a hang.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+
+SEED_TIMEOUT = 4 * 3600   # seconds; see _seed_job for why this is generous
 
 log = logging.getLogger(__name__)
 model = ThermalModel()
@@ -19,18 +34,23 @@ _training_lock = asyncio.Lock()
 
 async def _retrain_job():
     """Scheduled job: fetch fresh OGN data and retrain the model."""
-    if _training_lock.locked():
+    # locked() is only a hint — acquire without blocking so a seed holding the
+    # lock for hours makes this skip the cycle rather than queue up behind it.
+    try:
+        await asyncio.wait_for(_training_lock.acquire(), timeout=0.1)
+    except asyncio.TimeoutError:
         log.info("[train] already running, skipping")
         return
-    async with _training_lock:
+    try:
         log.info("[train] starting scheduled retrain")
-        try:
-            # Hard cap: must finish before the next scheduled fire
-            await asyncio.wait_for(model.retrain(), timeout=UPDATE_INTERVAL - 30)
-        except asyncio.TimeoutError:
-            log.warning("[train] retrain timed out — will retry next cycle")
-        except Exception as e:
-            log.error(f"[train] failed: {e}")
+        # Hard cap: must finish before the next scheduled fire
+        await asyncio.wait_for(model.retrain(), timeout=UPDATE_INTERVAL - 30)
+    except asyncio.TimeoutError:
+        log.warning("[train] retrain timed out — will retry next cycle")
+    except Exception as e:
+        log.error(f"[train] failed: {e}")
+    finally:
+        _training_lock.release()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -44,14 +64,34 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     yield
     scheduler.shutdown(wait=False)
+    await meteo_client.aclose()
+    await terrain_client.aclose()
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _require_admin(x_admin_token: str | None = Header(default=None)) -> None:
+    """Guard the endpoints that kick off expensive background work.
+
+    No-op when ADMIN_TOKEN is unset (local dev). Uses a constant-time compare so
+    the token can't be recovered by timing the responses.
+    """
+    if not ADMIN_TOKEN:
+        return
+    if not x_admin_token or not secrets.compare_digest(x_admin_token, ADMIN_TOKEN):
+        raise HTTPException(status_code=401, detail="invalid or missing X-Admin-Token")
+
+
+@app.get("/healthz")
+async def healthz():
+    """Liveness probe for the host's health checks."""
+    return {"status": "ok", "model_loaded": model.is_loaded}
 
 def _apply_ogn_fusion(
     heatmap: list[float],
@@ -60,7 +100,12 @@ def _apply_ogn_fusion(
     rows: int, cols: int,
 ) -> list[float]:
     """Blend live confirmed thermals (circling + vario > 1 m/s) into the ML heatmap."""
-    circling = [g for g in gliders if g.get("circling") and g.get("vario", 0) > 1.0]
+    # Soaring aircraft only: anything with an engine can circle and climb without
+    # a thermal underneath it, which would paint lift onto the map that isn't there.
+    circling = [
+        g for g in gliders
+        if is_soaring(g) and g.get("circling") and g.get("vario", 0) > 1.0
+    ]
     if not circling:
         return heatmap
     arr    = np.array(heatmap, dtype=float).reshape(rows, cols)
@@ -88,7 +133,7 @@ async def predict(lat: float, lon: float, alt: int = 500, forecast_h: int = 0):
             fetch_meteo_features(lat, lon, forecast_h),
             fetch_elevation_grid(lat, lon),
         )
-        radius   = 0.05  # matches fetch_elevation_grid default
+        radius   = GRID_RADIUS  # matches fetch_elevation_grid default
         features = build_feature_matrix(
             meteo, terrain,
             dt=datetime.now(timezone.utc) + timedelta(hours=forecast_h),
@@ -130,7 +175,10 @@ async def _add_agl(gliders: list[dict]) -> list[dict]:
         return gliders
     pairs = [(g["lat"], g["lon"]) for g in gliders]
     try:
-        elevs = await asyncio.wait_for(fetch_elevation_batch(pairs), timeout=4.0)
+        # Two chunked requests + the 1 s rate-limit gap between them need ~5 s
+        # on a cold cache; warm calls return immediately.  Work completed before
+        # a timeout still lands in the elevation cache for the next call.
+        elevs = await asyncio.wait_for(fetch_elevation_batch(pairs), timeout=8.0)
     except asyncio.TimeoutError:
         elevs = {}
     for g, pair in zip(gliders, pairs):
@@ -141,7 +189,11 @@ async def _add_agl(gliders: list[dict]) -> list[dict]:
 
 def _cluster_circling(gliders: list[dict], radius: float = 0.012) -> list[dict]:
     """Greedy proximity clustering of circling gliders (~1.3 km radius at UK latitudes)."""
-    candidates = [g for g in gliders if g.get("circling") and g.get("vario", 0) > 0.5]
+    # Only soaring aircraft confirm a thermal — see _apply_ogn_fusion.
+    candidates = [
+        g for g in gliders
+        if is_soaring(g) and g.get("circling") and g.get("vario", 0) > 0.5
+    ]
     unclustered = list(candidates)
     clusters = []
     while unclustered:
@@ -188,9 +240,9 @@ async def glider_track(glider_id: str):
 @app.get("/ogn/live")
 async def ogn_live():
     gliders = await _add_agl(await fetch_ogn_gliders())
-    return {"gliders": gliders}
+    return {"gliders": _to_wire(gliders)}
 
-@app.post("/train")
+@app.post("/train", dependencies=[Depends(_require_admin)])
 async def trigger_train(background_tasks: BackgroundTasks):
     """Manually trigger model retraining in the background."""
     if _training_lock.locked():
@@ -199,25 +251,47 @@ async def trigger_train(background_tasks: BackgroundTasks):
     return {"status": "started"}
 
 
-async def _seed_job(days_back: int, limit: int) -> None:
+async def _seed_job(days_back: int, limit: int, reset: bool = False) -> None:
     async with _training_lock:
-        log.info(f"[seed] starting — days_back={days_back}, limit={limit}")
+        log.info(f"[seed] starting — days_back={days_back}, limit={limit}, reset={reset}")
         try:
-            await asyncio.wait_for(
-                model.seed_from_history(days_back=days_back, limit=limit),
-                timeout=3600,
+            # Terrain is the bottleneck: ~1 unique 0.1-degree cell per beacon at the
+            # SRTM API's 1 req/s cap, so a few thousand beacons runs well past an
+            # hour.  On timeout the whole run is discarded unsaved, so keep this
+            # generous — it is a background job with a lock, not a request.
+            result = await asyncio.wait_for(
+                model.seed_from_history(days_back=days_back, limit=limit, reset=reset),
+                timeout=SEED_TIMEOUT,
             )
         except asyncio.TimeoutError:
-            log.warning("[seed] timed out after 1 hour")
+            log.warning(f"[seed] timed out after {SEED_TIMEOUT}s — nothing saved")
+            return
         except Exception as exc:
             log.error(f"[seed] failed: {exc}")
+            return
+
+        # seed_from_history swallows per-beacon errors, so a run can "succeed"
+        # having added nothing at all.  Surface that instead of fitting on nothing.
+        if not result or result.get("added", 0) == 0:
+            log.error(f"[seed] added no samples — not fitting. result={result}")
+            return
+        log.info(f"[seed] {result}")
+
+        # Seeding only fills the buffer; fit it so /seed leaves a usable model.
+        # Call retrain() directly — _retrain_job would deadlock on the lock held here.
+        try:
+            log.info("[seed] buffer filled — fitting model")
+            await model.retrain()
+        except Exception as exc:
+            log.error(f"[seed] post-seed retrain failed: {exc}")
 
 
-@app.post("/seed")
+@app.post("/seed", dependencies=[Depends(_require_admin)])
 async def seed_from_history(
     background_tasks: BackgroundTasks,
     days_back: int = 3,
     limit: int = 5000,
+    reset: bool = False,
 ):
     """
     Backfill the training buffer from historical beacon DB records.
@@ -229,11 +303,50 @@ async def seed_from_history(
 
     - days_back: how many days of history to scan (default 3)
     - limit: max beacon rows to process (default 5000; sampled uniformly across the window)
+    - reset: discard the existing buffer first so the rebuild replaces it rather
+      than appending (use after a feature-pipeline correction)
     """
     if _training_lock.locked():
         return {"status": "already_running"}
-    background_tasks.add_task(_seed_job, days_back, limit)
-    return {"status": "started", "days_back": days_back, "limit": limit}
+    background_tasks.add_task(_seed_job, days_back, limit, reset)
+    return {"status": "started", "days_back": days_back, "limit": limit, "reset": reset}
+
+# Fields the frontend actually reads. `seen_at` is deliberately excluded: it is
+# internal TTL bookkeeping, was being sent 43,200x/day per viewer, and leaked
+# server state. Coordinates are rounded to 5 dp (~1 m) — far beyond what a
+# 50 m grid or a map pixel can resolve, and it compresses much better.
+# ac_type/ac_type_name let the client distinguish a sailplane from a paraglider
+# and from traffic we could not classify, instead of labelling everything "glider".
+_WIRE_FIELDS = ("id", "lat", "lon", "alt", "vario", "heading",
+                "speed_kmh", "circling", "is_tow", "agl",
+                "ac_type", "ac_type_name")
+_COORD_DP = 5
+
+
+def _to_wire(gliders: list[dict]) -> list[dict]:
+    """Trim gliders to the fields the client uses, at sane precision."""
+    out = []
+    for g in gliders:
+        w = {k: g[k] for k in _WIRE_FIELDS if k in g}
+        if "lat" in w:
+            w["lat"] = round(w["lat"], _COORD_DP)
+        if "lon" in w:
+            w["lon"] = round(w["lon"], _COORD_DP)
+        out.append(w)
+    return out
+
+
+def _positions_to_wire(new_pos: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    return {
+        gid: [
+            {"lat": round(p["lat"], _COORD_DP),
+             "lon": round(p["lon"], _COORD_DP),
+             "alt": p["alt"]}
+            for p in positions
+        ]
+        for gid, positions in new_pos.items()
+    }
+
 
 @app.websocket("/ws/live")
 async def websocket_live(ws: WebSocket):
@@ -247,7 +360,42 @@ async def websocket_live(ws: WebSocket):
                 log.warning(f"[ws] glider fetch failed: {e}")
                 gliders = []
                 new_pos = {}
-            await ws.send_text(json.dumps({"gliders": gliders, "new_positions": new_pos}))
+            await ws.send_text(json.dumps({
+                "gliders":       _to_wire(gliders),
+                "new_positions": _positions_to_wire(new_pos),
+            }))
             await asyncio.sleep(2)
     except (WebSocketDisconnect, RuntimeError):
         pass  # client navigated away — normal teardown
+
+
+# --- Static frontend ----------------------------------------------------------
+# Registered last on purpose: a mount at "/" swallows every path, so all API
+# routes above must already be registered to keep matching first.
+if STATIC_DIR.is_dir() and (STATIC_DIR / "index.html").exists():
+    _index = STATIC_DIR / "index.html"
+
+    # Hashed Vite bundles are immutable — let the browser cache them hard.
+    # Guarded: StaticFiles raises at import time if the directory is missing, which
+    # would take down the API too rather than degrading to the SPA fallback.
+    if (STATIC_DIR / "assets").is_dir():
+        app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
+    else:
+        log.warning(f"[static] no assets/ under {STATIC_DIR} — serving via SPA fallback only")
+
+    @app.get("/", include_in_schema=False)
+    async def _spa_root():
+        return FileResponse(_index)
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def _spa_fallback(full_path: str):
+        """Serve real files when they exist, else fall back to index.html."""
+        candidate = (STATIC_DIR / full_path).resolve()
+        # Guard against ../ traversal escaping the static root
+        if candidate.is_file() and candidate.is_relative_to(STATIC_DIR.resolve()):
+            return FileResponse(candidate)
+        return FileResponse(_index)
+
+    log.info(f"[static] serving frontend from {STATIC_DIR}")
+else:
+    log.info(f"[static] no frontend build at {STATIC_DIR} — API only")

@@ -1,9 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { geocodeQuery } from '../services/search.js';
+import { useLang } from '../i18n/LanguageContext.jsx';
 
-const TAG = { glider: 'glider', airport: 'airport', place: 'place' };
+const TAG_KEY = { glider: 'tagGlider', airport: 'tagAirport', place: 'tagPlace' };
 
 export default function SearchBar({ gliders, onSelect }) {
+  const { t, lang } = useLang();
   const [query,   setQuery]   = useState('');
   const [results, setResults] = useState([]);
   const [open,    setOpen]    = useState(false);
@@ -21,7 +23,10 @@ export default function SearchBar({ gliders, onSelect }) {
       .map(g => ({
         type:     'glider',
         label:    g.id,
-        sublabel: `alt ${g.alt} m  ·  ${g.vario >= 0 ? '+' : ''}${g.vario} m/s`,
+        sublabel: t('searchAltVario', {
+          alt:   g.alt,
+          vario: `${g.vario >= 0 ? '+' : ''}${g.vario}`,
+        }),
         lat:  g.lat,
         lon:  g.lon,
         zoom: 13,
@@ -31,10 +36,10 @@ export default function SearchBar({ gliders, onSelect }) {
     setOpen(true);
 
     try {
-      const places = await geocodeQuery(q);
+      const places = await geocodeQuery(q, lang);
       setResults([...gliderHits, ...places]);
     } catch { /* network offline — glider results only */ }
-  }, [gliders]);
+  }, [gliders, t, lang]);
 
   useEffect(() => {
     clearTimeout(timerRef.current);
@@ -70,7 +75,7 @@ export default function SearchBar({ gliders, onSelect }) {
         <input
           ref={inputRef}
           className="search-input"
-          placeholder="Search gliders, airports, places..."
+          placeholder={t('searchPlaceholder')}
           value={query}
           onChange={e => { setQuery(e.target.value); setOpen(true); setActive(-1); }}
           onFocus={() => query.trim() && setOpen(true)}
@@ -80,7 +85,7 @@ export default function SearchBar({ gliders, onSelect }) {
           spellCheck={false}
         />
         {query && (
-          <button className="search-clear" onClick={clear} tabIndex={-1}>
+          <button className="search-clear" onClick={clear} tabIndex={-1} title={t('clearSearch')}>
             &times;
           </button>
         )}
@@ -95,7 +100,7 @@ export default function SearchBar({ gliders, onSelect }) {
               onMouseDown={() => commit(r)}
               onMouseEnter={() => setActive(i)}
             >
-              <span className={`search-tag tag-${r.type}`}>{TAG[r.type]}</span>
+              <span className={`search-tag tag-${r.type}`}>{t(TAG_KEY[r.type])}</span>
               <div className="search-text">
                 <span className="search-label">{r.label}</span>
                 {r.sublabel && <span className="search-sub">{r.sublabel}</span>}

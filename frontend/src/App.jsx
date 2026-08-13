@@ -7,10 +7,18 @@ import SearchBar         from './components/SearchBar.jsx';
 import PinnedGliderCard  from './components/PinnedGliderCard.jsx';
 import { useBackend }    from './hooks/useBackend.js';
 import { triggerRetrain } from './services/api.js';
+import { useLang }        from './i18n/LanguageContext.jsx';
+import { ADMIN_TOKEN }    from './config.js';
+
+// Retrain is an operator action: always available in dev, in production only
+// when an admin token is configured for the bundle.
+const CAN_RETRAIN = import.meta.env.DEV || Boolean(ADMIN_TOKEN);
 
 export default function App() {
+  const { t } = useLang();
   const [forecastH, setForecastH] = useState(0);
-  const [retrainMsg, setRetrainMsg] = useState('');
+  // Stored as a translation key so the banner follows a language switch
+  const [retrainMsgKey, setRetrainMsgKey] = useState('');
   const [showAirborneOnly, setShowAirborneOnly] = useState(false);
   const [showOgnHeatmap,   setShowOgnHeatmap]   = useState(true);
   const [flyTarget, setFlyTarget] = useState(null);
@@ -31,14 +39,14 @@ export default function App() {
 
 
   const handleRetrain = useCallback(async () => {
-    setRetrainMsg('');
+    setRetrainMsgKey('');
     try {
       const { status } = await triggerRetrain();
-      setRetrainMsg(status === 'already_running' ? 'Already retraining…' : 'Retraining started');
+      setRetrainMsgKey(status === 'already_running' ? 'retrainAlready' : 'retrainStarted');
     } catch {
-      setRetrainMsg('Retrain request failed');
+      setRetrainMsgKey('retrainFailed');
     }
-    setTimeout(() => setRetrainMsg(''), 4000);
+    setTimeout(() => setRetrainMsgKey(''), 4000);
   }, []);
 
   const visibleGliders = showAirborneOnly
@@ -98,12 +106,12 @@ export default function App() {
             onAirborneToggle={setShowAirborneOnly}
             showOgnHeatmap={showOgnHeatmap}
             onOgnHeatmapToggle={setShowOgnHeatmap}
-            onRetrain={handleRetrain}
+            onRetrain={CAN_RETRAIN ? handleRetrain : null}
           />
 
           <PinnedGliderCard glider={pinnedGlider} onUnpin={() => { setPinnedId(null); lastPinnedRef.current = null; }} />
 
-          {retrainMsg && <div className="status retrain">{retrainMsg}</div>}
+          {retrainMsgKey && <div className="status retrain">{t(retrainMsgKey)}</div>}
 
           <ExportButton
             heatmap={heatmap}
@@ -112,21 +120,21 @@ export default function App() {
             cape={weather?.cape}
           />
 
-          {loading && <div className="status loading">Fetching prediction…</div>}
+          {loading && <div className="status loading">{t('fetchingPrediction')}</div>}
           {error   && <div className="status error">⚠ {error}</div>}
-          {!loading && !error && !heatmap && <div className="status hint">Click the map to predict thermals</div>}
+          {!loading && !error && !heatmap && <div className="status hint">{t('clickMapToPredict')}</div>}
 
           <div className="legend">
-            <div className="legend-title">Thermal probability</div>
+            <div className="legend-title">{t('legendTitle')}</div>
             <div className="legend-bar" />
             <div className="legend-labels">
-              <span>Low</span><span>High</span>
+              <span>{t('low')}</span><span>{t('high')}</span>
             </div>
             <div className="legend-glyphs">
-              <span><span className="dot yellow"  /> circling</span>
-              <span><span className="dot blue"    /> glider</span>
-              <span><span className="dot orange"  /> tow plane</span>
-              <span><span className="dot thermal" /> active thermal</span>
+              <span><span className="dot yellow"  /> {t('circling')}</span>
+              <span><span className="dot blue"    /> {t('glider')}</span>
+              <span><span className="dot orange"  /> {t('towPlane')}</span>
+              <span><span className="dot thermal" /> {t('activeThermal')}</span>
             </div>
           </div>
         </aside>

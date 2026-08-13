@@ -1,0 +1,31 @@
+.git
+.gitignore
+.claude
+notebooks
+
+# Node — reinstalled inside the build stage
+**/node_modules
+frontend/dist
+frontend/.vite
+
+# Python
+**/__pycache__
+**/*.py[cod]
+.venv
+venv
+**/.pytest_cache
+
+# Local state — the container uses the /data volume instead
+backend/data/*.db
+backend/data/*.sqlite
+backend/models/*.json
+backend/models/*.npz
+
+# Secrets
+.env
+.env.*
+*.key
+*.pem
+
+# Docs
+*.md
