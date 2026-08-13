@@ -4,7 +4,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import pytest
 from datetime import datetime, timezone
-from pipeline.feature_engineering import build_feature_matrix, _slope_aspect, _wind_components
+from pipeline.feature_engineering import (
+    build_feature_matrix, _slope_aspect, _wind_components, FEATURE_COUNT,
+)
 
 METEO = {
     "temp_2m": 22.0,
@@ -25,12 +27,12 @@ DT   = datetime(2025, 6, 21, 12, 0, tzinfo=timezone.utc)
 
 def test_output_shape():
     mat = build_feature_matrix(METEO, ELEV, dt=DT)
-    assert mat.shape == (9, 21), f"Expected (9, 21), got {mat.shape}"
+    assert mat.shape == (9, FEATURE_COUNT), f"Expected (9, {FEATURE_COUNT}), got {mat.shape}"
 
 
 def test_column_count():
     mat = build_feature_matrix(METEO, ELEV, dt=DT)
-    assert mat.shape[1] == 21
+    assert mat.shape[1] == FEATURE_COUNT
 
 
 def test_cape_column_constant():

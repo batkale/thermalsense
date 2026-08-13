@@ -1,10 +1,31 @@
 import asyncio
 import logging
+import time
 import xgboost as xgb
 import numpy as np
 from datetime import datetime, timezone
 from pathlib import Path
 from config import MODEL_PATH, BUFFER_PATH, GRID_RADIUS, LAT_MIN, LAT_MAX, LON_MIN, LON_MAX
+from pipeline.feature_engineering import FEATURE_COUNT
+
+
+def _set_aside(path: Path, suffix: str) -> Path | None:
+    """
+    Move a buffer we can't use out of the way, keeping the data.
+
+    Returns the new path, or None if it could not be moved — in which case the
+    caller carries on with an empty buffer rather than failing startup over a
+    file it was only trying to tidy up.
+    """
+    dest = path.with_name(path.name + suffix)
+    try:
+        if dest.exists():
+            dest = path.with_name(f"{path.name}{suffix}.{int(time.time())}")
+        path.replace(dest)
+        return dest
+    except OSError as exc:
+        log.warning(f"[model] could not set aside {path.name} ({exc}) — leaving it in place")
+        return None
 
 
 def _above_thermal_base(alt_amsl: float, ground_elev: float, thermal_base_agl: float) -> bool:
@@ -45,10 +66,10 @@ def _centre_index(shape: tuple[int, int]) -> int:
 log = logging.getLogger(__name__)
 
 # One buffer sample = one glider observation captured during a retrain cycle.
-# It is a 21-element feature vector (lat, lon, elevation, slope, aspect,
+# It is a FEATURE_COUNT-element feature vector (lat, lon, elevation, slope, aspect,
 # temp, humidity, wind_u, wind_v, cape, cin, solar_ghi, lapse_rate,
 # land_use_heat, land_use_albedo, hour_sin, hour_cos, doy_sin, doy_cos,
-# pbl_height, soil_temp)
+# pbl_height, soil_temp, alt_agl)
 # taken from the grid cell directly under the glider at the moment it was seen,
 # paired with a binary label: 1 = glider was circling AND climbing > 1.5 m/s
 # (confirmed thermal), 0 = glider was present but not thermalling.
@@ -96,39 +117,84 @@ class ThermalModel:
     async def load(self) -> None:
         p = Path(MODEL_PATH)
         if p.exists():
-            self.model = xgb.XGBClassifier()
-            self.model.load_model(str(p))
-            log.info(f"[model] loaded from {MODEL_PATH}")
+            candidate = xgb.XGBClassifier()
+            candidate.load_model(str(p))
+            width = getattr(candidate, "n_features_in_", None)
+            if width is not None and width != FEATURE_COUNT:
+                # Serving with a stale model is worse than not serving with one:
+                # predict_proba raises a shape mismatch deep inside /predict,
+                # which reaches the client as a bare 500 and an empty map. The
+                # file is left on disk — retraining overwrites it in place.
+                log.warning(
+                    f"[model] trained on {width} features, expected {FEATURE_COUNT} — "
+                    f"ignoring it and using physics fallback; POST /train to rebuild"
+                )
+            else:
+                self.model = candidate
+                log.info(f"[model] loaded from {MODEL_PATH}")
         else:
             log.info("[model] no trained model found — using physics fallback")
 
         bp = Path(BUFFER_PATH)
-        if bp.exists():
-            try:
-                data = np.load(str(bp), allow_pickle=False)
-                if data["X"].shape[1] != 21:
-                    log.warning("[model] buffer feature count mismatch — discarding stale buffer")
-                    bp.unlink(missing_ok=True)
-                else:
+        if not bp.exists():
+            return
+
+        # np.load returns a lazily-read NpzFile that holds the file open, and
+        # Windows refuses to rename or delete an open file.  Read everything
+        # inside the context manager and only touch the file after it closes.
+        X = y = None
+        width = None
+        try:
+            with np.load(str(bp), allow_pickle=False) as data:
+                width = data["X"].shape[1]
+                if width == FEATURE_COUNT:
                     X = data["X"]
                     y = data["y"].astype(int)
-                    keep = _plausible_coords(X)
-                    dropped = int((~keep).sum())
-                    if dropped:
-                        # Samples written before the lat_bounds fix carry grid indices
-                        # (lat=100, lon=0) instead of degrees.  They describe a
-                        # different feature space than anything we serve, so drop them.
-                        log.warning(
-                            f"[model] dropping {dropped} buffer samples with "
-                            f"non-geographic lat/lon — pre-fix online-retrain rows"
-                        )
-                        X, y = X[keep], y[keep]
-                    self._buffer_X = list(X)
-                    self._buffer_y = list(y)
-                    log.info(f"[model] buffer restored: {len(self._buffer_X)} samples from disk")
-            except Exception as exc:
-                log.warning(f"[model] buffer unreadable ({exc}) — discarding")
-                bp.unlink(missing_ok=True)
+        except Exception as exc:
+            log.warning(f"[model] buffer unreadable ({exc}) — setting it aside")
+            _set_aside(bp, ".unreadable")
+            return
+
+        if width != FEATURE_COUNT:
+            # Set aside, not deleted: the samples are still real observations and
+            # are expensive to re-collect, even though the feature layout has moved
+            # on and they can no longer be mixed with new ones.
+            dest = _set_aside(bp, f".v{width}")
+            log.warning(
+                f"[model] buffer has {width} features, expected {FEATURE_COUNT} — "
+                f"set aside as {dest.name if dest else 'n/a'}; starting a fresh buffer"
+            )
+            return
+
+        keep = _plausible_coords(X)
+        dropped = int((~keep).sum())
+        if dropped:
+            # Samples written before the lat_bounds fix carry grid indices
+            # (lat=100, lon=0) instead of degrees.  They describe a different
+            # feature space than anything we serve, so drop them.
+            log.warning(
+                f"[model] dropping {dropped} buffer samples with "
+                f"non-geographic lat/lon — pre-fix online-retrain rows"
+            )
+            X, y = X[keep], y[keep]
+        self._buffer_X = list(X)
+        self._buffer_y = list(y)
+        log.info(f"[model] buffer restored: {len(self._buffer_X)} samples from disk")
+
+    def _save_buffer(self) -> None:
+        """Write the sample buffer to disk. Never raises — a failed save must not
+        abort a retrain that has already done the expensive collection work."""
+        if not self._buffer_X:
+            return
+        try:
+            Path(BUFFER_PATH).parent.mkdir(parents=True, exist_ok=True)
+            np.savez(
+                BUFFER_PATH,
+                X=np.array(self._buffer_X),
+                y=np.array(self._buffer_y),
+            )
+        except Exception as exc:
+            log.warning(f"[model] could not save buffer ({exc})")
 
     async def retrain(self) -> None:
         """
@@ -173,6 +239,7 @@ class ThermalModel:
                     meteo, elev, dt=now,
                     lat_bounds=(g["lat"] - GRID_RADIUS, g["lat"] + GRID_RADIUS),
                     lon_bounds=(g["lon"] - GRID_RADIUS, g["lon"] + GRID_RADIUS),
+                    alt_amsl=g["alt"],
                 )
                 center = _centre_index(elev.shape)
                 if _above_thermal_base(g["alt"], feat[center, 2], meteo["cape_base"]):
@@ -195,6 +262,11 @@ class ThermalModel:
         if len(self._buffer_X) > _MAX_BUFFER:
             self._buffer_X = self._buffer_X[-_MAX_BUFFER:]
             self._buffer_y = self._buffer_y[-_MAX_BUFFER:]
+
+        # Persist before the fit-threshold check.  Collecting a sample costs two
+        # rate-limited API calls, so losing a partial buffer to a restart throws
+        # away real work; durability must not depend on reaching the fit threshold.
+        self._save_buffer()
 
         n = len(self._buffer_X)
         if n < _MIN_SAMPLES:
@@ -250,7 +322,7 @@ class ThermalModel:
         clf.save_model(MODEL_PATH)
         self.model = clf
 
-        np.savez(BUFFER_PATH, X=X, y=np.array(self._buffer_y))
+        self._save_buffer()
 
     async def seed_from_history(
         self,
@@ -383,6 +455,7 @@ class ThermalModel:
                         meteo, elev, dt=dt,
                         lat_bounds=(lat - GRID_RADIUS, lat + GRID_RADIUS),
                         lon_bounds=(lon - GRID_RADIUS, lon + GRID_RADIUS),
+                        alt_amsl=alt,
                     )
                     center = _centre_index(elev.shape)
                     if _above_thermal_base(alt, feat[center, 2], meteo["cape_base"]):
@@ -405,8 +478,7 @@ class ThermalModel:
             self._buffer_y = self._buffer_y[-_MAX_BUFFER:]
 
         if added > 0:
-            Path(BUFFER_PATH).parent.mkdir(parents=True, exist_ok=True)
-            np.savez(BUFFER_PATH, X=np.array(self._buffer_X), y=np.array(self._buffer_y))
+            self._save_buffer()
 
         result = {
             "rows_scanned":     len(rows),

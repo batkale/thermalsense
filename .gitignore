@@ -39,6 +39,9 @@ backend/data/*.db-journal
 # Model/buffer snapshots taken before a rebuild
 *.bak-*
 *.contaminated
+# Buffers set aside by load() when the feature width changed
+*.npz.v*
+*.npz.unreadable
 
 # Secrets
 .env

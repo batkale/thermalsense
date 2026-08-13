@@ -4,6 +4,11 @@ from config import GRID_RES
 
 _CELL_SIZE_M = GRID_RES * 111_320  # metres per degree (latitude direction, ~55 m at GRID_RES=0.0005°)
 
+# Width of one feature row. Buffers written under a different width describe a
+# different feature space and cannot be mixed, so ThermalModel.load() checks
+# against this rather than a literal that would silently drift.
+FEATURE_COUNT = 22
+
 # Land-use heat/albedo lookup by CORINE-style class (placeholder values)
 _LAND_USE = {
     "urban":      (1.0, 0.15),
@@ -53,9 +58,10 @@ def build_feature_matrix(meteo: dict, elev_grid: np.ndarray,
                          land_use: str = "default",
                          dt: datetime | None = None,
                          lat_bounds: tuple[float, float] | None = None,
-                         lon_bounds: tuple[float, float] | None = None) -> np.ndarray:
+                         lon_bounds: tuple[float, float] | None = None,
+                         alt_amsl: float | None = None) -> np.ndarray:
     """
-    Build a flat (N, 21) feature matrix — one row per grid cell.
+    Build a flat (N, FEATURE_COUNT) feature matrix — one row per grid cell.
 
     Features (columns):
         0  lat
@@ -79,9 +85,17 @@ def build_feature_matrix(meteo: dict, elev_grid: np.ndarray,
         18 day_of_year_cos
         19 pbl_height
         20 soil_temp
+        21 alt_agl
 
     Pass lat_bounds=(south, north) and lon_bounds=(west, east) to embed real
     geographic coordinates; otherwise row/column indices are used as placeholders.
+
+    alt_amsl is the observer's altitude above sea level — the glider's altitude
+    when training, the pilot's when predicting.  It is converted to height above
+    ground per cell, because lift depends on how far you are above the terrain
+    that generated it, not on your altimeter reading.  That also makes the column
+    vary across the grid rather than being one constant.  Omit it for a
+    ground-level (0 m AGL) matrix.
     """
     if dt is None:
         dt = datetime.now(timezone.utc)
@@ -101,6 +115,14 @@ def build_feature_matrix(meteo: dict, elev_grid: np.ndarray,
 
     hour_sin, hour_cos = _cyclic(dt.hour + dt.minute / 60, 24)
     doy_sin, doy_cos   = _cyclic(dt.timetuple().tm_yday, 365)
+
+    # Height above the ground under each cell. Clipped at 0: a reported altitude
+    # below the SRTM surface is a sensor/terrain-resolution artefact, not a glider
+    # underground, and a negative height would be a nonsense feature value.
+    alt_agl = (
+        np.zeros_like(elev_grid) if alt_amsl is None
+        else np.clip(float(alt_amsl) - elev_grid, 0.0, None)
+    )
 
     n = rows * cols
     mat = np.column_stack([
@@ -125,5 +147,6 @@ def build_feature_matrix(meteo: dict, elev_grid: np.ndarray,
         np.full(n, doy_cos),                    # 18 day_of_year_cos
         np.full(n, meteo["pbl_height"]),        # 19 pbl_height
         np.full(n, meteo["soil_temp"]),         # 20 soil_temp
+        alt_agl.ravel(),                        # 21 alt_agl
     ])
     return mat

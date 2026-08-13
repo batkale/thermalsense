@@ -14,7 +14,9 @@ from data.meteo_client    import fetch_meteo_features
 from data.terrain_client  import fetch_elevation_grid, fetch_elevation_point, fetch_elevation_batch
 from pipeline.feature_engineering import build_feature_matrix
 from models.thermal_model import ThermalModel
-from config import UPDATE_INTERVAL, GRID_RES, GRID_RADIUS, CORS_ORIGINS, ADMIN_TOKEN, STATIC_DIR
+from config import UPDATE_INTERVAL, GRID_RES, GRID_RADIUS, CORS_ORIGINS, ADMIN_TOKEN, STATIC_DIR, DATA_DIR
+from pathlib import Path
+import shutil
 
 # Without this the app's own loggers inherit root's WARNING level, so every
 # progress line from the long-running seed/retrain jobs is silently dropped and
@@ -52,9 +54,31 @@ async def _retrain_job():
     finally:
         _training_lock.release()
 
+def _seed_data_dir() -> None:
+    """Copy the image's bundled model + buffer into DATA_DIR on first run.
+
+    In the container DATA_DIR is a mounted volume, which starts empty and
+    shadows whatever the image baked in at that path. Without this the app
+    silently drops to physics-only predictions on every fresh deploy even
+    though a trained model shipped in the image. Existing files are never
+    overwritten, so a volume that has already learned something is left alone.
+    """
+    bundled = Path(__file__).parent / "models"
+    target  = DATA_DIR / "models"
+    if bundled.resolve() == target.resolve():
+        return  # running straight from the source tree — nothing to copy
+    target.mkdir(parents=True, exist_ok=True)
+    for name in ("thermal_xgb.json", "training_buffer.npz"):
+        src, dst = bundled / name, target / name
+        if src.exists() and not dst.exists():
+            shutil.copy2(src, dst)
+            log.info(f"[init] seeded {name} -> {dst}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     start_ogn_stream()
+    _seed_data_dir()
     await model.load()
     scheduler.add_job(
         _retrain_job, "interval", seconds=UPDATE_INTERVAL, id="retrain",
@@ -128,6 +152,14 @@ def _apply_ogn_fusion(
 
 @app.get("/predict")
 async def predict(lat: float, lon: float, alt: int = 500, forecast_h: int = 0):
+    """
+    Predicted thermal strength over a grid centred on (lat, lon).
+
+    alt is the pilot's altitude in metres above sea level; the heatmap answers
+    "is there lift here at that height", since a thermal that tops out at 900 m
+    is no use to someone at 1500 m.  It is converted to height above ground per
+    cell, matching how training samples record the glider's altitude.
+    """
     try:
         meteo, terrain = await asyncio.gather(
             fetch_meteo_features(lat, lon, forecast_h),
@@ -139,6 +171,7 @@ async def predict(lat: float, lon: float, alt: int = 500, forecast_h: int = 0):
             dt=datetime.now(timezone.utc) + timedelta(hours=forecast_h),
             lat_bounds=(lat - radius, lat + radius),
             lon_bounds=(lon - radius, lon + radius),
+            alt_amsl=alt,
         )
         grid_rows, grid_cols = terrain.shape
         heatmap, heatmap_std = model.predict(features)
