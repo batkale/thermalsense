@@ -11,8 +11,11 @@ frontend/.vite
 # Python
 **/__pycache__
 **/*.py[cod]
-.venv
-venv
+# **/ matters: a bare ".venv" only matches the context root, so backend/.venv
+# (417 MB of Windows virtualenv) would otherwise be copied into the image by
+# "COPY backend/ ./" on any build run from Windows.
+**/.venv
+**/venv
 **/.pytest_cache
 
 # Local state — the container uses the /data volume instead

@@ -153,8 +153,17 @@ def _apply_ogn_fusion(
     return np.clip(arr, 0, 1).ravel().tolist()
 
 
+# Height above ground assumed when the caller doesn't supply an altitude — a
+# plain map click, as opposed to clicking a specific glider. A fixed AMSL default
+# cannot work: 500 m AMSL is underground across the Anatolian plateau, which
+# clips alt_agl to 0 and asks the model about lift at ground level. Training rows
+# carry real glider altitudes (typically 500-2000 m AGL), so this keeps served
+# features inside the distribution the model was fitted on.
+DEFAULT_WORKING_AGL = 1000.0
+
+
 @app.get("/predict")
-async def predict(lat: float, lon: float, alt: int = 500, forecast_h: int = 0):
+async def predict(lat: float, lon: float, alt: int | None = None, forecast_h: int = 0):
     """
     Predicted thermal strength over a grid centred on (lat, lon).
 
@@ -169,12 +178,16 @@ async def predict(lat: float, lon: float, alt: int = 500, forecast_h: int = 0):
             fetch_elevation_grid(lat, lon),
         )
         radius   = GRID_RADIUS  # matches fetch_elevation_grid default
+        alt_amsl = (
+            float(alt) if alt is not None
+            else float(terrain.mean()) + DEFAULT_WORKING_AGL
+        )
         features = build_feature_matrix(
             meteo, terrain,
             dt=datetime.now(timezone.utc) + timedelta(hours=forecast_h),
             lat_bounds=(lat - radius, lat + radius),
             lon_bounds=(lon - radius, lon + radius),
-            alt_amsl=alt,
+            alt_amsl=alt_amsl,
         )
         grid_rows, grid_cols = terrain.shape
         heatmap, heatmap_std = model.predict(features)

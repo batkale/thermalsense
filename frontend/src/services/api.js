@@ -1,7 +1,14 @@
 import { API_BASE, ADMIN_TOKEN } from '../config.js';
 
-export async function fetchPrediction(lat, lon, forecastH = 0) {
+/**
+ * alt is the observer's altitude in metres AMSL — the clicked glider's own
+ * altitude. Omitting it makes the backend assume a typical working height above
+ * the terrain; sending a wrong one is worse than sending none, because the model
+ * is trained on real glider altitudes and answers "is there lift *here*".
+ */
+export async function fetchPrediction(lat, lon, forecastH = 0, alt = null) {
   const params = new URLSearchParams({ lat, lon, forecast_h: forecastH });
+  if (alt != null) params.set('alt', Math.round(alt));
   const res = await fetch(`${API_BASE}/predict?${params}`);
   if (!res.ok) throw new Error(`Predict failed: ${res.statusText}`);
   return res.json(); // { heatmap: float[], thermal_base: int, cape: float }

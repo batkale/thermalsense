@@ -32,9 +32,12 @@ export default function App() {
     predict, gliderPathsRef,
   } = useBackend();
 
+  // A bare map click carries no altitude — the backend picks a working height
+  // above the terrain. Clicking a glider sends that glider's own altitude, which
+  // is what the model was trained on.
   const handleMapClick = useCallback((lat, lon) => {
-    locationRef.current = { lat, lon };
-    predict(lat, lon, forecastH);
+    locationRef.current = { lat, lon, alt: null };
+    predict(lat, lon, forecastH, null);
   }, [predict, forecastH]);
 
 
@@ -84,8 +87,8 @@ export default function App() {
             onMapClick={handleMapClick}
             onGliderClick={g => {
               setPinnedId(g.id);
-              locationRef.current = { lat: g.lat, lon: g.lon };
-              predict(g.lat, g.lon, forecastH);
+              locationRef.current = { lat: g.lat, lon: g.lon, alt: g.alt };
+              predict(g.lat, g.lon, forecastH, g.alt);
             }}
             pinnedId={pinnedId}
             flyTarget={flyTarget}

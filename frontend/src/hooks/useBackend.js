@@ -54,11 +54,11 @@ export function useBackend() {
   const gliderPathsRef    = useRef({});   // { [id]: [{lat, lon, alt}] }
   const seededIdsRef      = useRef(new Set());
 
-  const predict = useCallback(async (lat, lon, forecastH = 0) => {
+  const predict = useCallback(async (lat, lon, forecastH = 0, alt = null) => {
     setLoading(true);
     setError(null);
     try {
-      const data = await fetchPrediction(lat, lon, forecastH);
+      const data = await fetchPrediction(lat, lon, forecastH, alt);
 
       setHeatmap(data.heatmap);
       setGridMeta({ lat, lon, rows: data.rows, cols: data.cols, radius: PREDICT_RADIUS });
