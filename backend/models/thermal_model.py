@@ -82,6 +82,18 @@ log = logging.getLogger(__name__)
 # cape_base is an estimate, hence the margin.
 _THERMAL_BASE_MARGIN_M = 300
 
+# Below this there is no meaningful surface heating, so no thermal can exist and
+# the observation teaches nothing.  The scheduler runs around the clock; without
+# this an overnight run buries the buffer in negatives (1,640 samples / 1 positive
+# in one night) and drowns out the daytime signal.
+_MIN_SOLAR_GHI = 50.0     # W/m2 — roughly deep twilight
+
+# A fit needs enough of the positive class to be worth anything.  Below this the
+# AUC comes back nan and the resulting model predicts ~0 everywhere; saving it
+# would replace a working model with a degenerate one.
+_MIN_POSITIVES         = 20
+_MIN_HOLDOUT_POSITIVES = 5
+
 _MIN_SAMPLES     = 100
 _VAL_MIN_SAMPLES = 500   # 20% holdout ≥ 100 points only above this
 _MAX_BUFFER      = 21_024_000
@@ -226,7 +238,7 @@ class ThermalModel:
             return
         # Cap at 20 to avoid hammering APIs per retrain cycle.
         candidates = soaring[:20]
-        above_base = 0
+        above_base = dark = 0
 
         for g in candidates:
             try:
@@ -241,6 +253,10 @@ class ThermalModel:
                     lon_bounds=(g["lon"] - GRID_RADIUS, g["lon"] + GRID_RADIUS),
                     alt_amsl=g["alt"],
                 )
+                if meteo["solar_ghi"] < _MIN_SOLAR_GHI:
+                    dark += 1
+                    await asyncio.sleep(1.1)
+                    continue
                 center = _centre_index(elev.shape)
                 if _above_thermal_base(g["alt"], feat[center, 2], meteo["cape_base"]):
                     above_base += 1
@@ -257,6 +273,8 @@ class ThermalModel:
 
         if above_base:
             log.info(f"[model] {above_base}/{len(candidates)} dropped — above thermal base")
+        if dark:
+            log.info(f"[model] {dark}/{len(candidates)} dropped — solar below {_MIN_SOLAR_GHI:.0f} W/m2")
 
         # Rolling window
         if len(self._buffer_X) > _MAX_BUFFER:
@@ -277,7 +295,27 @@ class ThermalModel:
         y = np.array(self._buffer_y)
         pos = int(y.sum())
 
-        use_holdout = n >= _VAL_MIN_SAMPLES
+        # Refuse to fit on a buffer with almost no positives.  XGBoost will happily
+        # return a model that predicts ~0 everywhere and an AUC of nan, and saving
+        # that would overwrite a good model with a useless one.  Keep what we have.
+        if pos < _MIN_POSITIVES:
+            log.warning(
+                f"[model] only {pos} positives in {n} samples (need {_MIN_POSITIVES}) — "
+                f"skipping fit and keeping the existing model"
+            )
+            return
+
+        split = int(n * 0.8)
+        # A holdout with no positives makes AUC nan and early stopping meaningless.
+        use_holdout = (
+            n >= _VAL_MIN_SAMPLES
+            and int(y[split:].sum()) >= _MIN_HOLDOUT_POSITIVES
+        )
+        if n >= _VAL_MIN_SAMPLES and not use_holdout:
+            log.warning(
+                f"[model] holdout has {int(y[split:].sum())} positives "
+                f"(need {_MIN_HOLDOUT_POSITIVES}) — fitting without validation"
+            )
 
         clf = xgb.XGBClassifier(
             n_estimators=200,
@@ -298,7 +336,6 @@ class ThermalModel:
         if use_holdout:
             # Chronological split — the buffer is appended in time order, so a
             # random split would leak future weather into the training half.
-            split = int(n * 0.8)
             clf.fit(
                 X[:split], y[:split],
                 eval_set=[(X[split:], y[split:])],
@@ -307,6 +344,9 @@ class ThermalModel:
             val_auc = getattr(clf, "best_score", None)
             if val_auc is None:
                 val_auc = clf.evals_result()["validation_0"]["auc"][-1]
+            if val_auc is None or not np.isfinite(val_auc):
+                log.warning("[model] validation AUC is not finite — discarding this fit")
+                return
             log.info(
                 f"[model] retrained on {split} samples, val AUC={val_auc:.3f} "
                 f"({pos} positives, {n - split} holdout), saved to {MODEL_PATH}"
@@ -315,7 +355,7 @@ class ThermalModel:
             clf.fit(X, y)
             log.info(
                 f"[model] retrained on {n} samples ({pos} positives) — "
-                f"buffer below {_VAL_MIN_SAMPLES}, no holdout yet, saved to {MODEL_PATH}"
+                f"no validation holdout, saved to {MODEL_PATH}"
             )
 
         Path(MODEL_PATH).parent.mkdir(parents=True, exist_ok=True)
@@ -423,7 +463,7 @@ class ThermalModel:
 
         log.info(f"[seed] {len(rows)} beacons → {len(buckets)} meteo buckets")
 
-        added = errors = skipped_no_meteo = above_base = 0
+        added = errors = skipped_no_meteo = above_base = dark = 0
         done_buckets = 0
 
         for (lat_b, lon_b, date_str, hour), beacons in buckets.items():
@@ -439,13 +479,18 @@ class ThermalModel:
             if meteo is None:
                 skipped_no_meteo += len(beacons)
                 continue
+            if meteo["solar_ghi"] < _MIN_SOLAR_GHI:
+                # Whole bucket is one hour at one place — if it was dark there,
+                # no beacon in it can represent a thermal.
+                dark += len(beacons)
+                continue
 
             done_buckets += 1
             if done_buckets % 50 == 0:
                 log.info(
                     f"[seed] {done_buckets}/{len(buckets)} buckets — "
                     f"{added} samples, {skipped_no_meteo} no-meteo, "
-                    f"{above_base} above-base, {errors} errors"
+                    f"{dark} dark, {above_base} above-base, {errors} errors"
                 )
 
             for lat, lon, alt, dt, vario, circling in beacons:
@@ -487,6 +532,7 @@ class ThermalModel:
             "errors":               errors,
             "skipped_no_meteo":     skipped_no_meteo,
             "skipped_above_base":   above_base,
+            "skipped_dark":         dark,
             "buffer_total":     len(self._buffer_X),
         }
         log.info(f"[seed] complete: {result}")

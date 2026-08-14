@@ -39,7 +39,11 @@ RUN mkdir -p /data/models /data/data
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+# Generous timeout on purpose: the app is single-process and predict() runs 50
+# synchronous Monte Carlo passes over the grid, which blocks the event loop long
+# enough on a burstable vCPU that a 5 s probe times out and the container is
+# wrongly marked unhealthy while serving fine.
+HEALTHCHECK --interval=30s --timeout=15s --start-period=90s --retries=5 \
     CMD curl -fsS http://localhost:8000/healthz || exit 1
 
 # --workers 1 is mandatory, not a default: the APRS thread and the in-memory

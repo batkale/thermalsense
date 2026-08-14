@@ -18,8 +18,15 @@ venv
 # Local state — the container uses the /data volume instead
 backend/data/*.db
 backend/data/*.sqlite
-backend/models/*.json
-backend/models/*.npz
+
+# NOTE: backend/models/thermal_xgb.json and training_buffer.npz are deliberately
+# NOT excluded. The image ships them so _seed_data_dir() can populate a fresh
+# volume on first start; excluding them leaves every new deploy on the physics
+# fallback with no indication why. Only the set-aside snapshots are skipped.
+backend/models/*.npz.v*
+backend/models/*.npz.unreadable
+backend/models/*.bak-*
+backend/models/*.contaminated
 
 # Secrets
 .env

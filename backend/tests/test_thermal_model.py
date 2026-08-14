@@ -73,6 +73,42 @@ def test_buffer_rows_do_not_retain_the_parent_matrix():
     assert all(row.base is None for row in m._buffer_X)
 
 
+async def test_fit_is_skipped_when_positives_are_too_few(tmp_path, monkeypatch):
+    """
+    An overnight run collected 1,640 samples with 1 positive; XGBoost returned a
+    nan AUC and the degenerate model overwrote a good one. Keep the old model.
+    """
+    import models.thermal_model as tm
+
+    model_path = tmp_path / "thermal_xgb.json"
+    monkeypatch.setattr(tm, "MODEL_PATH", str(model_path))
+    monkeypatch.setattr(tm, "BUFFER_PATH", str(tmp_path / "b.npz"))
+
+    m = tm.ThermalModel()
+    sentinel = object()
+    m.model = sentinel
+    n = tm._MIN_SAMPLES + 50
+    m._buffer_X = [np.zeros(FEATURE_COUNT) for _ in range(n)]
+    m._buffer_y = [0] * n
+    m._buffer_y[0] = 1                      # a single positive
+
+    async def no_gliders():
+        return []
+    monkeypatch.setattr("data.ogn_client.fetch_ogn_gliders", no_gliders)
+
+    await m.retrain()
+
+    assert m.model is sentinel, "a degenerate fit must not replace the live model"
+    assert not model_path.exists(), "nothing should have been written to disk"
+
+
+def test_positive_thresholds_are_sane():
+    import models.thermal_model as tm
+    assert tm._MIN_POSITIVES > 1
+    assert tm._MIN_HOLDOUT_POSITIVES >= 1
+    assert tm._MIN_SOLAR_GHI > 0
+
+
 def test_buffer_is_saved_before_the_fit_threshold(tmp_path, monkeypatch):
     """
     Each sample costs two rate-limited API calls, so a partial buffer must survive
