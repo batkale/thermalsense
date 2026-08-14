@@ -1,9 +1,11 @@
 import asyncio
+import json
 import logging
 import httpx
 import numpy as np
+from pathlib import Path
 from scipy.ndimage import zoom as ndimage_zoom
-from config import SRTM_BASE, GRID_RES, TERRAIN_RES
+from config import SRTM_BASE, GRID_RES, TERRAIN_RES, DATA_DIR
 
 log = logging.getLogger(__name__)
 
@@ -12,6 +14,58 @@ _elev_cache: dict[tuple[float, float], int] = {}
 
 # Grid cache keyed by (lat, lon, radius) rounded to 2 dp — terrain grids are static
 _grid_cache: dict[tuple[float, float, float], np.ndarray] = {}
+
+# --- Disk cache ---------------------------------------------------------------
+# Terrain does not change, so these are worth keeping across restarts. Measured
+# on the deployed VM: a cold process pays ~18 s for the first request in an area
+# versus ~1.2 s warm, almost all of it rate-limited OpenTopoData calls — and the
+# free tier only allows 1000/day, so re-fetching after every redeploy is wasteful
+# as well as slow.
+#
+# Only the *coarse* grid is stored (10x10 = 100 floats). The upsample back to
+# 200x200 costs microseconds, and storing the fine grid instead would be 400x
+# larger on disk for no gain.
+_CACHE_DIR = DATA_DIR / "cache" / "terrain"
+_POINT_CACHE_PATH = _CACHE_DIR / "points.json"
+_point_writes_since_flush = 0
+_POINT_FLUSH_EVERY = 50
+
+
+def _grid_path(key: tuple[float, float, float]) -> Path:
+    lat, lon, radius = key
+    return _CACHE_DIR / f"g_{lat:+.1f}_{lon:+.1f}_{radius:.3f}.npy"
+
+
+def load_caches() -> None:
+    """Restore the point-elevation cache from disk. Called once from the lifespan."""
+    if not _POINT_CACHE_PATH.exists():
+        return
+    try:
+        raw = json.loads(_POINT_CACHE_PATH.read_text(encoding="utf-8"))
+        for k, v in raw.items():
+            lat_s, lon_s = k.split(",")
+            _elev_cache[(float(lat_s), float(lon_s))] = v
+        log.info(f"[terrain] restored {len(_elev_cache)} point elevations from disk")
+    except Exception as exc:
+        log.warning(f"[terrain] point cache unreadable ({exc}) — starting empty")
+
+
+def flush_point_cache(force: bool = False) -> None:
+    """Persist the point cache, batched so a seed run isn't writing on every hit."""
+    global _point_writes_since_flush
+    if not force and _point_writes_since_flush < _POINT_FLUSH_EVERY:
+        return
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = _POINT_CACHE_PATH.with_suffix(".json.tmp")
+        tmp.write_text(
+            json.dumps({f"{la},{lo}": v for (la, lo), v in _elev_cache.items()}),
+            encoding="utf-8",
+        )
+        tmp.replace(_POINT_CACHE_PATH)   # atomic — a crash mid-write can't corrupt it
+        _point_writes_since_flush = 0
+    except OSError as exc:
+        log.warning(f"[terrain] could not persist point cache ({exc})")
 
 # One pooled client — a seed run makes thousands of calls, and a fresh
 # AsyncClient per call exhausts the ephemeral port range (see meteo_client).
@@ -89,6 +143,8 @@ async def fetch_elevation_batch(
 
     Returns {(lat, lon): elevation_m | None} for every input pair.
     """
+    global _point_writes_since_flush
+
     out: dict[tuple, int | None] = {}
     pending: dict[tuple[float, float], list[tuple[float, float]]] = {}
 
@@ -121,8 +177,10 @@ async def fetch_elevation_batch(
         for key, item in zip(chunk, items):
             elev = int(item["elevation"] or 0)
             _elev_cache[key] = elev
+            _point_writes_since_flush += 1
             for pair in pending[key]:
                 out[pair] = elev
+        flush_point_cache()
         for key in chunk[len(items):]:          # short/failed response
             for pair in pending[key]:
                 out[pair] = None
@@ -150,6 +208,21 @@ async def fetch_elevation_grid(lat: float, lon: float, radius: float = 0.05) -> 
     zoom_factor = TERRAIN_RES / GRID_RES
     fine_shape = (n_lat * round(zoom_factor), n_lon * round(zoom_factor))
 
+    def _upsample(coarse: np.ndarray) -> np.ndarray:
+        fine = ndimage_zoom(coarse, zoom_factor, order=1)   # bilinear
+        return fine[: fine_shape[0], : fine_shape[1]]
+
+    # Disk cache — the reason a redeployed container doesn't re-pay the
+    # rate-limited fetch for every area anyone has already looked at.
+    path = _grid_path(key)
+    if path.exists():
+        try:
+            fine = _upsample(np.load(path))
+            _grid_cache[key] = fine
+            return fine
+        except Exception as exc:
+            log.warning(f"[terrain] cached grid {path.name} unreadable ({exc}) — refetching")
+
     try:
         all_pts = [f"{la:.5f},{lo:.5f}" for la in lats_c for lo in lons_c]
         elevs: list[float] = []
@@ -162,9 +235,13 @@ async def fetch_elevation_grid(lat: float, lon: float, radius: float = 0.05) -> 
             r.raise_for_status()
             elevs.extend(p["elevation"] or 0 for p in r.json()["results"])
         coarse = np.array(elevs, dtype=float).reshape(n_lat, n_lon)
-        fine = ndimage_zoom(coarse, zoom_factor, order=1)   # bilinear
-        fine = fine[: fine_shape[0], : fine_shape[1]]
+        fine = _upsample(coarse)
         _grid_cache[key] = fine
+        try:
+            _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            np.save(path, coarse)
+        except OSError as exc:
+            log.warning(f"[terrain] could not persist grid {path.name} ({exc})")
         return fine
     except Exception as exc:
         log.warning(f"[terrain] elevation fetch failed ({exc}) — using flat-zero fallback")

@@ -1,14 +1,20 @@
-// Primary operating area — İnönü / Eskişehir, the main Turkish soaring region
+// Primary operating area — İnönü / Eskişehir, the main Turkish soaring region.
+// This is the *prediction grid*, not the glider feed: GRID_COLS/GRID_ROWS in
+// useBackend.js are derived from it at GRID_RES (~50 m), so widening it explodes
+// the grid (a worldwide box at this resolution is 720,000 × 360,000 cells).
+// Live gliders are bounded separately by GLIDER_* below.
 export const LAT_MIN  = 39.0;
 export const LAT_MAX  = 40.5;
 export const LON_MIN  = 29.5;
 export const LON_MAX  = 31.5;
 
-// Europe-wide bounding box for live glider display (must match backend config.py)
-export const GLIDER_LAT_MIN = 35.0;
-export const GLIDER_LAT_MAX = 72.0;
-export const GLIDER_LON_MIN = -15.0;
-export const GLIDER_LON_MAX = 45.0;
+// Bounding box for live glider display — worldwide (must match backend config.py).
+// Kept as an explicit box rather than deleted so a regional deploy can narrow it
+// in one place; at these values the check in useBackend.js admits everything.
+export const GLIDER_LAT_MIN = -90.0;
+export const GLIDER_LAT_MAX = 90.0;
+export const GLIDER_LON_MIN = -180.0;
+export const GLIDER_LON_MAX = 180.0;
 export const GRID_RES = 0.0005;   // degrees per cell (~50 m)
 
 // --- Backend origin -----------------------------------------------------------

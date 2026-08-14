@@ -8,9 +8,12 @@ from data.ogn_client import _parse_beacon
 # Real OGN APRS beacon (sanitised callsign)
 # lat=51°15.26'N → 51.2543°  lon=002°03.13'W → -2.0522°  alt=2516ft→767m
 # vario=+156fpm→+0.79m/s  rot=+2.5→7.5°/s (not circling)
+# id06 3E2D1A: type nibble (0x06>>2)=0x1 glider, so the parser admits it.  The
+# id field must carry the full 8 hex digits — a beacon we cannot classify is
+# rejected outright, so a truncated one would parse as None everywhere below.
 SAMPLE = (
     "FLR3E2D1A>APRS,qAS,EGNH:/120800h5115.26N/00203.13W'"
-    "182/067/A=002516 !W51! id3AE2D1A +156fpm +2.5rot 7.5dB 1e gps3x5"
+    "182/067/A=002516 !W51! id063E2D1A +156fpm +2.5rot 7.5dB 1e gps3x5"
 )
 
 @pytest.fixture(autouse=True)

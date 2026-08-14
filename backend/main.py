@@ -8,7 +8,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import asyncio, json, logging
 import numpy as np
 from datetime import datetime, timezone, timedelta
-from data.ogn_client      import fetch_ogn_gliders, start_ogn_stream, fetch_glider_track, drain_beacon_buffers, is_soaring
+from data.ogn_client      import fetch_ogn_gliders, start_ogn_stream, fetch_glider_track, drain_beacon_buffers, is_thermal_evidence
 from data import meteo_client, terrain_client
 from data.meteo_client    import fetch_meteo_features
 from data.terrain_client  import fetch_elevation_grid, fetch_elevation_point, fetch_elevation_batch
@@ -79,6 +79,7 @@ def _seed_data_dir() -> None:
 async def lifespan(app: FastAPI):
     start_ogn_stream()
     _seed_data_dir()
+    terrain_client.load_caches()
     await model.load()
     scheduler.add_job(
         _retrain_job, "interval", seconds=UPDATE_INTERVAL, id="retrain",
@@ -88,6 +89,7 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     yield
     scheduler.shutdown(wait=False)
+    terrain_client.flush_point_cache(force=True)   # don't lose the last partial batch
     await meteo_client.aclose()
     await terrain_client.aclose()
 
@@ -124,11 +126,12 @@ def _apply_ogn_fusion(
     rows: int, cols: int,
 ) -> list[float]:
     """Blend live confirmed thermals (circling + vario > 1 m/s) into the ML heatmap."""
-    # Soaring aircraft only: anything with an engine can circle and climb without
-    # a thermal underneath it, which would paint lift onto the map that isn't there.
+    # Soaring aircraft only, and not on aerotow: anything under power can circle
+    # and climb without a thermal underneath it — including a glider on the end
+    # of a rope — which would paint lift onto the map that isn't there.
     circling = [
         g for g in gliders
-        if is_soaring(g) and g.get("circling") and g.get("vario", 0) > 1.0
+        if is_thermal_evidence(g) and g.get("circling") and g.get("vario", 0) > 1.0
     ]
     if not circling:
         return heatmap
@@ -222,10 +225,10 @@ async def _add_agl(gliders: list[dict]) -> list[dict]:
 
 def _cluster_circling(gliders: list[dict], radius: float = 0.012) -> list[dict]:
     """Greedy proximity clustering of circling gliders (~1.3 km radius at UK latitudes)."""
-    # Only soaring aircraft confirm a thermal — see _apply_ogn_fusion.
+    # Only unaided soaring aircraft confirm a thermal — see _apply_ogn_fusion.
     candidates = [
         g for g in gliders
-        if is_soaring(g) and g.get("circling") and g.get("vario", 0) > 0.5
+        if is_thermal_evidence(g) and g.get("circling") and g.get("vario", 0) > 0.5
     ]
     unclustered = list(candidates)
     clusters = []
@@ -349,9 +352,11 @@ async def seed_from_history(
 # server state. Coordinates are rounded to 5 dp (~1 m) — far beyond what a
 # 50 m grid or a map pixel can resolve, and it compresses much better.
 # ac_type/ac_type_name let the client distinguish a sailplane from a paraglider
-# and from traffic we could not classify, instead of labelling everything "glider".
+# instead of labelling everything "glider".  Unclassifiable traffic is no longer
+# among the possibilities: DISPLAY_AC_TYPES rejects it at the parse boundary, so
+# every value on the wire is one of glider / hang glider / paraglider.
 _WIRE_FIELDS = ("id", "lat", "lon", "alt", "vario", "heading",
-                "speed_kmh", "circling", "is_tow", "agl",
+                "speed_kmh", "circling", "is_tow", "under_tow", "agl",
                 "ac_type", "ac_type_name")
 _COORD_DP = 5
 

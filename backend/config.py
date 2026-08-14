@@ -12,13 +12,34 @@ DATA_DIR = Path(os.getenv("THERMALSENSE_DATA_DIR", Path(__file__).parent)).resol
 OPEN_METEO_BASE      = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_HIST_BASE = "https://historical-forecast-api.open-meteo.com/v1/forecast"
 SRTM_BASE         = "https://api.opentopodata.org/v1/srtm30m"
-# OGN gliders come from the APRS TCP stream (aprs.glidernet.org:10152), not HTTP
+# OGN gliders come from the APRS TCP stream (aprs.glidernet.org), not HTTP
 
-# Bounding box — Greater Europe
-LAT_MIN, LAT_MAX  = 35.0, 72.0
-LON_MIN, LON_MAX  = -15.0, 45.0
+# Bounding box for live traffic — the whole world by default.
+#
+# Overridable via env for anyone who wants to run a regional instance; the APRS
+# filter and the client-side checks are both derived from these four numbers, so
+# narrowing them here narrows the whole pipeline.  Note these are the *glider
+# feed* bounds — the prediction grid is a separate, much smaller area chosen per
+# request (see GRID_RADIUS), and is unaffected by widening this box.
+def _bound(name: str, default: float) -> float:
+    return float(os.getenv(name, default))
 
-OGN_FILTER_RADIUS = 2500          # km — radius for APRS stream filter
+LAT_MIN, LAT_MAX  = _bound("OGN_LAT_MIN", -90.0), _bound("OGN_LAT_MAX", 90.0)
+LON_MIN, LON_MAX  = _bound("OGN_LON_MIN", -180.0), _bound("OGN_LON_MAX", 180.0)
+
+WORLDWIDE         = (LAT_MIN, LAT_MAX, LON_MIN, LON_MAX) == (-90.0, 90.0, -180.0, 180.0)
+
+# Port 10152 is OGN's *full feed*: it accepts a filter in the login line and then
+# ignores it.  That made the old r/53.5/15.0/2500 filter decorative — every beacon
+# on the planet arrived anyway, to be discarded client-side.  14580 is the port
+# that honours filters.  Worldwide wants the full feed, so pick the port to match
+# rather than asking 14580 for an a/90/-180/-90/180 filter that excludes nothing.
+OGN_APRS_PORT     = 10152 if WORLDWIDE else 14580
+
+# Area filter (a/latN/lonW/latS/lonE) derived from the box, so the two can't drift.
+# Deliberately not a radius filter: no circle centred in a box covers its corners,
+# so r/ silently drops the edges.  Empty when worldwide — the full feed needs none.
+OGN_APRS_FILTER   = "" if WORLDWIDE else f"a/{LAT_MAX}/{LON_MIN}/{LAT_MIN}/{LON_MAX}"
 
 GRID_RES          = 0.0005        # degrees per cell (~50 m)
 TERRAIN_RES       = 0.01          # coarse terrain fetch resolution (upsampled to GRID_RES)

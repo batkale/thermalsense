@@ -46,6 +46,14 @@ def _plausible_coords(X: np.ndarray) -> np.ndarray:
     Boolean mask of rows whose lat/lon (cols 0,1) are real coordinates inside the
     configured bounding box, rather than the grid indices an unbounded
     build_feature_matrix call produces.
+
+    Note this guard is only as tight as the box.  While the feed was Europe-only
+    it also caught index pairs like (50, 100) — lon 100 was outside the box.  Now
+    that the box is worldwide, (50, 100) reads as a valid point in Mongolia and
+    survives; only the lat > 90 signature (the documented one, lat=100) is still
+    caught.  That is inherent to accepting worldwide traffic — a sample really can
+    come from anywhere — and it affects legacy pre-fix buffer rows only, not
+    anything written since.
     """
     lat, lon = X[:, 0], X[:, 1]
     return (
@@ -214,7 +222,7 @@ class ThermalModel:
         into a rolling buffer, and refit the XGBoost classifier once enough
         samples are collected.
         """
-        from data.ogn_client import fetch_ogn_gliders, is_soaring
+        from data.ogn_client import fetch_ogn_gliders, is_thermal_evidence
         from data.meteo_client import fetch_meteo_features
         from data.terrain_client import fetch_elevation_grid
         from pipeline.feature_engineering import build_feature_matrix
@@ -229,10 +237,11 @@ class ThermalModel:
             return
 
         now = datetime.now(timezone.utc)
-        # Soaring aircraft only.  A powered aircraft circling in a climb would be
-        # labelled a confirmed thermal, teaching the model lift that never existed.
+        # Soaring aircraft not on aerotow.  A powered aircraft circling in a climb
+        # would be labelled a confirmed thermal, teaching the model lift that never
+        # existed — and a glider under tow climbs at 2-3 m/s for the same reason.
         # No vario pre-filter beyond that: straight-cruising gliders are valid negatives.
-        soaring = [g for g in gliders if is_soaring(g)]
+        soaring = [g for g in gliders if is_thermal_evidence(g)]
         if not soaring:
             log.info("[model] no soaring aircraft in view — skipping")
             return
@@ -409,15 +418,20 @@ class ThermalModel:
         # Soaring aircraft only.  Rows written before aircraft-type filtering have
         # ac_type NULL and cannot be classified — they may be jets, helicopters or
         # ground receivers, so they are excluded rather than trusted.
+        #
+        # under_tow = 0 drops gliders climbing on a rope.  NULL is excluded too:
+        # it marks rows logged before tow planes were admitted to the feed, when
+        # an aerotow was invisible and its climb looked exactly like a thermal.
         placeholders = ",".join("?" * len(SOARING_AC_TYPES))
         soaring_ids  = tuple(sorted(SOARING_AC_TYPES))
-        where = f"ts >= ? AND ac_type IN ({placeholders})"
+        where = f"ts >= ? AND ac_type IN ({placeholders}) AND under_tow = 0"
 
         with sqlite3.connect(db_path) as con:
             cols = {r[1] for r in con.execute("PRAGMA table_info(beacons)")}
-            if "ac_type" not in cols:
+            missing = {"ac_type", "under_tow"} - cols
+            if missing:
                 return {
-                    "error": "beacons table has no ac_type column — "
+                    "error": f"beacons table has no {'/'.join(sorted(missing))} column(s) — "
                              "restart the app to migrate, then collect fresh data",
                     "added": 0,
                     "buffer_total": len(self._buffer_X),
@@ -428,12 +442,13 @@ class ThermalModel:
             ).fetchone()[0]
             if total == 0:
                 log.warning(
-                    "[seed] no classified soaring beacons in the window — history "
-                    "predates aircraft-type filtering; let the stream collect first"
+                    "[seed] no untowed classified soaring beacons in the window — "
+                    "history predates aircraft-type or aerotow filtering; let the "
+                    "stream collect first"
                 )
                 return {
                     "rows_scanned": 0, "added": 0,
-                    "reason": "no rows with a soaring ac_type",
+                    "reason": "no rows with a soaring ac_type and under_tow = 0",
                     "buffer_total": len(self._buffer_X),
                 }
             sample_rate = max(1, total // limit)

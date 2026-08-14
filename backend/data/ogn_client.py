@@ -2,9 +2,10 @@
 OGN live glider feed via the official APRS TCP stream.
 Pure-Python — no external libraries required.
 
-Protocol: connect to aprs.glidernet.org:10152, send an APRS login line with
-an 'r/' radius filter, then read newline-delimited APRS beacon strings.
+Protocol: connect to aprs.glidernet.org on the filtered port, send an APRS login
+line carrying an area filter, then read newline-delimited APRS beacon strings.
 """
+import math
 import re
 import socket
 import sqlite3
@@ -12,7 +13,9 @@ import threading
 import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from config import LAT_MIN, LAT_MAX, LON_MIN, LON_MAX, OGN_FILTER_RADIUS
+from config import (
+    LAT_MIN, LAT_MAX, LON_MIN, LON_MAX, WORLDWIDE, OGN_APRS_PORT, OGN_APRS_FILTER,
+)
 from config import DB_PATH as _DB_PATH
 
 # Every parsed beacon is appended to _DB_PATH — the seed script reads it for training
@@ -41,11 +44,22 @@ def _init_db() -> None:
         if "ac_type" not in cols:
             con.execute("ALTER TABLE beacons ADD COLUMN ac_type INTEGER")
 
-        # Purge any beacons outside the Europe/GB bounding box left from previous sessions
-        con.execute(
-            "DELETE FROM beacons WHERE lat < ? OR lat > ? OR lon < ? OR lon > ?",
-            (LAT_MIN, LAT_MAX, LON_MIN, LON_MAX),
-        )
+        # Migration: rows written before aerotow detection have no under_tow.
+        # NULL means "never evaluated", not "not on tow" — those rows predate any
+        # tow plane being admitted to the feed, so a towed climb in them is
+        # indistinguishable from a thermal.  The training query skips them.
+        if "under_tow" not in cols:
+            con.execute("ALTER TABLE beacons ADD COLUMN under_tow INTEGER")
+
+        # Purge beacons outside the configured box left over from a previous run
+        # with different bounds.  Skipped when worldwide: it could match nothing
+        # anyway, and a full scan of a multi-million-row table at every startup
+        # is not free.  Widening the box therefore never deletes existing history.
+        if not WORLDWIDE:
+            con.execute(
+                "DELETE FROM beacons WHERE lat < ? OR lat > ? OR lon < ? OR lon > ?",
+                (LAT_MIN, LAT_MAX, LON_MIN, LON_MAX),
+            )
 
 def _log_beacon(beacon: dict) -> None:
     try:
@@ -53,21 +67,23 @@ def _log_beacon(beacon: dict) -> None:
             # Named columns, not positional VALUES — the table gained ac_type and
             # a bare INSERT would silently shift every field on the next change.
             con.execute(
-                "INSERT INTO beacons (ts, id, lat, lon, alt, vario, circling, is_tow, ac_type)"
-                " VALUES (?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO beacons"
+                " (ts, id, lat, lon, alt, vario, circling, is_tow, ac_type, under_tow)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (
                     datetime.now(timezone.utc).isoformat(),
                     beacon["id"], beacon["lat"], beacon["lon"],
                     beacon["alt"], beacon["vario"],
                     int(beacon["circling"]), int(beacon["is_tow"]),
                     beacon.get("ac_type"),
+                    int(beacon.get("under_tow", False)),
                 )
             )
     except Exception:
         pass  # never let logging break the stream
 
 _APRS_SERVER  = "aprs.glidernet.org"
-_APRS_PORT    = 10152
+_APRS_PORT    = OGN_APRS_PORT
 _RECONNECT_S  = 15
 _GLIDER_TTL_S = 300  # drop entries not refreshed within 5 minutes
 
@@ -80,7 +96,7 @@ _lock = threading.Lock()
 # which is what makes thermalling spirals visible in the frontend.
 #
 # Only the WebSocket drains this, so with no browser attached every glider would
-# fill to _BBUF_MAX and stay there — hundreds of MB across a Europe-wide feed.
+# fill to _BBUF_MAX and stay there — hundreds of MB across a worldwide feed.
 # When nothing has drained recently we keep only a short tail; a client that
 # connects later backfills its track from SQLite via fetch_glider_track anyway.
 _BBUF_MAX          = 600   # positions per glider while a client is consuming
@@ -123,10 +139,8 @@ AC_TYPE_NAMES = {
 
 # Types that climb under engine power, or are not aircraft at all.  The OGN feed
 # is ~53% these — a jet in a holding pattern circling with positive vario is a
-# textbook false "confirmed thermal".  Dropped at the parse boundary so they
-# never reach the map, the beacon DB, thermal clustering or the training labels.
+# textbook false "confirmed thermal".
 EXCLUDED_AC_TYPES = frozenset({
-    0x2,  # tow plane — climbs under power, exactly the false signal to avoid
     0x3,  # helicopter
     0x8,  # powered aircraft
     0x9,  # jet aircraft
@@ -144,10 +158,79 @@ SOARING_AC_TYPES = frozenset({
     0x7,  # paraglider
 })
 
+# The only types allowed past the parse boundary — an allow-list, not a deny-list.
+#
+# A deny-list leaked badly.  OGN relays ADS-B traffic (tocall OGADSB) alongside
+# FLARM, and airliners arrive either with no id field at all (ac_type None) or
+# with the type nibble set to 0x0 "unknown".  Neither is in EXCLUDED_AC_TYPES, so
+# every airliner parked on an apron or holding overhead was admitted and drawn as
+# a glider — Madrid Barajas rendered ~30 "gliders" sitting at its gates.
+#
+# Anything we cannot positively identify is therefore dropped here, so it never
+# reaches the map, the beacon DB, thermal clustering or the training labels.
+# New OGN type codes and new relay sources fail closed.
+TOW_AC_TYPE = 0x2
+
+# Tow planes are admitted but are NOT in SOARING_AC_TYPES, so they can never
+# confirm lift themselves.  They earn their place by marking the gliders behind
+# them: a glider on aerotow climbs at 2-3 m/s and its tug will happily circle in
+# a thermal during the climb, which is indistinguishable from thermalling unless
+# the tug is visible.  Without them, every aerotow was a false positive.
+DISPLAY_AC_TYPES = SOARING_AC_TYPES | {TOW_AC_TYPE}
+
 
 def is_soaring(beacon: dict) -> bool:
     """True when a beacon came from an aircraft that climbs on lift alone."""
     return beacon.get("ac_type") in SOARING_AC_TYPES
+
+
+def is_thermal_evidence(beacon: dict) -> bool:
+    """True when this beacon's climb may be attributed to a thermal.
+
+    Soaring type, and not currently on the end of a rope.  Every consumer that
+    turns a climb into lift — map fusion, thermal clustering, training labels —
+    must use this rather than is_soaring alone.
+    """
+    return is_soaring(beacon) and not beacon.get("under_tow", False)
+
+
+# --- Aerotow detection --------------------------------------------------------
+# A glider under tow sits ~60 m behind the tug on the rope at matched altitude.
+# The thresholds are looser than that because OGN beacons are not synchronised:
+# each aircraft reports every few seconds, so at a 110 km/h tow speed the two
+# positions can be several hundred metres apart purely from reporting skew.
+_TOW_RADIUS_M   = 400.0   # horizontal separation
+_TOW_ALT_DIFF_M = 100.0   # vertical separation
+_TOW_MAX_AGE_S  = 15.0    # ignore tugs whose last beacon is stale
+_TOW_MIN_VARIO  = 0.3     # a tug parked or descending is not towing anyone
+
+
+def _distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in metres."""
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp     = p2 - p1
+    dl     = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 6371000.0 * 2 * math.asin(math.sqrt(a))
+
+
+def _under_tow(beacon: dict, live: dict[str, dict], now: float) -> bool:
+    """True when a climbing tow plane is close enough to be towing this aircraft."""
+    if not is_soaring(beacon):
+        return False   # a tug is not "under tow"; nor is anything we don't track
+    for other in live.values():
+        if other.get("ac_type") != TOW_AC_TYPE:
+            continue
+        if now - other.get("seen_at", 0.0) > _TOW_MAX_AGE_S:
+            continue
+        if other.get("vario", 0.0) < _TOW_MIN_VARIO:
+            continue
+        if abs(other.get("alt", 0) - beacon["alt"]) > _TOW_ALT_DIFF_M:
+            continue
+        if _distance_m(beacon["lat"], beacon["lon"],
+                       other["lat"], other["lon"]) <= _TOW_RADIUS_M:
+            return True
+    return False
 
 
 def _parse_beacon(line: str) -> dict | None:
@@ -194,12 +277,13 @@ def _parse_beacon(line: str) -> dict | None:
             heading    = raw_course if raw_course > 0 else None
             speed_kmh  = round(int(cm.group(2)) * 1.852)  # knots → km/h
 
-        # aircraft type: bits 5-2 of the OGN id-byte
-        ac_type = None
-        if im := _ID_RE.search(payload):
-            ac_type = (int(im.group(1), 16) >> 2) & 0x0F
-            if ac_type in EXCLUDED_AC_TYPES:
-                return None   # powered / non-aircraft — never enters the system
+        # aircraft type: bits 5-2 of the OGN id-byte.  A beacon with no id field
+        # cannot be classified, and unclassifiable traffic is not admitted.
+        if not (im := _ID_RE.search(payload)):
+            return None
+        ac_type = (int(im.group(1), 16) >> 2) & 0x0F
+        if ac_type not in DISPLAY_AC_TYPES:
+            return None   # powered / unknown / non-aircraft — never enters the system
 
         return {
             "id":        callsign,
@@ -211,10 +295,15 @@ def _parse_beacon(line: str) -> dict | None:
             "speed_kmh": speed_kmh,
             "circling":  abs(turn_rate) > 8,
             "ac_type":   ac_type,
-            "ac_type_name": AC_TYPE_NAMES.get(ac_type, "unknown"),
-            # Retained for the historical DB column; always False now that tow
-            # planes are rejected above.
-            "is_tow":    False,
+            # Direct index, not .get(..., "unknown"): ac_type has already been
+            # checked against DISPLAY_AC_TYPES, so a missing key would be a bug
+            # worth raising rather than papering over with an "unknown" label.
+            "ac_type_name": AC_TYPE_NAMES[ac_type],
+            # is_tow: this aircraft IS a tug.  under_tow: this aircraft is being
+            # towed BY one — resolved in the stream loop, which is the only place
+            # with a view of the other traffic.  Two different questions.
+            "is_tow":    ac_type == TOW_AC_TYPE,
+            "under_tow": False,
         }
     except Exception:
         return None
@@ -230,12 +319,13 @@ def _stream_thread() -> None:
                 s.settimeout(10)  # wake up before the server's ~15 s idle close
                 with _socket_lock:
                     _active_socket = s
-                login = (
-                    f"user N0CALL pass -1 vers ThermalSense 1.0 "
-                    f"filter {_active_filter}\r\n"
-                )
-                s.sendall(login.encode("ascii"))
-                print(f"[OGN APRS] connected — filter: {_active_filter}")
+                # A trailing bare "filter" keyword with no expression is a syntax
+                # error to aprsc, so omit it entirely on the unfiltered full feed.
+                login = "user N0CALL pass -1 vers ThermalSense 1.0"
+                if _active_filter:
+                    login += f" filter {_active_filter}"
+                s.sendall((login + "\r\n").encode("ascii"))
+                print(f"[OGN APRS] connected — {_active_filter or 'full feed (worldwide)'}")
 
                 buf = b""
                 while True:
@@ -251,8 +341,13 @@ def _stream_thread() -> None:
                         raw, buf = buf.split(b"\r\n", 1)
                         beacon = _parse_beacon(raw.decode("ascii", errors="replace"))
                         if beacon and (LAT_MIN <= beacon["lat"] <= LAT_MAX and LON_MIN <= beacon["lon"] <= LON_MAX):
+                            now = time.monotonic()
                             with _lock:
-                                _live_gliders[beacon["id"]] = beacon | {"seen_at": time.monotonic()}
+                                # Resolved here, not in _parse_beacon: deciding
+                                # whether this aircraft is on a rope needs the
+                                # other traffic, which only the live map has.
+                                beacon["under_tow"] = _under_tow(beacon, _live_gliders, now)
+                                _live_gliders[beacon["id"]] = beacon | {"seen_at": now}
                             with _bbuf_lock:
                                 bbuf = _beacon_buffers.setdefault(beacon["id"], [])
                                 bbuf.append({"lat": beacon["lat"], "lon": beacon["lon"], "alt": beacon["alt"]})
@@ -279,11 +374,9 @@ def start_ogn_stream() -> None:
     """Start the background APRS thread.  Call once at app startup."""
     global _active_filter
     _init_db()
-    lat_c = (LAT_MIN + LAT_MAX) / 2
-    lon_c = (LON_MIN + LON_MAX) / 2
-    _active_filter = f"r/{lat_c:.4f}/{lon_c:.4f}/{OGN_FILTER_RADIUS}"
+    _active_filter = OGN_APRS_FILTER
     threading.Thread(target=_stream_thread, daemon=True).start()
-    print(f"[OGN APRS] stream starting — filter: {_active_filter}")
+    print(f"[OGN APRS] stream starting — port {_APRS_PORT}, filter: {_active_filter}")
 
 
 

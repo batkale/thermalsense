@@ -36,6 +36,9 @@ backend/data/*.db
 backend/data/*.sqlite
 backend/data/*.db-journal
 
+# Persisted terrain cache (DATA_DIR defaults to backend/ for local runs)
+backend/cache/
+
 # Model/buffer snapshots taken before a rebuild
 *.bak-*
 *.contaminated

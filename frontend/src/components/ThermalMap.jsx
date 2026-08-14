@@ -4,6 +4,10 @@ import { MapContainer, TileLayer, useMap, useMapEvents } from 'react-leaflet';
 
 import { MAP_CENTER, MAP_ZOOM } from '../config.js';
 
+// OGN aircraft types that gain height on lift alone: glider, hang glider, paraglider.
+// Mirrors SOARING_AC_TYPES in backend/data/ogn_client.py.
+const SOARING_AC_TYPES = new Set([0x1, 0x6, 0x7]);
+
 // Pre-computed 256-entry RGBA palette: density 0→255 maps blue→cyan→green→yellow→red
 const _PALETTE = (() => {
   const p = new Uint8ClampedArray(1024);
@@ -40,12 +44,17 @@ function thermalColor(p) {
 
 // -----------------------------------------------------------------------------
 // Glider icon — top-down silhouette drawn with canvas 2D primitives
-// Circling gliders: gold + dashed ring + 15° bank tilt
+// Thermalling: gold + dashed ring + 15° bank tilt
 // Straight gliders: sky blue, pointing north
+// Tow planes: white.  Gliders under tow: slate, and never styled as thermalling —
+// they are climbing on a rope, so the gold "found lift" treatment would be a lie.
 // -----------------------------------------------------------------------------
-function drawGlider(ctx, x, y, circling, vario, pinned = false, heading = null, isTow = false) {
-  const color      = isTow ? '#FFFFFF' : circling ? '#FFD700' : '#87CEEB';
-  const bank       = circling ? Math.PI / 12 : 0;         // 15° tilt for banked flight
+function drawGlider(ctx, x, y, circling, vario, pinned = false, heading = null,
+                    isTow = false, underTow = false) {
+  const thermalling = circling && !isTow && !underTow;
+  const color      = isTow ? '#FFFFFF' : underTow ? '#B0BEC5'
+                     : thermalling ? '#FFD700' : '#87CEEB';
+  const bank       = thermalling ? Math.PI / 12 : 0;      // 15° tilt for banked flight
   const headingRad = heading != null ? heading * Math.PI / 180 : 0; // null → point north
 
   // pinned highlight ring (drawn first so it appears behind the icon)
@@ -63,8 +72,8 @@ function drawGlider(ctx, x, y, circling, vario, pinned = false, heading = null, 
   ctx.translate(x, y);
   ctx.rotate(headingRad + bank); // true heading first, then bank angle
 
-  // dashed orbit ring for circling gliders
-  if (circling) {
+  // dashed orbit ring — thermalling only, not a tug or a glider on the rope
+  if (thermalling) {
     ctx.beginPath();
     ctx.arc(0, 0, 14, 0, Math.PI * 2);
     ctx.setLineDash([3, 3]);
@@ -317,7 +326,14 @@ function OgnHeatmapCanvas({ gliders }) {
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, W, H);
 
-    const thermals = glRef.current.filter(g => g.circling && g.vario > 0.3);
+    // Soaring types only (glider / hang glider / paraglider), and not on aerotow.
+    // This heatmap turns "circling and climbing" straight into painted lift, so it
+    // must not trust the feed on its own — an airliner in a hold satisfies both
+    // conditions, and so does a glider being dragged up on a rope.
+    const thermals = glRef.current.filter(
+      g => SOARING_AC_TYPES.has(g.ac_type) && !g.under_tow
+           && g.circling && g.vario > 0.3
+    );
     if (!thermals.length) return;
 
     // pass 1 — accumulate white Gaussians on black canvas (lighter = additive)
@@ -445,7 +461,8 @@ function HeatmapCanvas({ heatmap, gridMeta, gliders, pinnedId, gliderPathsRef })
     // ---- live gliders ----
     gliders.forEach(g => {
       const pt = map.latLngToContainerPoint([g.lat, g.lon]);
-      drawGlider(ctx, pt.x, pt.y, g.circling, g.vario, g.id === pinnedId, g.heading, g.is_tow);
+      drawGlider(ctx, pt.x, pt.y, g.circling, g.vario, g.id === pinnedId, g.heading,
+                 g.is_tow, g.under_tow);
     });
   }, [map, gliderPathsRef]); // stable — reads live data from dataRef, not closure
 
