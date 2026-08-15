@@ -52,6 +52,18 @@ MODEL_PATH        = str(DATA_DIR / "models" / "thermal_xgb.json")
 BUFFER_PATH       = str(DATA_DIR / "models" / "training_buffer.npz")
 DB_PATH           = DATA_DIR / "data" / "ogn_history.db"
 
+# How long beacons are kept before the retention job deletes them.  The feed
+# writes ~6M rows/day worldwide (~800 MB), so without a cap the DB grows without
+# bound and fills the disk in weeks.
+#
+# The floor is set by readers, not by disk: seed_from_history() defaults to
+# days_back=3, so anything below that silently starves /seed of training data —
+# it would return "no rows" rather than fail, which is the worst way to break.
+# 7 days keeps the default seed working with margin and still bounds the file at
+# roughly 5-6 GB.  Raise it only with the disk headroom to match, and never set
+# it below the largest days_back you intend to pass to /seed.
+BEACON_RETENTION_DAYS = float(os.getenv("BEACON_RETENTION_DAYS", "7"))
+
 # --- Deployment ---------------------------------------------------------------
 # Comma-separated allowed origins. "*" is fine when the API and UI share an
 # origin (single-container deploy); set it explicitly for a split deploy.

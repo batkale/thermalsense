@@ -15,6 +15,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from config import (
     LAT_MIN, LAT_MAX, LON_MIN, LON_MAX, WORLDWIDE, OGN_APRS_PORT, OGN_APRS_FILTER,
+    BEACON_RETENTION_DAYS,
 )
 from config import DB_PATH as _DB_PATH
 
@@ -23,8 +24,15 @@ from config import DB_PATH as _DB_PATH
 def _init_db() -> None:
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(_DB_PATH) as con:
+        # Must be the first statements on the connection: journal_mode cannot be
+        # changed inside a transaction.  WAL persists in the file header; the
+        # rollback journal it replaces cost several fsyncs per beacon, and
+        # sqlite3 holds the GIL across them, freezing the event loop.
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA synchronous=NORMAL")
         con.execute("""
             CREATE TABLE IF NOT EXISTS beacons (
+
                 ts        TEXT NOT NULL,
                 id        TEXT NOT NULL,
                 lat       REAL NOT NULL,
@@ -61,26 +69,100 @@ def _init_db() -> None:
                 (LAT_MIN, LAT_MAX, LON_MIN, LON_MAX),
             )
 
-def _log_beacon(beacon: dict) -> None:
+# Beacon writes are batched.  One connection per beacon, each committing a single
+# row, meant ~70 transactions/s against a multi-hundred-MB file; batching cuts that
+# to roughly one every five seconds.  Only _stream_thread writes, so the connection
+# needs no lock — but it must be opened lazily from that thread, since sqlite3
+# rejects a connection used from a thread other than the one that created it.
+_writer: sqlite3.Connection | None = None
+_pending: list[tuple] = []
+_last_flush  = 0.0
+_FLUSH_ROWS  = 200
+_FLUSH_SECS  = 5.0
+
+
+def flush_beacons() -> None:
+    """Write any queued beacons.  Safe to call from the stream thread or shutdown."""
+    global _writer, _last_flush
+    _last_flush = time.monotonic()
+    if not _pending:
+        return
     try:
-        with sqlite3.connect(_DB_PATH) as con:
-            # Named columns, not positional VALUES — the table gained ac_type and
-            # a bare INSERT would silently shift every field on the next change.
-            con.execute(
+        if _writer is None:
+            _writer = sqlite3.connect(_DB_PATH)
+            _writer.execute("PRAGMA synchronous=NORMAL")   # per-connection, unlike journal_mode
+        # Named columns, not positional VALUES — the table gained ac_type and
+        # a bare INSERT would silently shift every field on the next change.
+        with _writer:                                      # one transaction per batch
+            _writer.executemany(
                 "INSERT INTO beacons"
                 " (ts, id, lat, lon, alt, vario, circling, is_tow, ac_type, under_tow)"
                 " VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (
-                    datetime.now(timezone.utc).isoformat(),
-                    beacon["id"], beacon["lat"], beacon["lon"],
-                    beacon["alt"], beacon["vario"],
-                    int(beacon["circling"]), int(beacon["is_tow"]),
-                    beacon.get("ac_type"),
-                    int(beacon.get("under_tow", False)),
-                )
+                _pending,
             )
     except Exception:
-        pass  # never let logging break the stream
+        # Drop the connection so the next flush rebuilds it; keeping a broken one
+        # would silently swallow every beacon from here on.
+        try:
+            if _writer is not None:
+                _writer.close()
+        except Exception:
+            pass
+        _writer = None
+    finally:
+        # Cleared either way: a batch that cannot be written must not accumulate
+        # until it exhausts memory.
+        _pending.clear()
+
+
+def purge_old_beacons(days: float | None = None, chunk: int = 50_000) -> int:
+    """
+    Delete beacons older than `days` (default BEACON_RETENTION_DAYS).  Returns
+    the number of rows removed.
+
+    Deleted in bounded chunks rather than as one statement: a single day of the
+    worldwide feed is several million rows, and one big DELETE would hold a write
+    transaction long enough to block the APRS writer behind it.  sqlite3 releases
+    the GIL around its C calls, so call this from a worker thread — never inline
+    on the event loop.
+    """
+    cutoff = (
+        datetime.now(timezone.utc)
+        - timedelta(days=BEACON_RETENTION_DAYS if days is None else days)
+    ).isoformat()
+    deleted = 0
+    try:
+        # timeout: the stream thread is writing concurrently, and WAL still
+        # serialises writers.  Wait rather than raise "database is locked".
+        with sqlite3.connect(_DB_PATH, timeout=30) as con:
+            con.execute("PRAGMA synchronous=NORMAL")
+            while True:
+                cur = con.execute(
+                    "DELETE FROM beacons WHERE ROWID IN"
+                    " (SELECT ROWID FROM beacons WHERE ts < ? LIMIT ?)",
+                    (cutoff, chunk),
+                )
+                con.commit()
+                deleted += cur.rowcount
+                if cur.rowcount < chunk:
+                    break
+    except Exception as exc:
+        print(f"[OGN] beacon purge failed: {exc}")
+    return deleted
+
+
+def _log_beacon(beacon: dict) -> None:
+    """Queue a beacon for the next batch write.  Stream thread only."""
+    _pending.append((
+        datetime.now(timezone.utc).isoformat(),
+        beacon["id"], beacon["lat"], beacon["lon"],
+        beacon["alt"], beacon["vario"],
+        int(beacon["circling"]), int(beacon["is_tow"]),
+        beacon.get("ac_type"),
+        int(beacon.get("under_tow", False)),
+    ))
+    if len(_pending) >= _FLUSH_ROWS or time.monotonic() - _last_flush >= _FLUSH_SECS:
+        flush_beacons()
 
 _APRS_SERVER  = "aprs.glidernet.org"
 _APRS_PORT    = OGN_APRS_PORT

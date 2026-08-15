@@ -8,13 +8,13 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import asyncio, json, logging
 import numpy as np
 from datetime import datetime, timezone, timedelta
-from data.ogn_client      import fetch_ogn_gliders, start_ogn_stream, fetch_glider_track, drain_beacon_buffers, is_thermal_evidence
+from data.ogn_client      import fetch_ogn_gliders, start_ogn_stream, fetch_glider_track, drain_beacon_buffers, is_thermal_evidence, flush_beacons, purge_old_beacons
 from data import meteo_client, terrain_client
 from data.meteo_client    import fetch_meteo_features
 from data.terrain_client  import fetch_elevation_grid, fetch_elevation_point, fetch_elevation_batch
 from pipeline.feature_engineering import build_feature_matrix
 from models.thermal_model import ThermalModel
-from config import UPDATE_INTERVAL, GRID_RES, GRID_RADIUS, CORS_ORIGINS, ADMIN_TOKEN, STATIC_DIR, DATA_DIR
+from config import UPDATE_INTERVAL, GRID_RES, GRID_RADIUS, CORS_ORIGINS, ADMIN_TOKEN, STATIC_DIR, DATA_DIR, BEACON_RETENTION_DAYS
 from pathlib import Path
 import shutil
 
@@ -75,6 +75,19 @@ def _seed_data_dir() -> None:
             log.info(f"[init] seeded {name} -> {dst}")
 
 
+async def _purge_job() -> None:
+    """Drop beacons past the retention window so the DB stops growing forever."""
+    try:
+        # to_thread, not inline: the delete is a multi-million-row write and
+        # running it on the event loop would stall every request behind it.
+        deleted = await asyncio.to_thread(purge_old_beacons)
+        if deleted:
+            log.info(f"[purge] removed {deleted:,} beacons older than "
+                     f"{BEACON_RETENTION_DAYS} days")
+    except Exception as exc:
+        log.warning(f"[purge] failed: {exc}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     start_ogn_stream()
@@ -86,10 +99,19 @@ async def lifespan(app: FastAPI):
         misfire_grace_time=UPDATE_INTERVAL // 2,  # tolerate up to 150s lateness
         coalesce=True,                             # merge stacked missed runs into one
     )
+    # Hourly, not daily: an hourly pass deletes at most an hour of feed, whereas
+    # a daily one wakes up to several million rows at once.  Nothing is due until
+    # the DB is older than the retention window, so early runs are no-ops.
+    scheduler.add_job(
+        _purge_job, "interval", hours=1, id="purge",
+        misfire_grace_time=1800,
+        coalesce=True,
+    )
     scheduler.start()
     yield
     scheduler.shutdown(wait=False)
     terrain_client.flush_point_cache(force=True)   # don't lose the last partial batch
+    flush_beacons()                                # same, for queued OGN beacons
     await meteo_client.aclose()
     await terrain_client.aclose()
 
