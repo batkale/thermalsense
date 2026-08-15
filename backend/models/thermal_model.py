@@ -61,6 +61,32 @@ def _plausible_coords(X: np.ndarray) -> np.ndarray:
     )
 
 
+def _grid_index(lat: float, lon: float,
+                lat_bounds: tuple[float, float],
+                lon_bounds: tuple[float, float],
+                shape: tuple[int, int]) -> int | None:
+    """
+    Flat index of the cell containing (lat, lon), or None if it falls outside.
+
+    Mirrors build_feature_matrix's layout exactly: lats run south->north over
+    `rows` points and lons west->east over `cols`, meshgrid(indexing="ij"), so
+    the flat index is row*cols + col.  Any change to that layout has to change
+    here too, which is why callers verify the result against columns 0/1 rather
+    than trusting the arithmetic.
+    """
+    rows, cols = shape
+    south, north = lat_bounds
+    west,  east  = lon_bounds
+    if not (south <= lat <= north and west <= lon <= east):
+        return None
+    # linspace endpoints are inclusive, hence rows-1 spacings across the span.
+    i = int(round((lat - south) / (north - south) * (rows - 1)))
+    j = int(round((lon - west) / (east - west) * (cols - 1)))
+    i = min(max(i, 0), rows - 1)
+    j = min(max(j, 0), cols - 1)
+    return i * cols + j
+
+
 def _centre_index(shape: tuple[int, int]) -> int:
     """
     Flat index of the middle cell of a (rows, cols) grid.
@@ -256,7 +282,7 @@ class ThermalModel:
         """
         from data.ogn_client import fetch_ogn_gliders, is_thermal_evidence
         from data.meteo_client import fetch_meteo_features
-        from data.terrain_client import fetch_elevation_grid
+        from data.terrain_client import fetch_elevation_grid, snap_grid_centre
         from pipeline.feature_engineering import build_feature_matrix
 
         try:
@@ -280,42 +306,83 @@ class ThermalModel:
         # Cap at 20 to avoid hammering APIs per retrain cycle.
         candidates = soaring[:20]
         above_base = dark = 0
+        # Ids already sampled this cycle.  A glider can be both a candidate and
+        # a co-occupant of another candidate's grid; sampling it twice would
+        # duplicate a row and let the same aircraft sit on both sides of the
+        # train/holdout split.
+        sampled: set[str] = set()
+        offset_samples = 0
+        considered = 0        # aircraft examined, which now exceeds len(candidates)
 
         for g in candidates:
             try:
+                if g["id"] in sampled:
+                    continue          # already captured inside an earlier grid
                 meteo = await fetch_meteo_features(g["lat"], g["lon"], 0)
                 elev  = await fetch_elevation_grid(g["lat"], g["lon"])
-                # Bounds are mandatory: without them build_feature_matrix falls back
-                # to row/column indices for the lat/lon columns, so online samples
-                # would carry lat=100, lon=0 while /predict serves real degrees.
+                # Bounds must come from the SNAPPED centre, not the raw glider
+                # position: fetch_elevation_grid builds and caches the array for
+                # the snapped point, so pairing it with unsnapped bounds labels
+                # every cell with coordinates up to ~550 m from the ground it
+                # actually describes.  /predict already snaps; training did not,
+                # which made served and trained features disagree.
+                grid_lat, grid_lon = snap_grid_centre(g["lat"], g["lon"])
+                lat_bounds = (grid_lat - GRID_RADIUS, grid_lat + GRID_RADIUS)
+                lon_bounds = (grid_lon - GRID_RADIUS, grid_lon + GRID_RADIUS)
                 feat  = build_feature_matrix(
                     meteo, elev, dt=now,
-                    lat_bounds=(g["lat"] - GRID_RADIUS, g["lat"] + GRID_RADIUS),
-                    lon_bounds=(g["lon"] - GRID_RADIUS, g["lon"] + GRID_RADIUS),
+                    lat_bounds=lat_bounds,
+                    lon_bounds=lon_bounds,
                     alt_amsl=g["alt"],
                 )
                 if meteo["solar_ghi"] < _MIN_SOLAR_GHI:
                     dark += 1
                     await asyncio.sleep(1.1)
                     continue
-                center = _centre_index(elev.shape)
-                if _above_thermal_base(g["alt"], feat[center, 2], meteo["cape_base"]):
-                    above_base += 1
-                    await asyncio.sleep(1.1)
-                    continue
-                label = int(g["circling"] and g["vario"] > 1.5)
-                # .copy() is load-bearing: feat[center] is a view that pins the whole
-                # (rows*cols, 21) matrix — ~6.4 MB per 168-byte sample.
-                self._buffer_X.append(feat[center].copy())
-                self._buffer_y.append(label)
+
+                # Every soaring aircraft inside this grid, not just the one it is
+                # centred on.  They share the grid's weather and terrain, so they
+                # cost no extra API calls, and they land on *different cells* —
+                # which is the only way to observe whether terrain variation
+                # within one weather regime tracks lift.  Sampling only the centre
+                # gave one terrain value per weather sample, so the two could
+                # never be separated.
+                occupants = [
+                    o for o in soaring
+                    if o["id"] not in sampled
+                    and lat_bounds[0] <= o["lat"] <= lat_bounds[1]
+                    and lon_bounds[0] <= o["lon"] <= lon_bounds[1]
+                ]
+                for o in occupants:
+                    idx = _grid_index(o["lat"], o["lon"], lat_bounds, lon_bounds, elev.shape)
+                    if idx is None:
+                        continue
+                    considered += 1
+                    row = feat[idx].copy()   # copy: a view pins the whole ~6.4 MB matrix
+                    # alt_agl (col 21) was built from the *candidate's* altitude for
+                    # every cell, so it is wrong for anyone else.  Recompute against
+                    # this aircraft's own altitude and the elevation under its cell.
+                    row[21] = max(0.0, float(o["alt"]) - float(row[2]))
+                    if _above_thermal_base(o["alt"], row[2], meteo["cape_base"]):
+                        above_base += 1
+                        sampled.add(o["id"])   # judged and rejected; do not retry
+                        continue
+                    self._buffer_X.append(row)
+                    self._buffer_y.append(int(o["circling"] and o["vario"] > 1.5))
+                    sampled.add(o["id"])
+                    if o["id"] != g["id"]:
+                        offset_samples += 1
                 await asyncio.sleep(1.1)  # terrain API: 1 req/s hard limit
             except Exception as exc:
                 log.warning(f"[model] sample skipped: {exc}")
 
         if above_base:
-            log.info(f"[model] {above_base}/{len(candidates)} dropped — above thermal base")
+            log.info(f"[model] {above_base}/{considered} dropped — above thermal base")
         if dark:
-            log.info(f"[model] {dark}/{len(candidates)} dropped — solar below {_MIN_SOLAR_GHI:.0f} W/m2")
+            log.info(f"[model] {dark}/{len(candidates)} grids dropped — solar below {_MIN_SOLAR_GHI:.0f} W/m2")
+        if offset_samples:
+            log.info(f"[model] {considered - offset_samples} centre + {offset_samples} off-centre "
+                     f"samples from {len(candidates)} grids (no extra API calls)")
 
         # Rolling window
         if len(self._buffer_X) > _MAX_BUFFER:
@@ -460,7 +527,7 @@ class ThermalModel:
         from datetime import datetime, timezone, timedelta
         import sqlite3
         from data.meteo_client import fetch_meteo_historical
-        from data.terrain_client import fetch_elevation_grid
+        from data.terrain_client import fetch_elevation_grid, snap_grid_centre
         from data.ogn_client import SOARING_AC_TYPES
         from pipeline.feature_engineering import build_feature_matrix
 
@@ -572,19 +639,28 @@ class ThermalModel:
             for lat, lon, alt, dt, vario, circling in beacons:
                 try:
                     elev  = await fetch_elevation_grid(lat, lon)
+                    # Snapped bounds — see retrain() for why raw coordinates
+                    # mislabel every cell in the grid.
+                    grid_lat, grid_lon = snap_grid_centre(lat, lon)
+                    lat_bounds = (grid_lat - GRID_RADIUS, grid_lat + GRID_RADIUS)
+                    lon_bounds = (grid_lon - GRID_RADIUS, grid_lon + GRID_RADIUS)
                     feat  = build_feature_matrix(
                         meteo, elev, dt=dt,
-                        lat_bounds=(lat - GRID_RADIUS, lat + GRID_RADIUS),
-                        lon_bounds=(lon - GRID_RADIUS, lon + GRID_RADIUS),
+                        lat_bounds=lat_bounds,
+                        lon_bounds=lon_bounds,
                         alt_amsl=alt,
                     )
-                    center = _centre_index(elev.shape)
-                    if _above_thermal_base(alt, feat[center, 2], meteo["cape_base"]):
+                    # The beacon's own cell, not the grid centre: snapping moves
+                    # the centre off the aircraft by up to half a coarse cell.
+                    idx = _grid_index(lat, lon, lat_bounds, lon_bounds, elev.shape)
+                    if idx is None:
+                        continue
+                    if _above_thermal_base(alt, feat[idx, 2], meteo["cape_base"]):
                         above_base += 1
                         continue
                     label  = int(circling and vario > 1.5)
                     # .copy() — see retrain(); a view here retains the whole matrix
-                    self._buffer_X.append(feat[center].copy())
+                    self._buffer_X.append(feat[idx].copy())
                     self._buffer_y.append(label)
                     added += 1
                 except Exception as exc:
