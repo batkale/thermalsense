@@ -107,6 +107,19 @@ _VAL_MIN_SAMPLES = 500   # 20% holdout ≥ 100 points only above this
 _MAX_BUFFER      = 21_024_000
 _MC_SAMPLES      = 50
 
+# Every cycle used to overwrite the saved model unconditionally, so a fit that
+# came out worse purely by chance permanently displaced a better one.  The
+# holdout carries only ~25-30 positives, and observed AUC bounced across a
+# ~0.02 band between consecutive fits with no real change behind it, so the
+# tolerance is set at that band: reject a fit only when it is worse by more
+# than ordinary noise, not merely worse.
+_AUC_TOLERANCE = 0.02
+# ...but a lucky high score must not freeze the model forever.  After this many
+# consecutive rejections (~1 hour at the 300s cycle) accept the current fit and
+# re-baseline to it, so online learning keeps adapting to the season and the
+# bar cannot be set by a fluke that never recurs.
+_MAX_CONSECUTIVE_SKIPS = 12
+
 # (column, kind, scale) — meteo-only columns; terrain cols 0-4 are never perturbed
 # kind="rel": multiplicative noise (scale = 1-sigma fraction of value)
 # kind="abs": additive noise      (scale = 1-sigma in feature units)
@@ -128,6 +141,25 @@ class ThermalModel:
         self.model = None
         self._buffer_X: list[np.ndarray] = []
         self._buffer_y: list[int] = []
+        self._skipped_fits = 0
+
+    def _saved_auc(self) -> float | None:
+        """Validation AUC of the model currently in memory, if it recorded one.
+
+        Stored as a booster attribute rather than a sidecar file so the score
+        travels inside thermal_xgb.json — the two can never disagree about which
+        model earned it, including across a redeploy that ships a new model.
+        """
+        if self.model is None:
+            return None
+        try:
+            raw = self.model.get_booster().attr("val_auc")
+        except Exception:
+            return None
+        try:
+            return float(raw) if raw is not None else None
+        except ValueError:
+            return None
 
     @property
     def is_loaded(self) -> bool:
@@ -356,12 +388,41 @@ class ThermalModel:
             if val_auc is None or not np.isfinite(val_auc):
                 log.warning("[model] validation AUC is not finite — discarding this fit")
                 return
+
+            # Quality gate.  Without it every cycle overwrote the live model
+            # regardless of score, so a noise-driven bad draw evicted a better
+            # model permanently and the next cycle started from the worse one.
+            best = self._saved_auc()
+            if best is not None and val_auc < best - _AUC_TOLERANCE:
+                self._skipped_fits += 1
+                if self._skipped_fits < _MAX_CONSECUTIVE_SKIPS:
+                    log.info(
+                        f"[model] val AUC={val_auc:.3f} vs saved {best:.3f} "
+                        f"(tolerance {_AUC_TOLERANCE}) — keeping the saved model "
+                        f"[{self._skipped_fits}/{_MAX_CONSECUTIVE_SKIPS}]"
+                    )
+                    self._save_buffer()   # samples are still worth keeping
+                    return
+                # Re-baseline rather than stay frozen on a score we can no longer
+                # reach: the conditions that produced it are probably gone.
+                log.warning(
+                    f"[model] {self._skipped_fits} consecutive fits below the bar — "
+                    f"accepting val AUC={val_auc:.3f} and re-baselining from {best:.3f}"
+                )
+            self._skipped_fits = 0
+            # Recorded on the booster so it is saved inside the model file.
+            clf.get_booster().set_attr(val_auc=f"{val_auc:.6f}")
             log.info(
                 f"[model] retrained on {split} samples, val AUC={val_auc:.3f} "
                 f"({pos} positives, {n - split} holdout), saved to {MODEL_PATH}"
             )
         else:
+            # No holdout means no score to compare, so the gate cannot apply.
+            # Clear any stale score rather than let the next fit be judged
+            # against one this model did not earn.
             clf.fit(X, y)
+            clf.get_booster().set_attr(val_auc=None)
+            self._skipped_fits = 0
             log.info(
                 f"[model] retrained on {n} samples ({pos} positives) — "
                 f"no validation holdout, saved to {MODEL_PATH}"
