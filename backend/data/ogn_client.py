@@ -44,6 +44,12 @@ def _init_db() -> None:
             )
         """)
         con.execute("CREATE INDEX IF NOT EXISTS idx_ts ON beacons(ts)")
+        # Composite, and the column order matters.  fetch_glider_track filters
+        # "id = ? AND ts >= ?"; with only idx_ts, sqlite narrows on ts and then
+        # scans every row in the window looking for the id — ~4M rows and 1.5s
+        # per track on a worldwide feed, holding the GIL throughout, once per
+        # glider on the map.  Leading with id makes it a direct range lookup.
+        con.execute("CREATE INDEX IF NOT EXISTS idx_id_ts ON beacons(id, ts)")
 
         # Migration: rows written before aircraft-type filtering have no ac_type.
         # They stay NULL, which the training query treats as "unclassifiable" and
