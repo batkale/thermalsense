@@ -40,6 +40,11 @@ from config import (
     BUFFER_PATH, MODEL_PATH, GRID_RES, TERRAIN_RES,
 )
 from pipeline.feature_engineering import build_feature_matrix
+# _grid_index lives next to the online sampler because it mirrors
+# build_feature_matrix's cell layout; this script writes to the same buffer, so
+# it has to place a sample in the grid exactly the same way.
+from models.thermal_model import _grid_index
+from data.terrain_client import snap_grid_centre
 
 log = logging.getLogger("seed")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -221,8 +226,18 @@ async def fetch_historical_meteo(client: httpx.AsyncClient,
 async def fetch_elevation_grid_historical(client: httpx.AsyncClient,
                                            lat: float, lon: float,
                                            radius: float = 0.05) -> np.ndarray | None:
-    lats = np.arange(lat - radius, lat + radius, TERRAIN_RES)
-    lons = np.arange(lon - radius, lon + radius, TERRAIN_RES)
+    """Coarse SRTM around (lat, lon), upsampled to GRID_RES.
+
+    Centred on snap_grid_centre(lat, lon) and spanning [centre - radius,
+    centre + radius] inclusive on both axes, matching data.terrain_client's
+    fetch_elevation_grid.  Callers must derive their lat/lon bounds from the
+    snapped centre; arange's exclusive upper bound previously left the grid a
+    coarse cell short of the span the caller labelled it with.
+    """
+    lat, lon = snap_grid_centre(lat, lon)
+    n_coarse = round((2 * radius) / TERRAIN_RES) + 1
+    lats = np.linspace(lat - radius, lat + radius, n_coarse)
+    lons = np.linspace(lon - radius, lon + radius, n_coarse)
     lat_g, lon_g = np.meshgrid(lats, lons, indexing="ij")
     points = list(zip(lat_g.ravel().tolist(), lon_g.ravel().tolist()))
 
@@ -241,9 +256,12 @@ async def fetch_elevation_grid_historical(client: httpx.AsyncClient,
 
     coarse = np.array(elevs, dtype=float).reshape(lat_g.shape)
 
-    # Upsample to GRID_RES with bilinear interpolation
-    fine_lats = np.arange(lat - radius, lat + radius, GRID_RES)
-    fine_lons = np.arange(lon - radius, lon + radius, GRID_RES)
+    # Upsample to GRID_RES with bilinear interpolation. linspace, not arange:
+    # the fine lattice has to reach lat + radius, because that is the bound
+    # build_feature_matrix spreads its coordinate labels across.
+    n_fine    = round((2 * radius) / GRID_RES) + 1
+    fine_lats = np.linspace(lat - radius, lat + radius, n_fine)
+    fine_lons = np.linspace(lon - radius, lon + radius, n_fine)
     fine_lat_g, fine_lon_g = np.meshgrid(fine_lats, fine_lons, indexing="ij")
 
     r_idx = np.clip(
@@ -585,14 +603,22 @@ async def seed_from_fixes(samples: list[dict], buffer_X: list, buffer_y: list) -
             if elev is None:
                 continue
 
+            grid_lat, grid_lon = snap_grid_centre(s["lat"], s["lon"])
+            lat_bounds = (grid_lat - radius, grid_lat + radius)
+            lon_bounds = (grid_lon - radius, grid_lon + radius)
             feat  = build_feature_matrix(
                 meteo, elev,
-                lat_bounds=(s["lat"] - radius, s["lat"] + radius),
-                lon_bounds=(s["lon"] - radius, s["lon"] + radius),
+                lat_bounds=lat_bounds,
+                lon_bounds=lon_bounds,
                 dt=s["time"],
             )
+            # feat.shape[0] // 2 is half of rows*cols, i.e. row 100 column 0 —
+            # the westernmost edge, ~3.5 km from the fix this sample is about.
+            idx = _grid_index(s["lat"], s["lon"], lat_bounds, lon_bounds, elev.shape)
+            if idx is None:
+                continue
             label = int(s["circling"] and s["vario"] > _THERMAL_VARIO)
-            buffer_X.append(feat[feat.shape[0] // 2])
+            buffer_X.append(feat[idx])
             buffer_y.append(label)
             added += 1
 
@@ -627,13 +653,20 @@ async def seed(igc_texts: list[str], buffer_X: list, buffer_y: list,
                 if elev is None:
                     continue
 
+                grid_lat, grid_lon = snap_grid_centre(s["lat"], s["lon"])
+                lat_bounds = (grid_lat - radius, grid_lat + radius)
+                lon_bounds = (grid_lon - radius, grid_lon + radius)
                 feat   = build_feature_matrix(
                     meteo, elev,
-                    lat_bounds=(s["lat"] - radius, s["lat"] + radius),
-                    lon_bounds=(s["lon"] - radius, s["lon"] + radius),
+                    lat_bounds=lat_bounds,
+                    lon_bounds=lon_bounds,
                     dt=s["time"],
                 )
-                center = feat.shape[0] // 2
+                # See seed_from_fixes: shape[0] // 2 lands on the western edge,
+                # not the centre.  Index the cell the fix is actually inside.
+                center = _grid_index(s["lat"], s["lon"], lat_bounds, lon_bounds, elev.shape)
+                if center is None:
+                    continue
                 label  = int(s["circling"] and s["vario"] > _THERMAL_VARIO)
                 buffer_X.append(feat[center])
                 buffer_y.append(label)

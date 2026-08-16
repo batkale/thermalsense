@@ -424,8 +424,11 @@ function HeatmapCanvas({ heatmap, gridMeta, gliders, pinnedId, gliderPathsRef })
     // ---- heatmap grid ----
     if (heatmap && gridMeta) {
       const { lat, lon, rows, cols, radius } = gridMeta;
-      const latStep = (2 * radius) / rows;
-      const lonStep = (2 * radius) / cols;
+      // The grid is a lattice of sample points spanning [centre-radius,
+      // centre+radius] inclusive, so there are rows-1 gaps between rows — not
+      // rows. Dividing by rows stretches the drawing ~0.5% past the data.
+      const latStep = (2 * radius) / (rows - 1);
+      const lonStep = (2 * radius) / (cols - 1);
 
       heatmap.forEach((prob, i) => {
         const color = thermalColor(prob);
@@ -433,8 +436,10 @@ function HeatmapCanvas({ heatmap, gridMeta, gliders, pinnedId, gliderPathsRef })
 
         const row     = Math.floor(i / cols);
         const col     = i % cols;
-        const cellLat = lat - radius + row * latStep;
-        const cellLon = lon - radius + col * lonStep;
+        // Each sample sits at the centre of the cell it colours, so the painted
+        // square straddles it rather than hanging off to the north-east.
+        const cellLat = lat - radius + row * latStep - latStep / 2;
+        const cellLon = lon - radius + col * lonStep - lonStep / 2;
 
         const sw = map.latLngToContainerPoint([cellLat,            cellLon]);
         const ne = map.latLngToContainerPoint([cellLat + latStep,  cellLon + lonStep]);

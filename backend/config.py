@@ -42,10 +42,15 @@ OGN_APRS_PORT     = 10152 if WORLDWIDE else 14580
 OGN_APRS_FILTER   = "" if WORLDWIDE else f"a/{LAT_MAX}/{LON_MIN}/{LAT_MIN}/{LON_MAX}"
 
 GRID_RES          = 0.0005        # degrees per cell (~50 m)
-TERRAIN_RES       = 0.01          # coarse terrain fetch resolution (upsampled to GRID_RES)
-# Half-width of a prediction/training grid. Must match fetch_elevation_grid's
-# default radius and the frontend's PREDICT_RADIUS — training features and
-# served features have to describe the same patch of ground.
+# Coarse terrain fetch resolution (bilinearly upsampled to GRID_RES).  Doubles as
+# the lattice that grid centres snap to, so every terrain sample lands on an exact
+# multiple of it and neighbouring grids share cached points.
+TERRAIN_RES       = 0.01
+# Half-width of a prediction/training grid, spanned inclusively on both axes:
+# 2*GRID_RADIUS/GRID_RES + 1 = 201 points per side at exactly GRID_RES apart.
+# fetch_elevation_grid takes its default radius from here, but the frontend's
+# PREDICT_RADIUS is a separate copy that must be kept equal — training features
+# and served features have to describe the same patch of ground.
 GRID_RADIUS       = 0.05          # degrees (~11 x 7 km at UK latitudes)
 UPDATE_INTERVAL   = 300           # seconds between OGN polls
 MODEL_PATH        = str(DATA_DIR / "models" / "thermal_xgb.json")

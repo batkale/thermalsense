@@ -5,14 +5,16 @@ import httpx
 import numpy as np
 from pathlib import Path
 from scipy.ndimage import zoom as ndimage_zoom
-from config import SRTM_BASE, GRID_RES, TERRAIN_RES, DATA_DIR
+from config import SRTM_BASE, GRID_RES, TERRAIN_RES, GRID_RADIUS, DATA_DIR
 
 log = logging.getLogger(__name__)
 
 # Session-level cache keyed by (lat, lon) rounded to 2 dp (~1 km resolution)
 _elev_cache: dict[tuple[float, float], int] = {}
 
-# Grid cache keyed by (lat, lon, radius) rounded to 2 dp — terrain grids are static
+# Grid cache keyed by (snapped lat, snapped lon, radius) — terrain grids are static.
+# The key must be the centre the array was actually built around; see
+# snap_grid_centre for why anything looser hands out the wrong patch of ground.
 _grid_cache: dict[tuple[float, float, float], np.ndarray] = {}
 
 # --- Disk cache ---------------------------------------------------------------
@@ -33,7 +35,30 @@ _POINT_FLUSH_EVERY = 50
 
 def _grid_path(key: tuple[float, float, float]) -> Path:
     lat, lon, radius = key
-    return _CACHE_DIR / f"g_{lat:+.1f}_{lon:+.1f}_{radius:.3f}.npy"
+    # 2 dp, matching the lattice snap_grid_centre rounds to. Files written by the
+    # old 1 dp scheme carry a different name, so they are simply never read again
+    # rather than being mistaken for grids centred where their name claims.
+    return _CACHE_DIR / f"g_{lat:+.2f}_{lon:+.2f}_{radius:.3f}.npy"
+
+
+def snap_grid_centre(lat: float, lon: float) -> tuple[float, float]:
+    """
+    Snap a requested centre onto the terrain lattice.
+
+    Callers that build a feature matrix from fetch_elevation_grid MUST derive
+    their lat/lon bounds from this rather than from the raw request point. The
+    grid is fetched, cached and returned for the snapped centre; pairing it with
+    unsnapped bounds labels every cell with coordinates it does not describe,
+    which is how two gliders a kilometre apart used to get maps of different
+    ground while claiming to cover the same zone.
+
+    Snapping moves the centre by at most half a coarse cell (~550 m at
+    TERRAIN_RES), which is finer than the terrain is sampled, and it puts every
+    sample on an exact multiple of TERRAIN_RES so neighbouring grids share
+    coarse points through the persistent point cache instead of refetching them.
+    """
+    return (round(round(lat / TERRAIN_RES) * TERRAIN_RES, 6),
+            round(round(lon / TERRAIN_RES) * TERRAIN_RES, 6))
 
 
 def load_caches() -> None:
@@ -188,28 +213,50 @@ async def fetch_elevation_batch(
     return out
 
 
-async def fetch_elevation_grid(lat: float, lon: float, radius: float = 0.05) -> np.ndarray:
+def grid_shape(radius: float = GRID_RADIUS) -> tuple[int, int]:
+    """Shape of the fine grid fetch_elevation_grid returns for a given radius."""
+    n = round((2 * radius) / GRID_RES) + 1
+    return (n, n)
+
+
+async def fetch_elevation_grid(lat: float, lon: float,
+                               radius: float = GRID_RADIUS) -> np.ndarray:
     """
     Fetch coarse SRTM 30m elevation at TERRAIN_RES, then bilinearly upsample to GRID_RES.
 
-    Coarse grid: radius/TERRAIN_RES points per axis → ≤10×10 = 100 pts → 1 API batch.
-    Fine grid:   zoom factor TERRAIN_RES/GRID_RES → 200×200 = 40,000 cells at ~50 m.
-    Rate limit: 1 req/s between chunks.  Falls back to flat-zero on any failure.
+    The grid is centred on snap_grid_centre(lat, lon) — NOT on the point passed in —
+    and spans exactly [centre - radius, centre + radius] on both axes, inclusive of
+    both edges.  Callers must build their lat/lon bounds from the same snapped
+    centre, or the cells carry coordinates the elevations underneath them do not
+    belong to.
+
+    Both edges being inclusive is load-bearing.  Sampling with endpoint=False
+    covered 2*radius - TERRAIN_RES of ground while build_feature_matrix labelled
+    the result as the full 2*radius, stretching the terrain ~11% across the grid
+    and displacing the far edge by a whole coarse cell.
+
+    Coarse grid: 2*radius/TERRAIN_RES + 1 points per axis → 11×11 = 121 pts.
+    Fine grid:   2*radius/GRID_RES + 1 per axis → 201×201 cells at exactly GRID_RES.
+    Points are fetched through fetch_elevation_batch so overlapping grids share
+    them via the persistent point cache.  Falls back to flat-zero on any failure.
     """
-    # Round to 1 dp (~10 km) so the cache survives glider movement within the grid area
-    key = (round(lat, 1), round(lon, 1), radius)
+    clat, clon = snap_grid_centre(lat, lon)
+    key = (clat, clon, radius)
     if key in _grid_cache:
         return _grid_cache[key]
 
-    n_lat = n_lon = round((2 * radius) / TERRAIN_RES)   # always 10 for default params
-    lats_c = np.linspace(lat - radius, lat + radius, n_lat, endpoint=False)
-    lons_c = np.linspace(lon - radius, lon + radius, n_lon, endpoint=False)
-
-    zoom_factor = TERRAIN_RES / GRID_RES
-    fine_shape = (n_lat * round(zoom_factor), n_lon * round(zoom_factor))
+    n_coarse   = round((2 * radius) / TERRAIN_RES) + 1   # 11 for default params
+    fine_shape = grid_shape(radius)                      # (201, 201)
+    lats_c = np.linspace(clat - radius, clat + radius, n_coarse)
+    lons_c = np.linspace(clon - radius, clon + radius, n_coarse)
 
     def _upsample(coarse: np.ndarray) -> np.ndarray:
-        fine = ndimage_zoom(coarse, zoom_factor, order=1)   # bilinear
+        if coarse.shape != (n_coarse, n_coarse):
+            raise ValueError(f"coarse grid is {coarse.shape}, expected "
+                             f"{(n_coarse, n_coarse)}")
+        # Endpoint-to-endpoint: coarse[0] lands on fine[0] and coarse[-1] on
+        # fine[-1], so the fine lattice spans the same ground at exactly GRID_RES.
+        fine = ndimage_zoom(coarse, fine_shape[0] / n_coarse, order=1)  # bilinear
         return fine[: fine_shape[0], : fine_shape[1]]
 
     # Disk cache — the reason a redeployed container doesn't re-pay the
@@ -223,18 +270,17 @@ async def fetch_elevation_grid(lat: float, lon: float, radius: float = 0.05) -> 
         except Exception as exc:
             log.warning(f"[terrain] cached grid {path.name} unreadable ({exc}) — refetching")
 
+    pts = [(float(la), float(lo)) for la in lats_c for lo in lons_c]
     try:
-        all_pts = [f"{la:.5f},{lo:.5f}" for la in lats_c for lo in lons_c]
-        elevs: list[float] = []
-        client = _get_client()
-        for i in range(0, len(all_pts), 100):
-            if i > 0:
-                await asyncio.sleep(1.1)
-            chunk = all_pts[i : i + 100]
-            r = await _get_with_retry(client, f"{SRTM_BASE}?locations={'|'.join(chunk)}")
-            r.raise_for_status()
-            elevs.extend(p["elevation"] or 0 for p in r.json()["results"])
-        coarse = np.array(elevs, dtype=float).reshape(n_lat, n_lon)
+        # Every lattice point is an exact multiple of TERRAIN_RES = the batch
+        # cache's 2 dp key, so a neighbouring grid one lattice step away reuses
+        # all but one row of these instead of refetching the whole window.
+        budget = -(-len(pts) // MAX_BATCH_POINTS)   # ceil: never truncate the grid
+        elevs = await fetch_elevation_batch(pts, max_requests=budget)
+        missing = sum(elevs.get(p) is None for p in pts)
+        if missing:
+            raise RuntimeError(f"{missing}/{len(pts)} points unresolved")
+        coarse = np.array([elevs[p] for p in pts], dtype=float).reshape(n_coarse, n_coarse)
         fine = _upsample(coarse)
         _grid_cache[key] = fine
         try:

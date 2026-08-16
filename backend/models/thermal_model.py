@@ -6,6 +6,8 @@ import numpy as np
 from datetime import datetime, timezone
 from pathlib import Path
 from config import MODEL_PATH, BUFFER_PATH, GRID_RADIUS, LAT_MIN, LAT_MAX, LON_MIN, LON_MAX
+from evaluation.holdout import split as bench_split
+from evaluation.metrics import grouped_auc, paired_delta_ci
 from pipeline.feature_engineering import FEATURE_COUNT
 
 
@@ -125,22 +127,33 @@ _MIN_SOLAR_GHI = 50.0     # W/m2 — roughly deep twilight
 # A fit needs enough of the positive class to be worth anything.  Below this the
 # AUC comes back nan and the resulting model predicts ~0 everywhere; saving it
 # would replace a working model with a degenerate one.
-_MIN_POSITIVES         = 20
-_MIN_HOLDOUT_POSITIVES = 5
+_MIN_POSITIVES = 20
 
-_MIN_SAMPLES     = 100
-_VAL_MIN_SAMPLES = 500   # 20% holdout ≥ 100 points only above this
-_MAX_BUFFER      = 21_024_000
-_MC_SAMPLES      = 50
+_MIN_SAMPLES = 100
+_MAX_BUFFER  = 21_024_000
+_MC_SAMPLES  = 50
 
-# Every cycle used to overwrite the saved model unconditionally, so a fit that
-# came out worse purely by chance permanently displaced a better one.  The
-# holdout carries only ~25-30 positives, and observed AUC bounced across a
-# ~0.02 band between consecutive fits with no real change behind it, so the
-# tolerance is set at that band: reject a fit only when it is worse by more
-# than ordinary noise, not merely worse.
-_AUC_TOLERANCE = 0.02
-# ...but a lucky high score must not freeze the model forever.  After this many
+# Mixed-label groups the frozen benchmark must contain before its score is
+# trusted as a gate.  Only groups holding both a positive and a negative
+# support a ranking comparison, and measured across fold seeds the score moved
+# by ±0.05 on ~20 of them — as much as any improvement worth shipping.  Below
+# this the comparison would be gating on noise, so it abstains instead.
+_MIN_BENCH_GROUPS = 30
+
+# Marks a model whose recorded score came from the frozen benchmark.  Models
+# saved before this harness were fitted on a positional split, so their
+# training data overlaps today's benchmark groups and they would score
+# unfairly well on it.  Absent attribute => score is not comparable.
+_BENCH_ATTR = "bench_micro"
+
+# A fixed AUC tolerance used to stand here, chosen to match the observed noise
+# band.  It is gone because the comparison it guarded is now paired — both
+# models are scored on the same benchmark rows, so shared sampling noise
+# cancels and the bootstrap reports the residual directly.  A rejection needs
+# the whole interval below zero, which adapts to however much data exists
+# instead of hard-coding one era's noise level.
+#
+# A lucky high score must still not freeze the model forever.  After this many
 # consecutive rejections (~1 hour at the 300s cycle) accept the current fit and
 # re-baseline to it, so online learning keeps adapting to the season and the
 # bar cannot be set by a fluke that never recurs.
@@ -169,23 +182,42 @@ class ThermalModel:
         self._buffer_y: list[int] = []
         self._skipped_fits = 0
 
-    def _saved_auc(self) -> float | None:
-        """Validation AUC of the model currently in memory, if it recorded one.
+    def _saved_bench_score(self) -> float | None:
+        """
+        Benchmark score the in-memory model recorded, if it earned one here.
 
         Stored as a booster attribute rather than a sidecar file so the score
         travels inside thermal_xgb.json — the two can never disagree about which
         model earned it, including across a redeploy that ships a new model.
+
+        None means "not comparable", which covers both no model and a model
+        predating the frozen benchmark.  The gate treats that as no baseline
+        rather than as a zero, so a legacy model is replaced once rather than
+        defended with a score it never earned on these rows.
         """
         if self.model is None:
             return None
         try:
-            raw = self.model.get_booster().attr("val_auc")
+            raw = self.model.get_booster().attr(_BENCH_ATTR)
         except Exception:
             return None
         try:
             return float(raw) if raw is not None else None
         except ValueError:
             return None
+
+    def _score_served(self, clf, X: np.ndarray) -> np.ndarray:
+        """
+        Score X exactly as production would.
+
+        predict() multiplies model output by _terrain_multiplier, so that
+        product — not the bare classifier — is what has to be evaluated.  The
+        old gate scored the classifier alone and therefore never measured the
+        artefact being served.  MC noise is skipped deliberately: it perturbs
+        meteo columns, which are constant within a group, so it cannot change
+        within-group ranking and would only add variance.
+        """
+        return clf.predict_proba(X)[:, 1] * self._terrain_multiplier(X)
 
     @property
     def is_loaded(self) -> bool:
@@ -394,6 +426,18 @@ class ThermalModel:
         # away real work; durability must not depend on reaching the fit threshold.
         self._save_buffer()
 
+        self.fit_and_gate()
+
+    def fit_and_gate(self) -> None:
+        """
+        Fit on the current buffer and decide whether the result may replace the
+        model in service.
+
+        Split out from retrain() so the decision can be exercised without
+        standing up the whole collection path — the gate is the part with the
+        subtle failure modes, and mocking OGN, meteo and terrain to reach it
+        made those tests slow and indirect.
+        """
         n = len(self._buffer_X)
         if n < _MIN_SAMPLES:
             log.info(f"[model] buffer {n}/{_MIN_SAMPLES} samples — skipping fit")
@@ -413,17 +457,26 @@ class ThermalModel:
             )
             return
 
-        split = int(n * 0.8)
-        # A holdout with no positives makes AUC nan and early stopping meaningless.
-        use_holdout = (
-            n >= _VAL_MIN_SAMPLES
-            and int(y[split:].sum()) >= _MIN_HOLDOUT_POSITIVES
-        )
-        if n >= _VAL_MIN_SAMPLES and not use_holdout:
-            log.warning(
-                f"[model] holdout has {int(y[split:].sum())} positives "
-                f"(need {_MIN_HOLDOUT_POSITIVES}) — fitting without validation"
-            )
+        # Frozen, group-disjoint three-way split (see evaluation/holdout.py).
+        # The old positional split scored each fit on the newest 20% and compared
+        # that to a number the saved model earned on a *different* newest 20%, so
+        # the gate was differencing two measurements taken on different samples —
+        # no tolerance value can rescue that.  Here every fit meets the same
+        # benchmark rows, and whole (day, region) groups move together so the
+        # near-duplicate rows that occupants of one grid produce cannot straddle
+        # the boundary.
+        (Xf, yf, _), (Xes, yes, _), (Xb, yb, gb) = bench_split(X, y)
+
+        bench = (grouped_auc(np.zeros(len(yb)), yb, gb) if len(yb)
+                 else {"groups": 0, "pairs": 0})
+        gated = bench["groups"] >= _MIN_BENCH_GROUPS
+
+        # Early stopping picks the boosting round, so it needs its own slice.
+        # Reading the reported score off the same rows that chose the round
+        # reports the maximum of a noisy series over ~200 rounds as if it were
+        # an estimate, which inflated both the level and the swing.
+        use_es = len(yes) > 0 and 0 < int(yes.sum()) < len(yes)
+        fit_pos = int(yf.sum())
 
         clf = xgb.XGBClassifier(
             n_estimators=200,
@@ -431,68 +484,83 @@ class ThermalModel:
             learning_rate=0.1,
             subsample=0.8,
             colsample_bytree=0.8,
-            scale_pos_weight=max(1.0, (n - pos) / max(1, pos)),
+            scale_pos_weight=max(1.0, (len(yf) - fit_pos) / max(1, fit_pos)),
             tree_method="hist",
             n_jobs=-1,
             eval_metric="auc",
             random_state=42,
             # XGBoost >= 2.0 takes early stopping on the constructor; passing it to
             # fit() raises TypeError.  Only valid alongside an eval_set.
-            early_stopping_rounds=20 if use_holdout else None,
+            early_stopping_rounds=20 if use_es else None,
         )
+        if use_es:
+            clf.fit(Xf, yf, eval_set=[(Xes, yes)], verbose=False)
+        else:
+            clf.fit(Xf, yf)
 
-        if use_holdout:
-            # Chronological split — the buffer is appended in time order, so a
-            # random split would leak future weather into the training half.
-            clf.fit(
-                X[:split], y[:split],
-                eval_set=[(X[split:], y[split:])],
-                verbose=False,
-            )
-            val_auc = getattr(clf, "best_score", None)
-            if val_auc is None:
-                val_auc = clf.evals_result()["validation_0"]["auc"][-1]
-            if val_auc is None or not np.isfinite(val_auc):
-                log.warning("[model] validation AUC is not finite — discarding this fit")
-                return
-
-            # Quality gate.  Without it every cycle overwrote the live model
-            # regardless of score, so a noise-driven bad draw evicted a better
-            # model permanently and the next cycle started from the worse one.
-            best = self._saved_auc()
-            if best is not None and val_auc < best - _AUC_TOLERANCE:
-                self._skipped_fits += 1
-                if self._skipped_fits < _MAX_CONSECUTIVE_SKIPS:
-                    log.info(
-                        f"[model] val AUC={val_auc:.3f} vs saved {best:.3f} "
-                        f"(tolerance {_AUC_TOLERANCE}) — keeping the saved model "
-                        f"[{self._skipped_fits}/{_MAX_CONSECUTIVE_SKIPS}]"
-                    )
-                    self._save_buffer()   # samples are still worth keeping
-                    return
-                # Re-baseline rather than stay frozen on a score we can no longer
-                # reach: the conditions that produced it are probably gone.
-                log.warning(
-                    f"[model] {self._skipped_fits} consecutive fits below the bar — "
-                    f"accepting val AUC={val_auc:.3f} and re-baselining from {best:.3f}"
+        if not gated:
+            # Not enough of the benchmark is comparable to judge this fit.
+            # Replacing a working model on an unverifiable basis is exactly the
+            # failure this gate exists to stop, so keep what is already serving
+            # and let the buffer grow.  With no model at all, an unverified one
+            # still beats the physics fallback.
+            if self.model is not None:
+                log.info(
+                    f"[model] benchmark has {bench['groups']} mixed-label groups "
+                    f"(need {_MIN_BENCH_GROUPS}) — cannot verify this fit, "
+                    f"keeping the model already in service"
                 )
-            self._skipped_fits = 0
-            # Recorded on the booster so it is saved inside the model file.
-            clf.get_booster().set_attr(val_auc=f"{val_auc:.6f}")
-            log.info(
-                f"[model] retrained on {split} samples, val AUC={val_auc:.3f} "
-                f"({pos} positives, {n - split} holdout), saved to {MODEL_PATH}"
+                self._save_buffer()
+                return
+            clf.get_booster().set_attr(**{_BENCH_ATTR: None})
+            log.warning(
+                f"[model] no model in service and benchmark not yet scoreable "
+                f"({bench['groups']}/{_MIN_BENCH_GROUPS} groups) — accepting an "
+                f"unverified fit on {len(yf)} samples"
             )
         else:
-            # No holdout means no score to compare, so the gate cannot apply.
-            # Clear any stale score rather than let the next fit be judged
-            # against one this model did not earn.
-            clf.fit(X, y)
-            clf.get_booster().set_attr(val_auc=None)
+            challenger = self._score_served(clf, Xb)
+            score = grouped_auc(challenger, yb, gb)["micro"]
+            if not np.isfinite(score):
+                log.warning("[model] benchmark score is not finite — discarding this fit")
+                return
+
+            baseline = self._saved_bench_score()
+            if baseline is not None:
+                # Both models scored on the *same* rows, so the comparison is
+                # paired: shared sampling noise cancels in the difference, which
+                # is far more sensitive than differencing two independent
+                # intervals.  Reject only when the evidence says the challenger
+                # is genuinely worse, not merely worse on the point estimate.
+                delta = paired_delta_ci(
+                    self._score_served(self.model, Xb), challenger, yb, gb,
+                    n_boot=1000,
+                )
+                if delta["hi"] < 0:
+                    self._skipped_fits += 1
+                    if self._skipped_fits < _MAX_CONSECUTIVE_SKIPS:
+                        log.info(
+                            f"[model] benchmark {score:.3f} vs serving {baseline:.3f}, "
+                            f"paired delta {delta['point']:+.3f} "
+                            f"[{delta['lo']:+.3f}, {delta['hi']:+.3f}] over "
+                            f"{delta['groups']} groups — reliably worse, keeping the "
+                            f"serving model [{self._skipped_fits}/{_MAX_CONSECUTIVE_SKIPS}]"
+                        )
+                        self._save_buffer()   # samples are still worth keeping
+                        return
+                    # Re-baseline rather than stay frozen on a bar we can no
+                    # longer clear: the conditions that produced it are gone.
+                    log.warning(
+                        f"[model] {self._skipped_fits} consecutive fits below the bar — "
+                        f"accepting benchmark {score:.3f} and re-baselining "
+                        f"from {baseline:.3f}"
+                    )
             self._skipped_fits = 0
+            clf.get_booster().set_attr(**{_BENCH_ATTR: f"{score:.6f}"})
             log.info(
-                f"[model] retrained on {n} samples ({pos} positives) — "
-                f"no validation holdout, saved to {MODEL_PATH}"
+                f"[model] retrained on {len(yf)} samples ({fit_pos} positives), "
+                f"benchmark within-group AUC={score:.3f} over {bench['groups']} "
+                f"groups / {bench['pairs']} pairs, saved to {MODEL_PATH}"
             )
 
         Path(MODEL_PATH).parent.mkdir(parents=True, exist_ok=True)
@@ -512,8 +580,9 @@ class ThermalModel:
 
         Groups beacons into (0.5° lat × 0.5° lon × UTC hour) buckets so that
         historical meteo is fetched once per bucket rather than once per beacon.
-        Terrain is fetched via fetch_elevation_grid which caches at the 0.1° level,
-        so repeated calls within the same grid area are near-free.
+        Terrain is fetched via fetch_elevation_grid, which snaps to the 0.01°
+        lattice and caches per-point, so beacons in the same area reuse each
+        other's coarse elevations and repeated calls are near-free.
 
         Labels are derived the same way as online retraining:
           1 = circling AND vario > 1.5 m/s  (confirmed thermal)

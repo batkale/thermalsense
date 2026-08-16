@@ -61,7 +61,17 @@ export function useBackend() {
       const data = await fetchPrediction(lat, lon, forecastH, alt);
 
       setHeatmap(data.heatmap);
-      setGridMeta({ lat, lon, rows: data.rows, cols: data.cols, radius: PREDICT_RADIUS });
+      // Draw at the grid's own centre, not the point we asked about. The backend
+      // snaps the request onto the terrain lattice (up to ~550 m), and drawing
+      // the cells anywhere else puts every prediction on the wrong ground.
+      // Fall back to the request point only for a backend too old to report it.
+      setGridMeta({
+        lat:    data.grid_lat ?? lat,
+        lon:    data.grid_lon ?? lon,
+        rows:   data.rows,
+        cols:   data.cols,
+        radius: PREDICT_RADIUS,
+      });
       setWeather(data.weather);
     } catch (e) {
       setError(e.message);

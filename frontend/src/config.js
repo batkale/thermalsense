@@ -49,5 +49,8 @@ export const ADMIN_TOKEN = import.meta.env.VITE_ADMIN_TOKEN ?? '';
 export const MAP_CENTER = [39.8167, 30.1167]; // İnönü havaalanı (THK yelken kanat merkezi)
 export const MAP_ZOOM   = 11;
 
-// Must match backend fetch_elevation_grid default radius
-export const PREDICT_RADIUS = 0.05; // degrees → ~11 × 7 km area, 200 × 200 cells at ~50 m each
+// Must match backend fetch_elevation_grid default radius (config.py GRID_RADIUS).
+// The grid spans centre ± this on both axes, inclusive of both edges, so it is
+// 201 × 201 sample points at exactly GRID_RES apart — use rows-1/cols-1 when
+// converting an index back to a coordinate.
+export const PREDICT_RADIUS = 0.05; // degrees → ~11 × 7 km area at ~50 m per cell

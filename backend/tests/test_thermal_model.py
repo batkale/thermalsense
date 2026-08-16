@@ -105,7 +105,7 @@ async def test_fit_is_skipped_when_positives_are_too_few(tmp_path, monkeypatch):
 def test_positive_thresholds_are_sane():
     import models.thermal_model as tm
     assert tm._MIN_POSITIVES > 1
-    assert tm._MIN_HOLDOUT_POSITIVES >= 1
+    assert tm._MIN_BENCH_GROUPS >= 1
     assert tm._MIN_SOLAR_GHI > 0
 
 

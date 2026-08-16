@@ -11,7 +11,7 @@ from datetime import datetime, timezone, timedelta
 from data.ogn_client      import fetch_ogn_gliders, start_ogn_stream, fetch_glider_track, drain_beacon_buffers, is_thermal_evidence, flush_beacons, purge_old_beacons
 from data import meteo_client, terrain_client
 from data.meteo_client    import fetch_meteo_features
-from data.terrain_client  import fetch_elevation_grid, fetch_elevation_point, fetch_elevation_batch
+from data.terrain_client  import fetch_elevation_grid, fetch_elevation_point, fetch_elevation_batch, snap_grid_centre
 from pipeline.feature_engineering import build_feature_matrix
 from models.thermal_model import ThermalModel
 from config import UPDATE_INTERVAL, GRID_RES, GRID_RADIUS, CORS_ORIGINS, ADMIN_TOKEN, STATIC_DIR, DATA_DIR, BEACON_RETENTION_DAYS
@@ -144,10 +144,15 @@ async def healthz():
 def _apply_ogn_fusion(
     heatmap: list[float],
     gliders: list[dict],
-    lat: float, lon: float, radius: float,
+    grid_lat: float, grid_lon: float, radius: float,
     rows: int, cols: int,
 ) -> list[float]:
-    """Blend live confirmed thermals (circling + vario > 1 m/s) into the ML heatmap."""
+    """Blend live confirmed thermals (circling + vario > 1 m/s) into the ML heatmap.
+
+    grid_lat/grid_lon are the grid's own centre (see snap_grid_centre), not the
+    point the caller asked about — a glider is placed relative to the cells that
+    exist, not to where the request happened to land.
+    """
     # Soaring aircraft only, and not on aerotow: anything under power can circle
     # and climb without a thermal underneath it — including a glider on the end
     # of a rope — which would paint lift onto the map that isn't there.
@@ -161,8 +166,10 @@ def _apply_ogn_fusion(
     sigma  = 6.0                                    # grid cells ≈ 300 m radius
     window = int(3 * sigma)
     for g in circling:
-        ri = (g["lat"] - (lat - radius)) / GRID_RES
-        ci = (g["lon"] - (lon - radius)) / GRID_RES
+        # GRID_RES is the exact spacing of the fine lattice, so this is a direct
+        # index rather than an approximation.
+        ri = (g["lat"] - (grid_lat - radius)) / GRID_RES
+        ci = (g["lon"] - (grid_lon - radius)) / GRID_RES
         if not (0 <= ri < rows and 0 <= ci < cols):
             continue
         strength = min(g["vario"] / 5.0, 1.0) * 0.50
@@ -193,8 +200,15 @@ async def predict(lat: float, lon: float, alt: int | None = None, forecast_h: in
     "is there lift here at that height", since a thermal that tops out at 900 m
     is no use to someone at 1500 m.  It is converted to height above ground per
     cell, matching how training samples record the glider's altitude.
+
+    The grid is centred on the terrain lattice point nearest (lat, lon), up to
+    ~550 m away, and grid_lat/grid_lon in the response say where that is.  Every
+    bound here is derived from it rather than from the request point, so the
+    coordinates a cell is labelled with are the coordinates its elevation, slope
+    and aspect were sampled at.
     """
     try:
+        grid_lat, grid_lon = snap_grid_centre(lat, lon)
         meteo, terrain = await asyncio.gather(
             fetch_meteo_features(lat, lon, forecast_h),
             fetch_elevation_grid(lat, lon),
@@ -207,14 +221,15 @@ async def predict(lat: float, lon: float, alt: int | None = None, forecast_h: in
         features = build_feature_matrix(
             meteo, terrain,
             dt=datetime.now(timezone.utc) + timedelta(hours=forecast_h),
-            lat_bounds=(lat - radius, lat + radius),
-            lon_bounds=(lon - radius, lon + radius),
+            lat_bounds=(grid_lat - radius, grid_lat + radius),
+            lon_bounds=(grid_lon - radius, grid_lon + radius),
             alt_amsl=alt_amsl,
         )
         grid_rows, grid_cols = terrain.shape
         heatmap, heatmap_std = model.predict(features)
         live_gliders = await fetch_ogn_gliders()
-        heatmap = _apply_ogn_fusion(heatmap, live_gliders, lat, lon, radius, grid_rows, grid_cols)
+        heatmap = _apply_ogn_fusion(heatmap, live_gliders, grid_lat, grid_lon,
+                                    radius, grid_rows, grid_cols)
     except Exception as exc:
         log.error(f"[predict] failed for ({lat},{lon}): {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
@@ -223,6 +238,8 @@ async def predict(lat: float, lon: float, alt: int | None = None, forecast_h: in
         "heatmap_std":  heatmap_std,
         "rows":         grid_rows,
         "cols":         grid_cols,
+        "grid_lat":     grid_lat,
+        "grid_lon":     grid_lon,
         "thermal_base": meteo["cape_base"],
         "cape":         meteo["cape"],
         "weather": {

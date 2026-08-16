@@ -12,14 +12,18 @@ export default function ExportButton({ heatmap, gridMeta, thermalBase, cape }) {
 
   function handleExport() {
     const { lat, lon, rows, cols, radius } = gridMeta;
-    const latStep = (2 * radius) / rows;
-    const lonStep = (2 * radius) / cols;
+    // rows-1 gaps between rows of sample points, not rows — see config.js.
+    const latStep = (2 * radius) / (rows - 1);
+    const lonStep = (2 * radius) / (cols - 1);
 
     const features = heatmap.map((prob, i) => {
       const row     = Math.floor(i / cols);
       const col     = i % cols;
-      const latS    = lat - radius + row * latStep;
-      const lonW    = lon - radius + col * lonStep;
+      // The sample sits at the centre of the polygon it describes, so the cell
+      // straddles it — exported footprints otherwise sit half a cell north-east
+      // of the ground they were predicted for.
+      const latS    = lat - radius + row * latStep - latStep / 2;
+      const lonW    = lon - radius + col * lonStep - lonStep / 2;
       const latN    = latS + latStep;
       const lonE    = lonW + lonStep;
 
