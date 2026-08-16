@@ -103,3 +103,100 @@ async def test_fetch_returns_stored_gliders():
 async def test_fetch_empty_store():
     from data.ogn_client import fetch_ogn_gliders
     assert await fetch_ogn_gliders() == []
+
+# ---------------------------------------------------------------------------
+# Beacon replay buffers — cursor semantics
+#
+# These exist because the buffer used to be a destructive queue, which made it
+# correct for exactly one consumer.  Every test below is about what happens with
+# two, which is the normal case for a deployed URL and was never the case on a
+# dev machine with one browser tab open.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def clear_buffers():
+    def _reset():
+        with ogn_mod._bbuf_lock:
+            ogn_mod._beacon_buffers.clear()
+            ogn_mod._bbuf_seq = 0
+            ogn_mod._last_drain = 0.0
+    _reset()
+    yield
+    _reset()
+
+
+def _push(gid: str, lat: float = 51.0) -> None:
+    ogn_mod._buffer_position({"id": gid, "lat": lat, "lon": 0.1, "alt": 800})
+
+
+def test_drain_returns_positions_since_cursor(clear_buffers):
+    from data.ogn_client import beacon_cursor, drain_beacon_buffers
+    start = beacon_cursor()
+    _push("G1"); _push("G1")
+    out, cursor = drain_beacon_buffers(start)
+    assert len(out["G1"]) == 2
+    assert cursor > start
+
+
+def test_drain_is_idempotent_at_the_same_cursor(clear_buffers):
+    """Draining twice from one cursor yields the same positions both times."""
+    from data.ogn_client import beacon_cursor, drain_beacon_buffers
+    start = beacon_cursor()
+    _push("G1")
+    first,  _ = drain_beacon_buffers(start)
+    second, _ = drain_beacon_buffers(start)
+    assert first == second
+
+
+def test_second_drain_from_new_cursor_is_empty(clear_buffers):
+    from data.ogn_client import beacon_cursor, drain_beacon_buffers
+    _push("G1")
+    _, cursor = drain_beacon_buffers(beacon_cursor() - 1)
+    out, _ = drain_beacon_buffers(cursor)
+    assert out == {}
+
+
+def test_two_subscribers_both_receive_every_position(clear_buffers):
+    """The regression this replaced: one viewer's drain used to eat the other's."""
+    from data.ogn_client import beacon_cursor, drain_beacon_buffers
+    a = b = beacon_cursor()
+    _push("G1"); _push("G1"); _push("G1")
+
+    out_a, a = drain_beacon_buffers(a)
+    out_b, b = drain_beacon_buffers(b)
+    assert len(out_a["G1"]) == 3
+    assert len(out_b["G1"]) == 3
+
+    # And they stay in step across the next frame.
+    _push("G1")
+    out_a, a = drain_beacon_buffers(a)
+    out_b, b = drain_beacon_buffers(b)
+    assert len(out_a["G1"]) == 1 and len(out_b["G1"]) == 1
+
+
+def test_late_subscriber_starts_from_head(clear_buffers):
+    """A viewer connecting mid-flight gets no backlog — it backfills from SQLite."""
+    from data.ogn_client import beacon_cursor, drain_beacon_buffers
+    _push("G1"); _push("G1")
+    late = beacon_cursor()
+    out, _ = drain_beacon_buffers(late)
+    assert out == {}
+
+
+def test_slow_subscriber_only_misses_trimmed_overflow(clear_buffers):
+    """Falling behind the buffer cap loses the overflow, not the whole tail."""
+    from data.ogn_client import beacon_cursor, drain_beacon_buffers
+    start = beacon_cursor()
+    ogn_mod._last_drain = ogn_mod.time.monotonic()   # mark a consumer as active
+    for _ in range(ogn_mod._BBUF_MAX + 50):
+        _push("G1")
+    out, _ = drain_beacon_buffers(start)
+    assert len(out["G1"]) == ogn_mod._BBUF_MAX
+
+
+def test_positions_carry_seq_for_the_wire_layer_to_strip(clear_buffers):
+    from data.ogn_client import beacon_cursor, drain_beacon_buffers
+    start = beacon_cursor()
+    _push("G1")
+    out, _ = drain_beacon_buffers(start)
+    assert set(out["G1"][0]) == {"lat", "lon", "alt", "seq"}

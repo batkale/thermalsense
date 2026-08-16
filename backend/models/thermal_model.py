@@ -426,7 +426,13 @@ class ThermalModel:
         # away real work; durability must not depend on reaching the fit threshold.
         self._save_buffer()
 
-        self.fit_and_gate()
+        # to_thread for the same reason as predict(): the fit is pure CPU and the
+        # app runs a single worker, so calling it inline froze every request for
+        # the duration of the boosting run.  Only one fit runs at a time — both
+        # callers hold _training_lock in main.py — and rebinding self.model is a
+        # single attribute assignment, so a concurrent predict() sees either the
+        # old model or the new one, never a half-built state.
+        await asyncio.to_thread(self.fit_and_gate)
 
     def fit_and_gate(self) -> None:
         """

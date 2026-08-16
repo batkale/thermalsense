@@ -29,7 +29,7 @@ export default function App() {
   const {
     heatmap, gridMeta, gliders, activeThermals,
     weather, loading, error,
-    predict, gliderPathsRef,
+    predict, setViewport, gliderPathsRef,
   } = useBackend();
 
   // A bare map click carries no altitude — the backend picks a working height
@@ -52,6 +52,11 @@ export default function App() {
     setTimeout(() => setRetrainMsgKey(''), 4000);
   }, []);
 
+  // Height above ground is the only reliable ground test, so it is tried first.
+  // agl is null while the backend's elevation cache is still cold for this patch
+  // of ground — a frame or two after a viewport moves somewhere new. Ground speed
+  // is the fallback for that window only: it cannot tell a cruising glider from a
+  // winch launch or a takeoff roll, both of which comfortably clear 30 km/h.
   const visibleGliders = showAirborneOnly
     ? gliders.filter(g => {
         if (g.agl != null)       return g.agl > 10;
@@ -90,6 +95,7 @@ export default function App() {
               locationRef.current = { lat: g.lat, lon: g.lon, alt: g.alt };
               predict(g.lat, g.lon, forecastH, g.alt);
             }}
+            onViewportChange={setViewport}
             pinnedId={pinnedId}
             flyTarget={flyTarget}
             gliderPathsRef={gliderPathsRef}
@@ -97,7 +103,7 @@ export default function App() {
         </div>
 
         <aside className="sidebar">
-          <SearchBar gliders={gliders} onSelect={setFlyTarget} />
+          <SearchBar onSelect={setFlyTarget} />
 
           <InfoPanel
             gliders={visibleGliders}

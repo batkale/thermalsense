@@ -28,6 +28,19 @@ export async function fetchGliderTrack(gliderId) {
   return data.track ?? [];
 }
 
+/**
+ * Glider id search across the whole live feed. Runs server-side because the
+ * live socket only carries gliders inside the current viewport, so the client
+ * no longer has a full list to filter.
+ */
+export async function searchGliders(query, limit = 3) {
+  const params = new URLSearchParams({ q: query, limit });
+  const res = await fetch(`${API_BASE}/ogn/search?${params}`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.gliders ?? [];
+}
+
 export async function triggerRetrain() {
   const res = await fetch(`${API_BASE}/train`, {
     method: 'POST',

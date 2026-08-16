@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { geocodeQuery } from '../services/search.js';
+import { searchGliders } from '../services/api.js';
 import { useLang } from '../i18n/LanguageContext.jsx';
 
 const TAG_KEY = { glider: 'tagGlider', airport: 'tagAirport', place: 'tagPlace' };
 
-export default function SearchBar({ gliders, onSelect }) {
+export default function SearchBar({ onSelect }) {
   const { t, lang } = useLang();
   const [query,   setQuery]   = useState('');
   const [results, setResults] = useState([]);
@@ -12,15 +13,24 @@ export default function SearchBar({ gliders, onSelect }) {
   const [active,  setActive]  = useState(-1);
   const inputRef = useRef(null);
   const timerRef = useRef(null);
+  const runIdRef = useRef(0);
 
   const runSearch = useCallback(async (q) => {
     const lq = q.trim().toLowerCase();
     if (!lq) { setResults([]); setOpen(false); return; }
 
-    const gliderHits = gliders
-      .filter(g => g.id.toLowerCase().includes(lq))
-      .slice(0, 3)
-      .map(g => ({
+    // Two awaits now race per keystroke, so stamp each run and let only the
+    // newest one write — otherwise a slow early query can land after a fast
+    // later one and repopulate the dropdown with results for an old prefix.
+    const runId = ++runIdRef.current;
+    const isStale = () => runId !== runIdRef.current;
+
+    // Gliders are matched server-side: the live socket only carries the current
+    // viewport, so searching the client's own list would only find aircraft
+    // already visible on screen.
+    let gliderHits = [];
+    try {
+      gliderHits = (await searchGliders(lq, 3)).map(g => ({
         type:     'glider',
         label:    g.id,
         sublabel: t('searchAltVario', {
@@ -31,15 +41,18 @@ export default function SearchBar({ gliders, onSelect }) {
         lon:  g.lon,
         zoom: 13,
       }));
+    } catch { /* backend unreachable — fall through to places */ }
+    if (isStale()) return;
 
     setResults(gliderHits);
     setOpen(true);
 
     try {
       const places = await geocodeQuery(q, lang);
+      if (isStale()) return;
       setResults([...gliderHits, ...places]);
     } catch { /* network offline — glider results only */ }
-  }, [gliders, t, lang]);
+  }, [t, lang]);
 
   useEffect(() => {
     clearTimeout(timerRef.current);

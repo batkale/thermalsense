@@ -195,6 +195,28 @@ _beacon_buffers: dict[str, list[dict]] = {}
 _bbuf_lock = threading.Lock()
 _last_drain = 0.0
 
+# Monotonic counter stamped onto every buffered position.  It is what lets each
+# subscriber keep its own read cursor instead of consuming the buffer, so N
+# viewers all receive the same beacons (see drain_beacon_buffers).
+_bbuf_seq = 0
+
+
+def _buffer_position(beacon: dict) -> None:
+    """Append a position to the glider's replay buffer.  Stream thread only."""
+    global _bbuf_seq
+    with _bbuf_lock:
+        _bbuf_seq += 1
+        bbuf = _beacon_buffers.setdefault(beacon["id"], [])
+        bbuf.append({"lat": beacon["lat"], "lon": beacon["lon"],
+                     "alt": beacon["alt"], "seq": _bbuf_seq})
+        cap = (
+            _BBUF_MAX
+            if time.monotonic() - _last_drain < _BBUF_IDLE_AFTER_S
+            else _BBUF_IDLE_MAX
+        )
+        if len(bbuf) > cap:
+            _beacon_buffers[beacon["id"]] = bbuf[-cap:]
+
 _active_filter = ""
 _active_socket: socket.socket | None = None
 _socket_lock   = threading.Lock()
@@ -436,16 +458,7 @@ def _stream_thread() -> None:
                                 # other traffic, which only the live map has.
                                 beacon["under_tow"] = _under_tow(beacon, _live_gliders, now)
                                 _live_gliders[beacon["id"]] = beacon | {"seen_at": now}
-                            with _bbuf_lock:
-                                bbuf = _beacon_buffers.setdefault(beacon["id"], [])
-                                bbuf.append({"lat": beacon["lat"], "lon": beacon["lon"], "alt": beacon["alt"]})
-                                cap = (
-                                    _BBUF_MAX
-                                    if time.monotonic() - _last_drain < _BBUF_IDLE_AFTER_S
-                                    else _BBUF_IDLE_MAX
-                                )
-                                if len(bbuf) > cap:
-                                    _beacon_buffers[beacon["id"]] = bbuf[-cap:]
+                            _buffer_position(beacon)
                             _log_beacon(beacon)
 
         except Exception as exc:
@@ -497,20 +510,44 @@ def fetch_glider_track(glider_id: str, max_gap_minutes: int = 5) -> list[dict]:
         return []
 
 
-def drain_beacon_buffers() -> dict[str, list[dict]]:
-    """Return all buffered positions received since the last call, then clear the buffer.
+def beacon_cursor() -> int:
+    """Sequence head — where a newly attached subscriber should start reading."""
+    with _bbuf_lock:
+        return _bbuf_seq
+
+
+def drain_beacon_buffers(since: int) -> tuple[dict[str, list[dict]], int]:
+    """Positions buffered after sequence `since`, plus the cursor to pass next time.
 
     The WebSocket calls this every frame so the frontend receives every intermediate
     position (not just the latest snapshot), which is what produces circular thermalling
     spirals instead of coarse zigzags.
+
+    Deliberately non-destructive.  This used to clear the buffer, which made it a
+    single-consumer queue: with two browsers attached each drain swallowed the
+    positions the other had not read yet, so both viewers saw roughly half the
+    beacons and both drew zigzags.  Nothing about that was visible on a single
+    dev machine — it only appeared once the deploy had more than one viewer.
+    Buffers stay bounded by _BBUF_MAX instead; a subscriber that falls further
+    behind than that window misses the overflow and backfills from SQLite via
+    fetch_glider_track, which is the same guarantee it had before.
     """
     global _last_drain
     with _bbuf_lock:
         _last_drain = time.monotonic()
-        out = {k: v[:] for k, v in _beacon_buffers.items() if v}
-        for k in out:
-            _beacon_buffers[k] = []
-    return out
+        head = _bbuf_seq
+        out = {}
+        for gid, positions in _beacon_buffers.items():
+            # Append-ordered by seq, so the unread tail is contiguous: walk back
+            # from the end rather than scanning the whole buffer.  At ~2200
+            # gliders x 600 buffered positions a full scan would be 1.3M
+            # comparisons per viewer per frame, for the handful that are new.
+            i = len(positions)
+            while i > 0 and positions[i - 1]["seq"] > since:
+                i -= 1
+            if i < len(positions):
+                out[gid] = positions[i:]
+    return out, head
 
 
 async def fetch_ogn_gliders() -> list[dict]:

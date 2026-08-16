@@ -149,6 +149,18 @@ async def fetch_elevation_point(lat: float, lon: float) -> int | None:
         return None
 
 
+def cached_elevation(lat: float, lon: float) -> int | None:
+    """Ground elevation from the warm cache only — never touches the network.
+
+    For hot paths that cannot afford a rate-limited fetch (the 2 s /ws/live
+    frame).  A miss returns None rather than blocking; the caller is expected to
+    warm the cache out of band and pick the value up on a later pass.  The key is
+    the same 2 dp (~1 km) cell fetch_elevation_batch caches under, so points a
+    grid fetch already resolved are hits here too.
+    """
+    return _elev_cache.get((round(lat, 2), round(lon, 2)))
+
+
 MAX_BATCH_POINTS = 100      # opentopodata.org caps a single request at 100 locations
 
 

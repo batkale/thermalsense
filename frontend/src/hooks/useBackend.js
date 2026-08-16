@@ -53,6 +53,21 @@ export function useBackend() {
   const wsRef             = useRef(null);
   const gliderPathsRef    = useRef({});   // { [id]: [{lat, lon, alt}] }
   const seededIdsRef      = useRef(new Set());
+  const boundsRef         = useRef(null); // latest map viewport, resent on reconnect
+
+  /**
+   * Tell the backend which patch of the world this client is looking at, so it
+   * streams only the gliders on screen instead of every one on the planet.
+   * Held in a ref as well as sent, because a reconnect needs to re-declare the
+   * viewport — the server starts each socket unfiltered.
+   */
+  const setViewport = useCallback((bounds) => {
+    boundsRef.current = bounds;
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ bounds }));
+    }
+  }, []);
 
   const predict = useCallback(async (lat, lon, forecastH = 0, alt = null) => {
     setLoading(true);
@@ -88,6 +103,10 @@ export function useBackend() {
       if (cancelled) return;
       const ws = new WebSocket(WS_URL);
       wsRef.current = ws;
+
+      ws.onopen = () => {
+        if (boundsRef.current) ws.send(JSON.stringify({ bounds: boundsRef.current }));
+      };
 
       ws.onmessage = (evt) => {
         try {
@@ -146,5 +165,5 @@ export function useBackend() {
 
   const activeThermals = useMemo(() => clusterCirclingGliders(gliders), [gliders]);
 
-  return { heatmap, gridMeta, gliders, activeThermals, weather, loading, error, predict, gliderPathsRef };
+  return { heatmap, gridMeta, gliders, activeThermals, weather, loading, error, predict, setViewport, gliderPathsRef };
 }

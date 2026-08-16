@@ -516,6 +516,29 @@ function MapClickHandler({ onMapClick, gliders, onGliderClick }) {
 }
 
 // -----------------------------------------------------------------------------
+// Viewport reporter — tells the backend which gliders are worth streaming
+// -----------------------------------------------------------------------------
+function ViewportReporter({ onChange }) {
+  const map = useMap();
+
+  const report = useCallback(() => {
+    if (!onChange) return;
+    // pad(0.25) keeps a ring of just-off-screen traffic in the stream, so panning
+    // reveals gliders that are already there instead of popping them in a frame
+    // or two later once the new bounds have made the round trip.
+    const b = map.getBounds().pad(0.25);
+    onChange({
+      lat_min: b.getSouth(), lat_max: b.getNorth(),
+      lon_min: b.getWest(),  lon_max: b.getEast(),
+    });
+  }, [map, onChange]);
+
+  useEffect(() => { report(); }, [report]);   // declare the initial view
+  useMapEvents({ moveend: report, zoomend: report });
+  return null;
+}
+
+// -----------------------------------------------------------------------------
 // Fly-to controller — responds to search selections
 // -----------------------------------------------------------------------------
 function FlyToController({ target }) {
@@ -530,7 +553,7 @@ function FlyToController({ target }) {
 // -----------------------------------------------------------------------------
 // Public component
 // -----------------------------------------------------------------------------
-export default function ThermalMap({ heatmap, gridMeta, gliders, activeThermals = [], showOgnHeatmap = true, onMapClick, onGliderClick, pinnedId, flyTarget, gliderPathsRef }) {
+export default function ThermalMap({ heatmap, gridMeta, gliders, activeThermals = [], showOgnHeatmap = true, onMapClick, onGliderClick, onViewportChange, pinnedId, flyTarget, gliderPathsRef }) {
   return (
     <MapContainer
       center={MAP_CENTER}
@@ -556,6 +579,7 @@ export default function ThermalMap({ heatmap, gridMeta, gliders, activeThermals 
       <HeatmapCanvas heatmap={heatmap} gridMeta={gridMeta} gliders={gliders} pinnedId={pinnedId} gliderPathsRef={gliderPathsRef} />
       <ThermalBubbleCanvas activeThermals={activeThermals} />
       <MapClickHandler onMapClick={onMapClick} gliders={gliders} onGliderClick={onGliderClick} />
+      <ViewportReporter onChange={onViewportChange} />
       <FlyToController target={flyTarget} />
     </MapContainer>
   );

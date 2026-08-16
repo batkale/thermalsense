@@ -8,10 +8,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import asyncio, json, logging
 import numpy as np
 from datetime import datetime, timezone, timedelta
-from data.ogn_client      import fetch_ogn_gliders, start_ogn_stream, fetch_glider_track, drain_beacon_buffers, is_thermal_evidence, flush_beacons, purge_old_beacons
+from data.ogn_client      import fetch_ogn_gliders, start_ogn_stream, fetch_glider_track, drain_beacon_buffers, beacon_cursor, is_thermal_evidence, flush_beacons, purge_old_beacons
 from data import meteo_client, terrain_client
 from data.meteo_client    import fetch_meteo_features
-from data.terrain_client  import fetch_elevation_grid, fetch_elevation_point, fetch_elevation_batch, snap_grid_centre
+from data.terrain_client  import fetch_elevation_grid, fetch_elevation_point, fetch_elevation_batch, snap_grid_centre, cached_elevation
 from pipeline.feature_engineering import build_feature_matrix
 from models.thermal_model import ThermalModel
 from config import UPDATE_INTERVAL, GRID_RES, GRID_RADIUS, CORS_ORIGINS, ADMIN_TOKEN, STATIC_DIR, DATA_DIR, BEACON_RETENTION_DAYS
@@ -191,6 +191,18 @@ def _apply_ogn_fusion(
 DEFAULT_WORKING_AGL = 1000.0
 
 
+# Probabilities are drawn as a colour ramp, so nothing past the third decimal can
+# reach a pixel.  Serialising raw float64 spent ~19 characters per cell on digits
+# no one can see: 1.62 MB per response over the 201x201 grid, by far the largest
+# payload the app produces.  Rounding is applied here rather than inside predict()
+# because _apply_ogn_fusion still needs the full-precision values to add to.
+_PROB_DP = 3
+
+
+def _round_probs(values: list[float]) -> list[float]:
+    return np.round(np.asarray(values, dtype=float), _PROB_DP).tolist()
+
+
 @app.get("/predict")
 async def predict(lat: float, lon: float, alt: int | None = None, forecast_h: int = 0):
     """
@@ -226,7 +238,13 @@ async def predict(lat: float, lon: float, alt: int | None = None, forecast_h: in
             alt_amsl=alt_amsl,
         )
         grid_rows, grid_cols = terrain.shape
-        heatmap, heatmap_std = model.predict(features)
+        # to_thread, not inline: predict() runs _MC_SAMPLES synchronous passes
+        # over the whole grid (~2M rows), which pins the event loop for ~0.5 s on
+        # the deployed VM.  The app is pinned to --workers 1, so that stalls the
+        # /ws/live frames, /healthz and every other request behind it.  XGBoost
+        # releases the GIL inside its OpenMP section, so a worker thread really
+        # does run alongside the loop rather than just deferring the block.
+        heatmap, heatmap_std = await asyncio.to_thread(model.predict, features)
         live_gliders = await fetch_ogn_gliders()
         heatmap = _apply_ogn_fusion(heatmap, live_gliders, grid_lat, grid_lon,
                                     radius, grid_rows, grid_cols)
@@ -234,8 +252,8 @@ async def predict(lat: float, lon: float, alt: int | None = None, forecast_h: in
         log.error(f"[predict] failed for ({lat},{lon}): {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
     return {
-        "heatmap":      heatmap,
-        "heatmap_std":  heatmap_std,
+        "heatmap":      _round_probs(heatmap),
+        "heatmap_std":  _round_probs(heatmap_std),
         "rows":         grid_rows,
         "cols":         grid_cols,
         "grid_lat":     grid_lat,
@@ -272,6 +290,46 @@ async def _add_agl(gliders: list[dict]) -> list[dict]:
     for g, pair in zip(gliders, pairs):
         elev = elevs.get(pair)
         g["agl"] = (g["alt"] - elev) if elev is not None else None
+    return gliders
+
+
+# Only one warm runs at a time process-wide: every viewer sees the same misses
+# over the same shared elevation cache, so N sockets must not mean N fetches.
+_agl_warm_task: asyncio.Task | None = None
+
+
+async def _warm_elevations(pairs: list[tuple[float, float]]) -> None:
+    """Pull missing ground elevations into the cache, off the frame path."""
+    try:
+        await fetch_elevation_batch(pairs)
+    except Exception as exc:
+        log.warning(f"[ws] elevation warm failed: {exc}")
+
+
+def _attach_cached_agl(gliders: list[dict]) -> list[dict]:
+    """Attach agl to each glider from the warm elevation cache, synchronously.
+
+    /ws/live cannot use _add_agl: it sends a frame every 2 s per viewer, while a
+    cold fetch_elevation_batch is rate-limited to 1 req/s and _add_agl waits up
+    to 8 s for it.  Awaiting that inline would stall the stream behind
+    OpenTopoData for every viewer at once.
+
+    Without this the field was simply absent from the wire — _to_wire only
+    copies keys that exist — so `agl` was undefined on every glider the map ever
+    drew and the client's airborne filter silently fell through to its
+    speed-only fallback, which passes anything on a takeoff roll or a winch
+    launch.  Misses go to a background warm and resolve on a later frame; until
+    then agl is explicitly null, which the client reads as "unknown".
+    """
+    global _agl_warm_task
+    misses: list[tuple[float, float]] = []
+    for g in gliders:
+        elev = cached_elevation(g["lat"], g["lon"])
+        g["agl"] = (g["alt"] - elev) if elev is not None else None
+        if elev is None:
+            misses.append((g["lat"], g["lon"]))
+    if misses and (_agl_warm_task is None or _agl_warm_task.done()):
+        _agl_warm_task = asyncio.create_task(_warm_elevations(misses))
     return gliders
 
 
@@ -329,6 +387,27 @@ async def glider_track(glider_id: str):
 async def ogn_live():
     gliders = await _add_agl(await fetch_ogn_gliders())
     return {"gliders": _to_wire(gliders)}
+
+
+@app.get("/ogn/search")
+async def ogn_search(q: str, limit: int = 5):
+    """Substring match on glider id across the whole live feed.
+
+    The search box used to filter the client's own copy of the glider list,
+    which only worked while that copy was the entire planet.  Now that /ws/live
+    is scoped to the viewport, the lookup has to run where the full picture
+    still exists — otherwise searching for a glider would only ever find one
+    already visible on screen, which is the case where you don't need to search.
+    """
+    lq = q.strip().lower()
+    if not lq:
+        return {"gliders": []}
+    gliders = await fetch_ogn_gliders()
+    hits = [g for g in gliders if lq in g["id"].lower()]
+    # Prefix matches first: typing a full registration should put it at the top
+    # rather than behind whatever else happens to contain the string.
+    hits.sort(key=lambda g: (not g["id"].lower().startswith(lq), g["id"]))
+    return {"gliders": _to_wire(hits[:max(0, min(limit, 25))])}
 
 @app.post("/train", dependencies=[Depends(_require_admin)])
 async def trigger_train(background_tasks: BackgroundTasks):
@@ -438,25 +517,98 @@ def _positions_to_wire(new_pos: dict[str, list[dict]]) -> dict[str, list[dict]]:
     }
 
 
+Bounds = tuple[float, float, float, float]   # lat_min, lat_max, lon_min, lon_max
+
+
+def _parse_bounds(raw: object) -> Bounds | None:
+    """Validate a client viewport message.
+
+    Returns None for anything malformed, and the caller reads None as "no
+    filter" — a client that sends nonsense keeps the old worldwide behaviour
+    instead of silently receiving an empty map.  A span of a full 360 degrees is
+    also None: it selects everything, so filtering would only burn CPU.
+    """
+    if not isinstance(raw, dict):
+        return None
+    try:
+        lat_min, lat_max = float(raw["lat_min"]), float(raw["lat_max"])
+        lon_min, lon_max = float(raw["lon_min"]), float(raw["lon_max"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not (lat_min <= lat_max and lon_min <= lon_max):
+        return None
+    if lon_max - lon_min >= 360.0:
+        return None
+    return lat_min, lat_max, lon_min, lon_max
+
+
+def _in_bounds(g: dict, b: Bounds) -> bool:
+    lat_min, lat_max, lon_min, lon_max = b
+    if not (lat_min <= g["lat"] <= lat_max):
+        return False
+    # Leaflet reports longitudes outside +/-180 once the view crosses the
+    # antimeridian, while a beacon's lon is always inside it.  Test the wrapped
+    # copies too, else the Pacific edge of the map goes blank.
+    lon = g["lon"]
+    return any(lon_min <= lon + off <= lon_max for off in (0.0, 360.0, -360.0))
+
+
 @app.websocket("/ws/live")
 async def websocket_live(ws: WebSocket):
+    """Live glider stream, scoped to the client's map viewport.
+
+    The client sends {"bounds": {lat_min, lat_max, lon_min, lon_max}} on connect
+    and on every map move; anything outside is dropped before serialisation.
+    Without it each viewer downloaded every glider on the planet every 2 s in
+    order to draw the handful actually on screen.  Bounds stay optional: a
+    client that never sends any still gets the full feed, so an older frontend
+    against a newer backend degrades to the previous behaviour rather than to a
+    blank map.
+    """
     await ws.accept()
+    bounds: Bounds | None = None
+
+    async def _read_client() -> None:
+        """Apply viewport updates until the socket closes."""
+        nonlocal bounds
+        try:
+            while True:
+                try:
+                    msg = json.loads(await ws.receive_text())
+                except ValueError:
+                    continue            # malformed frame — keep the current viewport
+                if isinstance(msg, dict) and "bounds" in msg:
+                    bounds = _parse_bounds(msg["bounds"])
+        except (WebSocketDisconnect, RuntimeError):
+            pass                        # the send loop notices and tears down
+
+    reader = asyncio.create_task(_read_client())
+    # Per-connection cursor: every viewer reads the same beacons at its own pace.
+    cursor = beacon_cursor()
     try:
         while True:
             try:
-                gliders    = await fetch_ogn_gliders()
-                new_pos    = drain_beacon_buffers()   # all positions since last frame
+                gliders         = await fetch_ogn_gliders()
+                new_pos, cursor = drain_beacon_buffers(cursor)
             except Exception as e:
                 log.warning(f"[ws] glider fetch failed: {e}")
                 gliders = []
                 new_pos = {}
+            if bounds is not None:
+                gliders = [g for g in gliders if _in_bounds(g, bounds)]
+                # Track updates follow the markers: a glider that is not being
+                # drawn has no path to extend.
+                visible = {g["id"] for g in gliders}
+                new_pos = {k: v for k, v in new_pos.items() if k in visible}
             await ws.send_text(json.dumps({
-                "gliders":       _to_wire(gliders),
+                "gliders":       _to_wire(_attach_cached_agl(gliders)),
                 "new_positions": _positions_to_wire(new_pos),
             }))
             await asyncio.sleep(2)
     except (WebSocketDisconnect, RuntimeError):
         pass  # client navigated away — normal teardown
+    finally:
+        reader.cancel()
 
 
 # --- Static frontend ----------------------------------------------------------

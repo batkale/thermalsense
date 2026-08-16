@@ -6,7 +6,10 @@
 	# /ws/live socket works without extra configuration.
 	reverse_proxy app:8000
 
-	encode gzip
+	# zstd first: browsers that advertise it get a smaller body for less CPU than
+	# gzip, which matters on a 2-vCPU burstable VM compressing ~1 MB heatmaps.
+	# gzip stays as the fallback for clients that don't offer zstd.
+	encode zstd gzip
 
 	header {
 		X-Content-Type-Options nosniff
