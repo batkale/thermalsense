@@ -7,7 +7,12 @@ export default function PinnedGliderCard({ glider, onUnpin }) {
   const [groundElev,  setGroundElev]  = useState(null);
   const [elevLoading, setElevLoading] = useState(false);
 
-  // Re-fetch ground elevation only when a different glider is pinned
+  // Re-fetch ground elevation only when a different glider is pinned.
+  // This is the exact point, not the lattice cell the wire's agl is sampled on,
+  // and it stays that way deliberately: the card is the one place a number is
+  // read rather than thresholded, so it should show the ground actually under
+  // the aircraft. See _attach_cached_agl in main.py for how the wire earns the
+  // same accuracy near the ground, which is where the two used to disagree.
   useEffect(() => {
     if (!glider) { setGroundElev(null); return; }
     let cancelled = false;

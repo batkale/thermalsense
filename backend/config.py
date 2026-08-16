@@ -57,17 +57,47 @@ MODEL_PATH        = str(DATA_DIR / "models" / "thermal_xgb.json")
 BUFFER_PATH       = str(DATA_DIR / "models" / "training_buffer.npz")
 DB_PATH           = DATA_DIR / "data" / "ogn_history.db"
 
-# How long beacons are kept before the retention job deletes them.  The feed
-# writes ~6M rows/day worldwide (~800 MB), so without a cap the DB grows without
-# bound and fills the disk in weeks.
+# How long beacons are kept before the retention job deletes them.  Without a cap
+# the DB grows without bound and fills the disk in weeks.
+#
+# Measured on the live worldwide feed (16 Aug 2026): 23.2M rows in 4.1 GB over
+# 3 days — ~7.7M rows and ~1.4 GB per day, not the ~6M/800 MB this comment used
+# to estimate.  At 7 days that is a steady state near 9.6 GB, so the file wants
+# roughly 10 GB of headroom rather than the 5-6 GB previously assumed.
 #
 # The floor is set by readers, not by disk: seed_from_history() defaults to
 # days_back=3, so anything below that silently starves /seed of training data —
 # it would return "no rows" rather than fail, which is the worst way to break.
-# 7 days keeps the default seed working with margin and still bounds the file at
-# roughly 5-6 GB.  Raise it only with the disk headroom to match, and never set
-# it below the largest days_back you intend to pass to /seed.
+# 7 days keeps the default seed working with margin.  Raise it only with the disk
+# headroom to match, and never set it below the largest days_back you intend to
+# pass to /seed.
 BEACON_RETENTION_DAYS = float(os.getenv("BEACON_RETENTION_DAYS", "7"))
+
+# Free-space floor for the emergency purge (see _disk_guard in main.py).  Losing
+# beacon history is recoverable; filling the disk takes the whole service down
+# with it — SQLite writes start failing, the container cannot log, and the box
+# needs a human on SSH to rescue it.  History is the cheapest thing here to give
+# up, so it is what gets given up.
+MIN_FREE_DISK_GB   = float(os.getenv("MIN_FREE_DISK_GB", "3"))
+# However tight the disk gets, never purge below this: past it the DB holds
+# nothing worth training on and is being churned for no gain.
+MIN_RETENTION_DAYS = float(os.getenv("MIN_RETENTION_DAYS", "1"))
+
+# --- CPU budget ---------------------------------------------------------------
+# Sized for the 2-vCPU deployment target.  predict() and the retrain fit both run
+# in worker threads now, so nothing stops two XGBoost OpenMP pools from each
+# claiming every core and spending the difference on contention.
+#
+# The fit is a background job on a 300 s cycle whose latency nobody observes, so
+# it yields: one thread, leaving a core for whatever request lands mid-cycle.
+#
+# Predictions are serialised rather than run in parallel.  Each is ~2M rows of
+# already core-bound work, so two at once take twice as long apiece and finish no
+# sooner together — and asyncio.to_thread would otherwise hand out up to
+# min(32, cpu_count + 4) threads, each spawning its own OpenMP pool on 2 cores.
+XGB_FIT_THREADS     = int(os.getenv("XGB_FIT_THREADS", "1"))
+XGB_PREDICT_THREADS = int(os.getenv("XGB_PREDICT_THREADS", "0")) or (os.cpu_count() or 2)
+PREDICT_CONCURRENCY = int(os.getenv("PREDICT_CONCURRENCY", "1"))
 
 # --- Deployment ---------------------------------------------------------------
 # Comma-separated allowed origins. "*" is fine when the API and UI share an

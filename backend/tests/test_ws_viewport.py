@@ -128,23 +128,74 @@ def test_seq_is_stripped_from_the_wire():
 
 @pytest.fixture
 def warm_cache(monkeypatch):
-    """Elevation cache holding a single known 2 dp cell."""
-    monkeypatch.setattr(terrain_client, "_elev_cache", {(39.81, 30.52): 800})
+    """Elevation cache holding the same spot at both resolutions.
+
+    The ~1 km cell and the ~11 m cell inside it disagree by 50 m on purpose:
+    that is the real spread measured at Rieti, where the coarse lattice samples
+    the valley floor while the aircraft sits on the knoll above it.
+    """
+    monkeypatch.setattr(terrain_client, "_elev_cache",
+                        {(39.81, 30.52): 800, (39.8123, 30.5187): 850})
 
 
-def _glider(lat, lon, alt):
-    return {"id": "G1", "lat": lat, "lon": lon, "alt": alt, "speed_kmh": 95.0}
+def _glider(lat, lon, alt, speed_kmh=95.0):
+    return {"id": "G1", "lat": lat, "lon": lon, "alt": alt, "speed_kmh": speed_kmh}
+
+
+def _parked(lat, lon, alt):
+    return _glider(lat, lon, alt, speed_kmh=0.0)
 
 
 def test_agl_is_alt_above_the_cached_ground(warm_cache):
+    """Well clear of the terrain, the coarse lattice is the answer."""
     g, = _attach_cached_agl([_glider(39.8123, 30.5187, 1400)])
     assert g["agl"] == 600
 
 
 def test_glider_on_the_ground_gets_a_non_positive_agl(warm_cache):
     """The reported bug: a parked or rolling glider must be filterable."""
-    g, = _attach_cached_agl([_glider(39.8123, 30.5187, 795)])
+    g, = _attach_cached_agl([_parked(39.8123, 30.5187, 845)])
     assert g["agl"] == -5
+
+
+def test_near_the_ground_the_precise_sample_wins(warm_cache):
+    """A glider parked on the knoll must not read as airborne over the valley.
+
+    850 m of ground under the aircraft, 800 m a kilometre away in the coarse
+    cell.  Believing the coarse cell reports +50 m AGL for an aircraft standing
+    still on the ground, which is exactly what the client's 10 m airborne filter
+    was passing when NAV405393 stayed on the map.
+    """
+    g, = _attach_cached_agl([_parked(39.8123, 30.5187, 850)])
+    assert g["agl"] == 0
+
+
+def test_high_gliders_are_not_precision_sampled(warm_cache, monkeypatch):
+    """Fine terrain is only fetched where the threshold lives, or the daily
+    OpenTopoData budget goes on sharpening numbers nothing reads."""
+    warmed = []
+    monkeypatch.setattr("main.asyncio.create_task",
+                        lambda coro: (warmed.append(coro), coro.close()))
+    # Only the fine entry is missing, so a resample would have to warm.
+    terrain_client._elev_cache.pop((39.8123, 30.5187))
+    g, = _attach_cached_agl([_glider(39.8123, 30.5187, 1400)])
+    assert g["agl"] == 600 and warmed == []
+
+
+def test_fast_traffic_low_down_is_not_precision_sampled(warm_cache, monkeypatch):
+    """The height gate alone would not bound this.
+
+    A ridge-soaring glider spends an hour inside the band at 100 km/h, crossing
+    a fresh 11 m cell several times a second — precision there would cost a
+    terrain fetch per frame to confirm something the coarse reading already
+    gets right.
+    """
+    warmed = []
+    monkeypatch.setattr("main.asyncio.create_task",
+                        lambda coro: (warmed.append(coro), coro.close()))
+    terrain_client._elev_cache.pop((39.8123, 30.5187))
+    g, = _attach_cached_agl([_glider(39.8123, 30.5187, 900)])
+    assert g["agl"] == 100 and warmed == []
 
 
 def test_agl_reaches_the_wire(warm_cache):
@@ -170,3 +221,16 @@ def test_stale_agl_is_overwritten_when_the_cache_goes_cold(monkeypatch):
     g["agl"] = 600
     _attach_cached_agl([g])
     assert g["agl"] is None
+
+
+def test_a_pending_precise_sample_keeps_the_coarse_reading(monkeypatch):
+    """Approximate beats absent while the fine terrain warms.
+
+    Sending null here instead would drop the client onto its ground-speed
+    fallback, which passes anything faster than 30 km/h — including the takeoff
+    roll this whole path exists to filter out.
+    """
+    monkeypatch.setattr(terrain_client, "_elev_cache", {(39.81, 30.52): 800})
+    monkeypatch.setattr("main.asyncio.create_task", lambda coro: coro.close())
+    g, = _attach_cached_agl([_parked(39.8123, 30.5187, 850)])
+    assert g["agl"] == 50

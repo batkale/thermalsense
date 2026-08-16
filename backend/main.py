@@ -14,7 +14,9 @@ from data.meteo_client    import fetch_meteo_features
 from data.terrain_client  import fetch_elevation_grid, fetch_elevation_point, fetch_elevation_batch, snap_grid_centre, cached_elevation
 from pipeline.feature_engineering import build_feature_matrix
 from models.thermal_model import ThermalModel
-from config import UPDATE_INTERVAL, GRID_RES, GRID_RADIUS, CORS_ORIGINS, ADMIN_TOKEN, STATIC_DIR, DATA_DIR, BEACON_RETENTION_DAYS
+from config import (UPDATE_INTERVAL, GRID_RES, GRID_RADIUS, CORS_ORIGINS, ADMIN_TOKEN,
+                    STATIC_DIR, DATA_DIR, BEACON_RETENTION_DAYS, PREDICT_CONCURRENCY,
+                    MIN_FREE_DISK_GB, MIN_RETENTION_DAYS)
 from pathlib import Path
 import shutil
 
@@ -75,6 +77,61 @@ def _seed_data_dir() -> None:
             log.info(f"[init] seeded {name} -> {dst}")
 
 
+def _free_disk_gb() -> float:
+    return shutil.disk_usage(DATA_DIR).free / 2**30
+
+
+# Two rounds, then stop and escalate.  Each round is a multi-million-row delete
+# on a box that is already in trouble, and on a database created before
+# auto_vacuum=INCREMENTAL the freed pages never return to the filesystem — so a
+# loop that waits for free space to recover would grind indefinitely against a
+# number that cannot move.  Two rounds is enough to cap growth; anything still
+# wrong after that is not beacon history's fault.
+_MAX_EMERGENCY_PURGES = 2
+
+
+async def _disk_guard() -> None:
+    """Shorten retention while free space is under the floor.
+
+    The feed writes ~1.4 GB/day, which can close a gap faster than the weekly
+    window reclaims it — a purge job that failed for a few cycles, a disk shared
+    with Docker image layers, a /seed rebuild landing at the wrong moment.
+    Beacon history is the cheapest thing on this box to give up, so it goes
+    first, and loudly: a shortened window silently starves /seed, whose default
+    days_back=3 would start returning "no rows" instead of failing.
+    """
+    free = await asyncio.to_thread(_free_disk_gb)
+    if free >= MIN_FREE_DISK_GB:
+        return
+
+    days = BEACON_RETENTION_DAYS
+    for _ in range(_MAX_EMERGENCY_PURGES):
+        if free >= MIN_FREE_DISK_GB or days <= MIN_RETENTION_DAYS:
+            break
+        days = max(MIN_RETENTION_DAYS, days / 2)
+        log.warning(
+            f"[purge] {free:.1f} GB free, below the {MIN_FREE_DISK_GB:.1f} GB floor — "
+            f"emergency purge to {days:.1f} days; /seed loses history beyond that"
+        )
+        try:
+            deleted = await asyncio.to_thread(purge_old_beacons, days)
+        except Exception as exc:
+            log.error(f"[purge] emergency purge failed: {exc}")
+            return
+        free = await asyncio.to_thread(_free_disk_gb)
+        log.warning(f"[purge] emergency purge removed {deleted:,} beacons — "
+                    f"{free:.1f} GB free")
+
+    if free < MIN_FREE_DISK_GB:
+        log.error(
+            f"[purge] still {free:.1f} GB free after shortening retention — this is "
+            f"no longer something beacon retention can fix. Check Docker usage "
+            f"(`docker system df`; build cache is usually the culprit), and whether "
+            f"this DB predates auto_vacuum=INCREMENTAL, in which case deletes cap "
+            f"growth but reclaim nothing — see DEPLOY.md for the one-time VACUUM."
+        )
+
+
 async def _purge_job() -> None:
     """Drop beacons past the retention window so the DB stops growing forever."""
     try:
@@ -86,6 +143,10 @@ async def _purge_job() -> None:
                      f"{BEACON_RETENTION_DAYS} days")
     except Exception as exc:
         log.warning(f"[purge] failed: {exc}")
+    try:
+        await _disk_guard()
+    except Exception as exc:
+        log.warning(f"[purge] disk guard failed: {exc}")
 
 
 @asynccontextmanager
@@ -203,6 +264,15 @@ def _round_probs(values: list[float]) -> list[float]:
     return np.round(np.asarray(values, dtype=float), _PROB_DP).tolist()
 
 
+# Admission control for the one genuinely expensive request.  Each prediction
+# holds ~30 MB (a 50 x 40401 result array plus a per-iteration copy of the
+# feature matrix) and saturates the cores it is given, so concurrent ones split
+# the same CPU into slower pieces while multiplying peak memory on a 896 MB box.
+# A queue is the honest response: everyone waits their turn and nobody is
+# rejected, versus every request degrading together and the box swapping.
+_predict_sem = asyncio.Semaphore(PREDICT_CONCURRENCY)
+
+
 @app.get("/predict")
 async def predict(lat: float, lon: float, alt: int | None = None, forecast_h: int = 0):
     """
@@ -244,7 +314,8 @@ async def predict(lat: float, lon: float, alt: int | None = None, forecast_h: in
         # /ws/live frames, /healthz and every other request behind it.  XGBoost
         # releases the GIL inside its OpenMP section, so a worker thread really
         # does run alongside the loop rather than just deferring the block.
-        heatmap, heatmap_std = await asyncio.to_thread(model.predict, features)
+        async with _predict_sem:
+            heatmap, heatmap_std = await asyncio.to_thread(model.predict, features)
         live_gliders = await fetch_ogn_gliders()
         heatmap = _apply_ogn_fusion(heatmap, live_gliders, grid_lat, grid_lon,
                                     radius, grid_rows, grid_cols)
@@ -275,8 +346,47 @@ async def predict(lat: float, lon: float, alt: int | None = None, forecast_h: in
         },
     }
 
+# Ground elevation is cached on a ~1 km lattice, which is accurate enough at
+# altitude and useless near the deck.  Measured on the live feed: NAV405393 sat
+# parked at 517 m on a knoll south of Rieti, over ground the lattice sampled
+# 700 m away in the valley at 468 m.  Its AGL therefore went out as +49 m, and
+# the client's 10 m airborne test kept a stationary aircraft on the map as
+# "flying" while the pinned card, which reads the exact point, said -1 m.
+#
+# So anything the coarse pass puts within _PRECISE_BAND_M of the ground is
+# resampled at _PRECISE_DP.  4 dp (~11 m) rather than 3: at that same knoll 3 dp
+# rounds to 42.403 and reads 504 m, still +13 m of phantom height and still past
+# the 10 m threshold.  11 m is finer than SRTM's 30 m posts, so it is the exact
+# ground under the aircraft — no more precision is available to buy.
+#
+# Both gates exist to bound what that costs.  OpenTopoData's free tier is 1000
+# requests a day for the whole deployment, and an aircraft crosses a fresh 11 m
+# cell several times a second, so "always precise" would spend the budget in
+# minutes.  Height alone is not enough of a gate either: a ridge-soaring glider
+# lives inside the band for an hour at 100 km/h.  Adding the speed gate narrows
+# the fine sampling to aircraft sitting on or crawling around an airfield, which
+# occupy a handful of cells that then stay cached — on disk, so across restarts.
+# Fast traffic inside the band keeps the coarse reading, which costs at most a
+# glider showing on the map through its twenty-second takeoff roll.
+_PRECISE_DP            = 4
+_PRECISE_BAND_M        = 150.0
+_PRECISE_MAX_SPEED_KMH = 40.0
+
+
+def _wants_precise_ground(g: dict, coarse_elev: int) -> bool:
+    """Is this aircraft one whose agl the coarse lattice cannot be trusted on?"""
+    return (g["alt"] - coarse_elev <= _PRECISE_BAND_M
+            and (g.get("speed_kmh") or 0) <= _PRECISE_MAX_SPEED_KMH)
+
+
 async def _add_agl(gliders: list[dict]) -> list[dict]:
-    """Attach agl (metres above ground) to each glider dict in-place."""
+    """Attach agl (metres above ground) to each glider dict in-place.
+
+    Blocking twin of _attach_cached_agl, and it follows the same two-resolution
+    rule so a caller cannot get one meaning of agl here and another over
+    /ws/live: coarse everywhere, resampled at _PRECISE_DP for the aircraft
+    _wants_precise_ground picks out.
+    """
     if not gliders:
         return gliders
     pairs = [(g["lat"], g["lon"]) for g in gliders]
@@ -287,8 +397,23 @@ async def _add_agl(gliders: list[dict]) -> list[dict]:
         elevs = await asyncio.wait_for(fetch_elevation_batch(pairs), timeout=8.0)
     except asyncio.TimeoutError:
         elevs = {}
+    near_ground = [
+        pair for g, pair in zip(gliders, pairs)
+        if elevs.get(pair) is not None and _wants_precise_ground(g, elevs[pair])
+    ]
+    fine: dict[tuple, int | None] = {}
+    if near_ground:
+        try:
+            fine = await asyncio.wait_for(
+                fetch_elevation_batch(near_ground, dp=_PRECISE_DP), timeout=8.0)
+        except asyncio.TimeoutError:
+            fine = {}
     for g, pair in zip(gliders, pairs):
-        elev = elevs.get(pair)
+        # Explicit None test, not `or`: a fine reading of 0 m is sea level, and
+        # falling back to the coarse value there would undo the resample.
+        elev = fine.get(pair)
+        if elev is None:
+            elev = elevs.get(pair)
         g["agl"] = (g["alt"] - elev) if elev is not None else None
     return gliders
 
@@ -298,10 +423,14 @@ async def _add_agl(gliders: list[dict]) -> list[dict]:
 _agl_warm_task: asyncio.Task | None = None
 
 
-async def _warm_elevations(pairs: list[tuple[float, float]]) -> None:
+async def _warm_elevations(coarse: list[tuple[float, float]],
+                           fine:   list[tuple[float, float]]) -> None:
     """Pull missing ground elevations into the cache, off the frame path."""
     try:
-        await fetch_elevation_batch(pairs)
+        if coarse:
+            await fetch_elevation_batch(coarse)
+        if fine:
+            await fetch_elevation_batch(fine, dp=_PRECISE_DP)
     except Exception as exc:
         log.warning(f"[ws] elevation warm failed: {exc}")
 
@@ -320,16 +449,43 @@ def _attach_cached_agl(gliders: list[dict]) -> list[dict]:
     speed-only fallback, which passes anything on a takeoff roll or a winch
     launch.  Misses go to a background warm and resolve on a later frame; until
     then agl is explicitly null, which the client reads as "unknown".
+
+    Aircraft _wants_precise_ground picks out are resampled at _PRECISE_DP,
+    because down there the lattice's own sampling error is several times the
+    threshold anyone tests agl against.  One awaiting that finer reading keeps
+    the coarse one for a frame or two rather than going null: an approximate
+    height is a better answer than none for everything except the
+    is-it-on-the-ground question, and that one self-corrects on the next frame.
     """
     global _agl_warm_task
-    misses: list[tuple[float, float]] = []
+    coarse_misses: list[tuple[float, float]] = []
+    fine_misses:   list[tuple[float, float]] = []
     for g in gliders:
         elev = cached_elevation(g["lat"], g["lon"])
-        g["agl"] = (g["alt"] - elev) if elev is not None else None
         if elev is None:
-            misses.append((g["lat"], g["lon"]))
-    if misses and (_agl_warm_task is None or _agl_warm_task.done()):
-        _agl_warm_task = asyncio.create_task(_warm_elevations(misses))
+            coarse_misses.append((g["lat"], g["lon"]))
+        elif _wants_precise_ground(g, elev):
+            fine = cached_elevation(g["lat"], g["lon"], _PRECISE_DP)
+            if fine is None:
+                fine_misses.append((g["lat"], g["lon"]))
+            else:
+                elev = fine
+        g["agl"] = (g["alt"] - elev) if elev is not None else None
+    if (coarse_misses or fine_misses) and (_agl_warm_task is None or _agl_warm_task.done()):
+        # Test for the loop before building the coroutine: constructing it and
+        # then failing to schedule it leaves an un-awaited coroutine behind.
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop. The agl values computed above are still good;
+            # only the background warm is skipped, so misses stay null this pass
+            # and resolve on the next call that has one. Degrading here keeps
+            # this callable from sync code rather than letting a cache miss
+            # raise out of an otherwise fine request.
+            pass
+        else:
+            _agl_warm_task = asyncio.create_task(
+                _warm_elevations(coarse_misses, fine_misses))
     return gliders
 
 
@@ -384,8 +540,19 @@ async def glider_track(glider_id: str):
 
 
 @app.get("/ogn/live")
-async def ogn_live():
-    gliders = await _add_agl(await fetch_ogn_gliders())
+async def ogn_live(wait_agl: bool = False):
+    """Snapshot of the live feed.
+
+    agl comes from the warm elevation cache by default, which makes this return
+    immediately.  It used to call _add_agl unconditionally and so paid for a
+    rate-limited OpenTopoData batch on every hit — measured at 2.6 s against the
+    deployed VM, against an 8 s timeout, for an endpoint the frontend does not
+    even call.  Cache misses are warmed in the background and resolve on a later
+    request; pass wait_agl=true to block for them instead, which is what a
+    one-shot caller that needs agl on the first response wants.
+    """
+    gliders = await fetch_ogn_gliders()
+    gliders = await _add_agl(gliders) if wait_agl else _attach_cached_agl(gliders)
     return {"gliders": _to_wire(gliders)}
 
 

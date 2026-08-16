@@ -8,8 +8,17 @@ services:
       THERMALSENSE_DATA_DIR: /data
     volumes:
       - thermalsense-data:/data
+    # The VM has 896 MB of RAM total. Unbounded, a leak or a runaway /seed takes
+    # the whole box with it — Caddy, sshd and the only way back in. A limit turns
+    # that into a container the restart policy brings straight back.
+    # Generous on purpose: steady state is ~135 MB, so this is a blast radius,
+    # not a target. memswap_limit == mem_limit denies the container swap it
+    # cannot use productively anyway; the host's 2 GB stays for the build.
+    mem_limit: 700m
+    memswap_limit: 700m
     # Deliberately not published to the host: all traffic goes through Caddy,
-    # so there is no plaintext path that bypasses TLS.
+    # so there is no plaintext path that bypasses TLS. --forwarded-allow-ips in
+    # the Dockerfile depends on this staying `expose` and never becoming `ports`.
     expose:
       - "8000"
 

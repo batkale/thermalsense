@@ -9,8 +9,21 @@ from config import SRTM_BASE, GRID_RES, TERRAIN_RES, GRID_RADIUS, DATA_DIR
 
 log = logging.getLogger(__name__)
 
-# Session-level cache keyed by (lat, lon) rounded to 2 dp (~1 km resolution)
+# Session-level cache keyed by (lat, lon) rounded to DEFAULT_POINT_DP.
+#
+# The key is not just a bucket: it is the coordinate the elevation was actually
+# sampled at, because fetch_elevation_batch asks OpenTopoData about the rounded
+# point rather than the raw one.  That is what lets entries fetched at different
+# `dp` share one dict — a fine lookup of a point that happens to sit on the
+# coarse lattice hits the existing entry, since both round to the same
+# coordinate and that coordinate is where the elevation came from.
 _elev_cache: dict[tuple[float, float], int] = {}
+
+# 2 dp = ~1 km cells.  Coarse on purpose: it matches TERRAIN_RES, so the points
+# a grid fetch resolves serve point lookups nearby for free.  Callers that need
+# the ground under a specific aircraft rather than the ground a kilometre-grid
+# says is nearby must pass a finer dp — see _attach_cached_agl in main.py.
+DEFAULT_POINT_DP = 2
 
 # Grid cache keyed by (snapped lat, snapped lon, radius) — terrain grids are static.
 # The key must be the centre the array was actually built around; see
@@ -149,16 +162,19 @@ async def fetch_elevation_point(lat: float, lon: float) -> int | None:
         return None
 
 
-def cached_elevation(lat: float, lon: float) -> int | None:
+def cached_elevation(lat: float, lon: float, dp: int = DEFAULT_POINT_DP) -> int | None:
     """Ground elevation from the warm cache only — never touches the network.
 
     For hot paths that cannot afford a rate-limited fetch (the 2 s /ws/live
     frame).  A miss returns None rather than blocking; the caller is expected to
     warm the cache out of band and pick the value up on a later pass.  The key is
-    the same 2 dp (~1 km) cell fetch_elevation_batch caches under, so points a
-    grid fetch already resolved are hits here too.
+    the same rounded cell fetch_elevation_batch caches under, so points a grid
+    fetch already resolved are hits here too.
+
+    `dp` must match the `dp` the point was fetched under — see
+    fetch_elevation_batch for why the two are one and the same number.
     """
-    return _elev_cache.get((round(lat, 2), round(lon, 2)))
+    return _elev_cache.get((round(lat, dp), round(lon, dp)))
 
 
 MAX_BATCH_POINTS = 100      # opentopodata.org caps a single request at 100 locations
@@ -167,12 +183,18 @@ MAX_BATCH_POINTS = 100      # opentopodata.org caps a single request at 100 loca
 async def fetch_elevation_batch(
     latlon_pairs: list[tuple[float, float]],
     max_requests: int = 2,
+    dp: int = DEFAULT_POINT_DP,
 ) -> dict[tuple, int | None]:
     """
     Elevation for multiple points, split into MAX_BATCH_POINTS-sized requests
-    (1 req/s limit).  Results cached by (lat, lon) rounded to 2 dp, and the
+    (1 req/s limit).  Results cached by (lat, lon) rounded to `dp`, and the
     uncached points are deduplicated on that same key before fetching — a
-    single request therefore covers up to 100 distinct ~1 km cells.
+    single request therefore covers up to 100 distinct cells.
+
+    `dp` is a resolution knob, not just a cache-key detail: the request goes out
+    for the *rounded* coordinate, so at the 2 dp default the elevation returned
+    for a point can be the ground up to ~700 m away.  Raise it when the answer
+    has to describe the ground under the point itself.
 
     At most `max_requests` chunks are fetched per call so a large input can't
     blow past the caller's timeout; points beyond that budget come back None
@@ -186,7 +208,7 @@ async def fetch_elevation_batch(
     pending: dict[tuple[float, float], list[tuple[float, float]]] = {}
 
     for lat, lon in latlon_pairs:
-        key = (round(lat, 2), round(lon, 2))
+        key = (round(lat, dp), round(lon, dp))
         if key in _elev_cache:
             out[(lat, lon)] = _elev_cache[key]
         else:

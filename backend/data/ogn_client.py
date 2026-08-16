@@ -30,6 +30,13 @@ def _init_db() -> None:
         # sqlite3 holds the GIL across them, freezing the event loop.
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("PRAGMA synchronous=NORMAL")
+        # Only takes effect on a database with no tables yet, which is exactly
+        # when it is free.  Without it a DELETE moves pages to the freelist and
+        # the file never shrinks — retention then caps growth but reclaims no
+        # disk, so a DB that peaked at 10 GB occupies 10 GB forever.  Converting
+        # an existing DB needs a full VACUUM (~2x the file size in scratch space,
+        # and it locks out the APRS writer for minutes); see DEPLOY.md.
+        con.execute("PRAGMA auto_vacuum=INCREMENTAL")
         con.execute("""
             CREATE TABLE IF NOT EXISTS beacons (
 
@@ -152,6 +159,12 @@ def purge_old_beacons(days: float | None = None, chunk: int = 50_000) -> int:
                 deleted += cur.rowcount
                 if cur.rowcount < chunk:
                     break
+            # Hand the freed pages back to the filesystem.  A no-op unless the
+            # DB was created with auto_vacuum=INCREMENTAL, so on the databases
+            # that predate that pragma the delete still only caps growth.
+            if deleted:
+                con.execute("PRAGMA incremental_vacuum")
+                con.commit()
     except Exception as exc:
         print(f"[OGN] beacon purge failed: {exc}")
     return deleted

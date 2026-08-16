@@ -49,4 +49,17 @@ HEALTHCHECK --interval=30s --timeout=15s --start-period=90s --retries=5 \
 # --workers 1 is mandatory, not a default: the APRS thread and the in-memory
 # glider state are per-process, so a second worker would open a duplicate
 # upstream connection and serve divergent data.
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+#
+# --proxy-headers with --forwarded-allow-ips: Caddy terminates TLS, so without
+# these every log line and any future rate limiting sees Caddy's container IP
+# instead of the client's.  Trusting the header from any peer is only safe
+# because port 8000 is never published to the host (docker-compose uses `expose`,
+# not `ports`) — Caddy is the sole route in.  Publish the port and this becomes a
+# spoofing vector; pin it to Caddy's address if that ever changes.
+#
+# --limit-concurrency is a backstop, not the main defence: PREDICT_CONCURRENCY
+# already queues the expensive path.  This bounds everything else, so a flood of
+# cheap requests returns 503 rather than accumulating buffers until the OOM
+# killer picks a process on a 896 MB box.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", \
+     "--proxy-headers", "--forwarded-allow-ips", "*", "--limit-concurrency", "64"]

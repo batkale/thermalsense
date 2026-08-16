@@ -27,6 +27,12 @@ pins `--workers 1`; do not raise it.
 | `STATIC_DIR` | `../frontend/dist` | Built frontend. Set by the Dockerfile. |
 | `CORS_ORIGINS` | `*` | Comma-separated. Leave as `*` for single-container; set explicitly if you split. |
 | `ADMIN_TOKEN` | *(unset)* | When set, `POST /train` and `POST /seed` require `X-Admin-Token`. **Set this in production.** |
+| `BEACON_RETENTION_DAYS` | `7` | Beacon history window. ~1.4 GB/day measured, so 7 days ≈ 10 GB. Never set below the largest `days_back` you pass to `/seed`. |
+| `MIN_FREE_DISK_GB` | `3` | Below this the purge job shortens retention rather than let the disk fill. |
+| `MIN_RETENTION_DAYS` | `1` | Floor the emergency purge will not go under. |
+| `PREDICT_CONCURRENCY` | `1` | Simultaneous `/predict` runs. Each saturates its cores and holds ~30 MB; raise only with cores to match. |
+| `XGB_FIT_THREADS` | `1` | Threads for the retrain fit. Kept low so a background job cannot starve serving. |
+| `XGB_PREDICT_THREADS` | *(all cores)* | Threads for inference. |
 
 Frontend build-time vars are in `frontend/.env.example`. For the single-container
 deploy you need none of them — `API_BASE` resolves to `''` and the bundle calls
@@ -246,6 +252,57 @@ The 300 s APScheduler job retrains automatically regardless.
   so roughly 1000 uncached predictions/day. The cache is in-memory and resets on
   restart. Self-host the OpenTopoData container if you outgrow this.
 - **Open-Meteo**: 10,000 calls/day, non-commercial use only.
+
+**Burstable CPU credits.** `Standard_B2ts_v2` is a burstable size: it earns
+credits while idle and spends them above a baseline of **20% of 2 vCPU**.
+Sustained work over that baseline — a multi-hour `/seed`, several viewers at
+once — drains the balance, after which Azure throttles the VM to roughly 0.4
+vCPU. Everything then gets slow *at once and for no visible reason*, which reads
+exactly like an application bug and is the single most misleading failure mode
+this host has. Check the balance before you debug anything else:
+
+```bash
+az monitor metrics list --resource $VM_ID --metric CPUCreditsRemaining \
+  --interval PT5M --output table
+```
+
+An alert is worth the five minutes. `--condition` fires on the remaining
+balance, so pick a number that leaves time to react (the size caps at 576):
+
+```bash
+az monitor metrics alert create -g thermalsense-rg -n low-cpu-credits \
+  --scopes $VM_ID --description "B2ts_v2 credit balance is running down" \
+  --condition "avg CPUCreditsRemaining < 100" \
+  --window-size 15m --evaluation-frequency 5m \
+  --action $ACTION_GROUP_ID
+```
+
+`$ACTION_GROUP_ID` needs an action group with your email
+(`az monitor action-group create -g thermalsense-rg -n ops --action email me you@example.com`).
+
+**Disk.** The beacon DB is the thing that grows: ~1.4 GB/day, bounded by
+`BEACON_RETENTION_DAYS` at roughly 10 GB steady state on a 29 GB disk. Two
+non-obvious points:
+
+- **Docker is usually the bigger consumer.** Build cache accumulates a layer set
+  per `docker compose build` and is never reclaimed automatically. Check with
+  `docker system df` and reclaim with `docker builder prune`.
+- **A DB created before `auto_vacuum=INCREMENTAL` never shrinks.** SQLite moves
+  deleted pages to a freelist and reuses them, so retention caps growth but
+  returns nothing to the filesystem — a DB that once peaked at 10 GB occupies
+  10 GB forever. New deployments get the pragma at creation. To convert the
+  existing one, stop the app first (`VACUUM` locks out the APRS writer for
+  minutes and needs ~2× the file size in scratch space):
+
+  ```bash
+  docker compose stop app
+  docker compose run --rm -T app python -c \
+    "import sqlite3; sqlite3.connect('/data/data/ogn_history.db').execute('VACUUM')"
+  docker compose up -d app && docker ps
+  ```
+
+  Note the `-T`: without it, `compose run` over a piped ssh heredoc eats the
+  remaining lines, and the `up -d app` never runs. That has caused a real outage.
 
 **Backups.** `docker run --rm -v thermalsense-data:/data -v $PWD:/out alpine \
 tar czf /out/thermalsense-backup.tgz /data`

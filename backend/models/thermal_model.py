@@ -5,7 +5,8 @@ import xgboost as xgb
 import numpy as np
 from datetime import datetime, timezone
 from pathlib import Path
-from config import MODEL_PATH, BUFFER_PATH, GRID_RADIUS, LAT_MIN, LAT_MAX, LON_MIN, LON_MAX
+from config import (MODEL_PATH, BUFFER_PATH, GRID_RADIUS, LAT_MIN, LAT_MAX, LON_MIN, LON_MAX,
+                    XGB_FIT_THREADS, XGB_PREDICT_THREADS)
 from evaluation.holdout import split as bench_split
 from evaluation.metrics import grouped_auc, paired_delta_ci
 from pipeline.feature_engineering import FEATURE_COUNT
@@ -130,8 +131,39 @@ _MIN_SOLAR_GHI = 50.0     # W/m2 — roughly deep twilight
 _MIN_POSITIVES = 20
 
 _MIN_SAMPLES = 100
-_MAX_BUFFER  = 21_024_000
 _MC_SAMPLES  = 50
+
+# Rolling-window cap on the training buffer.  The old value of 21,024,000 was a
+# cap in name only: online collection adds at most 20 samples per 300 s cycle
+# (~5,760/day), so the window would not have begun to roll for a decade, and
+# _buffer_X is a Python list of row arrays whose per-object overhead dwarfs the
+# 176 bytes of float64 each row actually carries.  On an 896 MB box that is the
+# slow leak that eventually matters.
+#
+# 200,000 rows is ~35 days of pure live collection, or several /seed rebuilds,
+# and keeps the buffer in the tens of MB.  It also bounds how stale the oldest
+# training data can get, which the chronological growth otherwise leaves open.
+_MAX_BUFFER  = 200_000
+
+
+def _for_serving(clf: "xgb.XGBClassifier") -> "xgb.XGBClassifier":
+    """Retune a model from fit-time threads to inference-time threads.
+
+    fit_and_gate builds its challenger with n_jobs=XGB_FIT_THREADS and, if the
+    gate accepts it, promotes that same object to self.model.  The booster keeps
+    the thread count it was fitted under (verified: nthread=1 in its config
+    afterwards), so without this every prediction from that promotion until the
+    next restart runs single-threaded — silently, since only the latency
+    changes.  The fit yields cores precisely because nobody is waiting on it;
+    serving always has someone waiting on it.
+
+    save_model does *not* carry n_jobs across — a reloaded model comes back with
+    n_jobs=None and nthread=0, meaning all cores — so load() is not exposed to
+    the same trap.  It is retuned anyway to make the setting explicit and
+    honour XGB_PREDICT_THREADS rather than silently taking every core.
+    """
+    clf.set_params(n_jobs=XGB_PREDICT_THREADS)
+    return clf
 
 # Mixed-label groups the frozen benchmark must contain before its score is
 # trusted as a gate.  Only groups holding both a positive and a negative
@@ -240,7 +272,7 @@ class ThermalModel:
                     f"ignoring it and using physics fallback; POST /train to rebuild"
                 )
             else:
-                self.model = candidate
+                self.model = _for_serving(candidate)
                 log.info(f"[model] loaded from {MODEL_PATH}")
         else:
             log.info("[model] no trained model found — using physics fallback")
@@ -492,7 +524,7 @@ class ThermalModel:
             colsample_bytree=0.8,
             scale_pos_weight=max(1.0, (len(yf) - fit_pos) / max(1, fit_pos)),
             tree_method="hist",
-            n_jobs=-1,
+            n_jobs=XGB_FIT_THREADS,
             eval_metric="auc",
             random_state=42,
             # XGBoost >= 2.0 takes early stopping on the constructor; passing it to
@@ -570,6 +602,9 @@ class ThermalModel:
             )
 
         Path(MODEL_PATH).parent.mkdir(parents=True, exist_ok=True)
+        # Retune before saving, so the file on disk carries the serving setting
+        # too — load_model restores whatever n_jobs was saved with it.
+        _for_serving(clf)
         clf.save_model(MODEL_PATH)
         self.model = clf
 
