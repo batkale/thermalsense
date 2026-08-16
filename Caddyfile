@@ -6,9 +6,15 @@
 	# /ws/live socket works without extra configuration.
 	reverse_proxy app:8000
 
-	# zstd first: browsers that advertise it get a smaller body for less CPU than
-	# gzip, which matters on a 2-vCPU burstable VM compressing ~1 MB heatmaps.
-	# gzip stays as the fallback for clients that don't offer zstd.
+	# zstd first, then gzip for clients that don't offer it.
+	#
+	# Note this trades size for CPU, not the other way round: measured on a
+	# /predict response, zstd returns 34.9 KB against gzip's 31.1 KB, because
+	# Caddy's default zstd level is tuned for speed rather than ratio. That is
+	# the right way round for this host — CPU credits are the binding constraint
+	# on a burstable VM, while 3.8 KB on an endpoint a viewer hits a handful of
+	# times is noise. Add `encode { zstd { level better } gzip }` if egress ever
+	# becomes the scarcer resource.
 	encode zstd gzip
 
 	header {

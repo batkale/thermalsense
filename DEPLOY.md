@@ -313,3 +313,20 @@ reconnect lines, which is the fastest way to confirm the OGN feed is alive.
 
 **Updating.** `git pull && docker compose up -d --build`. The named volumes are
 untouched, so the trained model, training buffer and beacon history survive.
+
+**A Caddyfile change needs `--force-recreate`, not a reload.** The Caddyfile is
+bind-mounted as a *single file*, so the container holds that file's inode. `git
+pull` does not edit files in place — it writes a replacement and renames over
+the old one, which leaves the container still reading the original inode. The
+host file changes, the container's copy does not, and `caddy reload` cheerfully
+re-reads the stale copy and reports success. This cost a deploy: `encode zstd`
+looked applied and every response kept coming back gzip. Recreate instead, and
+verify inside the container rather than on the host:
+
+```bash
+docker compose up -d --force-recreate caddy
+docker exec thermalsense-caddy-1 grep encode /etc/caddy/Caddyfile
+```
+
+Certificates live in the `caddy-data` volume, so recreating is safe — Caddy does
+not re-issue.
