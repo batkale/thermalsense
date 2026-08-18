@@ -27,7 +27,7 @@ pins `--workers 1`; do not raise it.
 | `STATIC_DIR` | `../frontend/dist` | Built frontend. Set by the Dockerfile. |
 | `CORS_ORIGINS` | `*` | Comma-separated. Leave as `*` for single-container; set explicitly if you split. |
 | `ADMIN_TOKEN` | *(unset)* | When set, `POST /train` and `POST /seed` require `X-Admin-Token`. **Set this in production.** |
-| `BEACON_RETENTION_DAYS` | `7` | Beacon history window. ~1.4 GB/day measured, so 7 days ≈ 10 GB. Never set below the largest `days_back` you pass to `/seed`. |
+| `BEACON_RETENTION_DAYS` | `2` | Beacon history window. ~1.4 GB/day measured, so 2 days ≈ 2.8 GB. Lowered from 7 after the 17 Aug 2026 outage — the binding constraint is RAM (page cache), not disk. `/seed` clamps `days_back` to this window. |
 | `MIN_FREE_DISK_GB` | `3` | Below this the purge job shortens retention rather than let the disk fill. |
 | `MIN_RETENTION_DAYS` | `1` | Floor the emergency purge will not go under. |
 | `PREDICT_CONCURRENCY` | `1` | Simultaneous `/predict` runs. Each saturates its cores and holds ~30 MB; raise only with cores to match. |
@@ -281,8 +281,9 @@ az monitor metrics alert create -g thermalsense-rg -n low-cpu-credits \
 (`az monitor action-group create -g thermalsense-rg -n ops --action email me you@example.com`).
 
 **Disk.** The beacon DB is the thing that grows: ~1.4 GB/day, bounded by
-`BEACON_RETENTION_DAYS` at roughly 10 GB steady state on a 29 GB disk. Two
-non-obvious points:
+`BEACON_RETENTION_DAYS` at roughly 2.8 GB steady state on a 29 GB disk (it was
+sized for ~10 GB at the old 7-day window). Note the real ceiling is RAM, not
+disk — see the retention comment in `config.py`. Two non-obvious points:
 
 - **Docker is usually the bigger consumer.** Build cache accumulates a layer set
   per `docker compose build` and is never reclaimed automatically. Check with

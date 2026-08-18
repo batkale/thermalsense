@@ -12,6 +12,22 @@ DATA_DIR = Path(os.getenv("THERMALSENSE_DATA_DIR", Path(__file__).parent)).resol
 OPEN_METEO_BASE      = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_HIST_BASE = "https://historical-forecast-api.open-meteo.com/v1/forecast"
 SRTM_BASE         = "https://api.opentopodata.org/v1/srtm30m"
+# ESA WorldCover 10 m, public S3. Cloud-Optimized GeoTIFFs, so the reader takes
+# HTTP range requests over internal overviews instead of the 73 MB full tile.
+# No key and no rate limit, unlike OpenTopoData.
+WORLDCOVER_BASE   = os.getenv(
+    "WORLDCOVER_BASE",
+    "https://esa-worldcover.s3.eu-central-1.amazonaws.com/v200/2021/map",
+)
+
+# Feed real per-cell land cover into feature columns 13/14 instead of the two
+# placeholder constants.  Off by default because the evidence does not yet
+# support it: measured through evaluation/, the change moves the within-group
+# score by -0.04 to +0.02 depending only on the CV fold seed, i.e. the sign is
+# not determined by the data.  The plumbing is complete and tested, so this
+# becomes a one-line change once the buffer is large enough to decide.
+# Flipping it on requires a retrain — the columns change meaning, not width.
+ENABLE_LANDCOVER  = os.getenv("ENABLE_LANDCOVER", "0") not in ("0", "", "false", "False")
 # OGN gliders come from the APRS TCP stream (aprs.glidernet.org), not HTTP
 
 # Bounding box for live traffic — the whole world by default.
@@ -58,20 +74,27 @@ BUFFER_PATH       = str(DATA_DIR / "models" / "training_buffer.npz")
 DB_PATH           = DATA_DIR / "data" / "ogn_history.db"
 
 # How long beacons are kept before the retention job deletes them.  Without a cap
-# the DB grows without bound and fills the disk in weeks.
+# the DB grows without bound.
 #
 # Measured on the live worldwide feed (16 Aug 2026): 23.2M rows in 4.1 GB over
-# 3 days — ~7.7M rows and ~1.4 GB per day, not the ~6M/800 MB this comment used
-# to estimate.  At 7 days that is a steady state near 9.6 GB, so the file wants
-# roughly 10 GB of headroom rather than the 5-6 GB previously assumed.
+# 3 days — ~7.7M rows and ~1.4 GB per day.
 #
-# The floor is set by readers, not by disk: seed_from_history() defaults to
-# days_back=3, so anything below that silently starves /seed of training data —
-# it would return "no rows" rather than fail, which is the worst way to break.
-# 7 days keeps the default seed working with margin.  Raise it only with the disk
-# headroom to match, and never set it below the largest days_back you intend to
-# pass to /seed.
-BEACON_RETENTION_DAYS = float(os.getenv("BEACON_RETENTION_DAYS", "7"))
+# Lowered 7 -> 2 after the 17 Aug 2026 outage, which proved the binding
+# constraint is RAM, not disk.  The disk was only 40% full; what took the site
+# down was the 4.26 GB DB against the ~165 MB of page cache left on a 896 MB
+# box, so nearly every SQLite page hit was a physical read.  The host sat at
+# 96.6% iowait with io pressure full=90%, uvicorn wedged in D state, and Caddy
+# accepted connections it could never get an upstream answer for — the browser
+# saw a timeout, not an error.  Retention is the only knob that shrinks the
+# working set, so it is sized to what fits in cache now, not to what fits on
+# disk.
+#
+# The floor is set by readers, not by disk: seed_from_history() must not be
+# asked for a window the DB no longer holds, or it returns "no rows" rather
+# than failing — the worst way to break.  Its default now derives from this
+# value and it clamps + warns instead of silently seeding nothing, so the two
+# can no longer drift apart.  Raise this only with the RAM to match.
+BEACON_RETENTION_DAYS = float(os.getenv("BEACON_RETENTION_DAYS", "2"))
 
 # Free-space floor for the emergency purge (see _disk_guard in main.py).  Losing
 # beacon history is recoverable; filling the disk takes the whole service down

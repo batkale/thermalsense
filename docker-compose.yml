@@ -6,6 +6,12 @@ services:
       # Fails fast rather than silently deploying an unguarded /train endpoint
       ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN in .env}
       THERMALSENSE_DATA_DIR: /data
+      # Sized against RAM, not disk — see the note in config.py. Listed here so
+      # it can be retuned from .env and applied with `up -d` alone: compose's
+      # .env is variable substitution for this file, not container environment,
+      # so a bare BEACON_RETENTION_DAYS=... in .env would never reach the app.
+      # Recreating beats rebuilding on a box that barely survives a build.
+      BEACON_RETENTION_DAYS: ${BEACON_RETENTION_DAYS:-2}
     volumes:
       - thermalsense-data:/data
     # The VM has 896 MB of RAM total. Unbounded, a leak or a runaway /seed takes

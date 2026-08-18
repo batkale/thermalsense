@@ -23,6 +23,17 @@ const STRINGS = {
     solar:              'Güneş',
     lapse:              'Gradyan',
     tBase:              'T-taban',
+    tempTip:            'Yerden 2 m yükseklikteki hava sıcaklığı.',
+    humidityTip:        'Bağıl nem. Kuru hava daha yüksek bir bulut tabanı '
+                      + 'demektir.',
+    windTip:            'Yer rüzgârının hızı ve geldiği yön. Güçlü rüzgâr '
+                      + 'termalleri eğer ve dağıtır.',
+    solarTip:           'Yere ulaşan güneş ışınımı — termalleri besleyen ısı '
+                      + 'kaynağı. 50 W/m² altında yüzey ısınması olmaz.',
+    lapseTip:           'Sıcaklığın yükseklikle düşme hızı. Dik gradyan '
+                      + 'kararsız hava ve güçlü termal demektir.',
+    cinTip:             'Konvektif engelleme — termallerin aşması gereken '
+                      + 'kapak. Yüksek değer termalleri bastırır.',
     forecast:           'Tahmin',
     now:                'Şimdi',
     plusHours:          '+{n} sa',
@@ -30,10 +41,25 @@ const STRINGS = {
     clickMapToLoad:     'Yüklemek için haritaya tıklayın',
     switchToEnglish:    "İngilizce'ye geç",
     switchToTurkish:    "Türkçe'ye geç",
+    switchToLight:      'Aydınlık moda geç',
+    switchToDark:       'Karanlık moda geç',
 
     // info panel
     thermalPeak:        'Termal zirve',
     thermalBase:        'Termal taban',
+    thermalPeakTip:     'Haritadaki en yüksek termal olasılığı — modelin bu '
+                      + 'alandaki en iyi hücreye verdiği güven.',
+    thermalBaseTip:     'Termallerin tepe yaptığı tahmini yükseklik. Bunun '
+                      + 'üzerinde tırmanış beklemeyin.',
+    capeTip:            'Konvektif potansiyel enerji. Yüksek değer güçlü '
+                      + 'yükseliş, çok yüksek değer fırtına riski demektir.',
+    predictionAlt:      'Tahmin yüksekliği',
+    predictionAltTip:   'Isı haritası bu yükseklik için geçerlidir. Planöre '
+                      + 'tıklamak onun yüksekliğini, boş haritaya tıklamak '
+                      + 'arazi ortalaması üzerinde varsayılan bir yüksekliği '
+                      + 'kullanır.',
+    altFromGlider:      'planörden · arazi {n} m',
+    altFromDefault:     'varsayılan · arazi {n} m',
     gliderCount:        '{n} planör',
     circlingCount:      '{n} daire çiziyor',
     towPlaneCount:      '{n} çekici uçak',
@@ -94,6 +120,18 @@ const STRINGS = {
     solar:              'Solar',
     lapse:              'Lapse',
     tBase:              'T-base',
+    tempTip:            'Air temperature 2 m above the ground.',
+    humidityTip:        'Relative humidity. Drier air means a higher cloud '
+                      + 'base.',
+    windTip:            'Surface wind speed and the direction it comes from. '
+                      + 'Strong wind tilts and breaks up thermals.',
+    solarTip:           'Solar radiation reaching the ground — the heat that '
+                      + 'drives thermals. Below 50 W/m² there is no surface '
+                      + 'heating.',
+    lapseTip:           'How fast temperature falls with height. A steep lapse '
+                      + 'rate means unstable air and strong thermals.',
+    cinTip:             'Convective inhibition — the cap thermals must break '
+                      + 'through. High values suppress them.',
     forecast:           'Forecast',
     now:                'Now',
     plusHours:          '+{n}h',
@@ -101,9 +139,23 @@ const STRINGS = {
     clickMapToLoad:     'Click the map to load',
     switchToEnglish:    'Switch to English',
     switchToTurkish:    'Switch to Turkish',
+    switchToLight:      'Switch to light mode',
+    switchToDark:       'Switch to dark mode',
 
     thermalPeak:        'Thermal peak',
     thermalBase:        'Thermal base',
+    thermalPeakTip:     'The highest thermal probability on the map — the model '
+                      + 'confidence for the best cell in this area.',
+    thermalBaseTip:     'Estimated height where thermals top out. Expect no '
+                      + 'climb above it.',
+    capeTip:            'Convective available potential energy. Higher means '
+                      + 'stronger lift; very high means storm risk.',
+    predictionAlt:      'Prediction altitude',
+    predictionAltTip:   'The heatmap answers for this altitude. Clicking a '
+                      + 'glider uses the altitude of that aircraft; clicking '
+                      + 'bare map uses a default height above mean terrain.',
+    altFromGlider:      'from glider · terrain {n} m',
+    altFromDefault:     'default · terrain {n} m',
     gliderCount:        ({ n }) => `${n} glider${n === 1 ? '' : 's'}`,
     circlingCount:      '{n} circling',
     towPlaneCount:      ({ n }) => `${n} tow plane${n === 1 ? '' : 's'}`,

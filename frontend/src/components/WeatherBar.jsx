@@ -1,8 +1,15 @@
+import { useState, useRef } from 'react';
 import { useLang } from '../i18n/LanguageContext.jsx';
+import { useTheme } from '../theme/ThemeContext.jsx';
 import { LANG_LABEL } from '../i18n/strings.js';
 
 export default function WeatherBar({ weather, forecastH = 0, onForecastChange, loading, error }) {
   const { t, lang, toggleLang, windDir } = useLang();
+  const { theme, toggleTheme } = useTheme();
+
+  // The glyph shows the mode the click leads to, not the one in force —
+  // a control labelled with its current state reads as a status light.
+  const themeLabel = theme === 'dark' ? t('switchToLight') : t('switchToDark');
 
   return (
     <div className="top-bar">
@@ -13,11 +20,11 @@ export default function WeatherBar({ weather, forecastH = 0, onForecastChange, l
         <div className="wx-chips">
           {weather ? (
             <>
-              <WxChip label={t('temp')}     value={`${weather.temp_2m.toFixed(1)}°C`} />
-              <WxChip label={t('humidity')} value={`${weather.humidity}%`} />
-              <WxChip label={t('wind')}     value={<WindValue speed={weather.wind_speed} dir={weather.wind_dir} label={windDir(weather.wind_dir)} />} />
-              <WxChip label={t('solar')}    value={`${Math.round(weather.solar_ghi)} W/m²`} />
-              <WxChip label={t('lapse')}    value={`${weather.lapse_rate.toFixed(1)}°/km`} />
+              <WxChip label={t('temp')}     tip={t('tempTip')}     value={`${weather.temp_2m.toFixed(1)}°C`} />
+              <WxChip label={t('humidity')} tip={t('humidityTip')} value={`${weather.humidity}%`} />
+              <WxChip label={t('wind')}     tip={t('windTip')}     value={<WindValue speed={weather.wind_speed} dir={weather.wind_dir} label={windDir(weather.wind_dir)} />} />
+              <WxChip label={t('solar')}    tip={t('solarTip')}    value={`${Math.round(weather.solar_ghi)} W/m²`} />
+              <WxChip label={t('lapse')}    tip={t('lapseTip')}    value={`${weather.lapse_rate.toFixed(1)}°/km`} />
             </>
           ) : (
             <span className="wx-hint">
@@ -34,9 +41,9 @@ export default function WeatherBar({ weather, forecastH = 0, onForecastChange, l
         <div className="wx-chips">
           {weather ? (
             <>
-              <WxChip label="CAPE"       value={`${Math.round(weather.cape)} J/kg`} />
-              <WxChip label="CIN"        value={`${Math.round(weather.cin)} J/kg`} />
-              <WxChip label={t('tBase')} value={`${weather.thermal_base} m`} />
+              <WxChip label="CAPE"       tip={t('capeTip')}        value={`${Math.round(weather.cape)} J/kg`} />
+              <WxChip label="CIN"        tip={t('cinTip')}         value={`${Math.round(weather.cin)} J/kg`} />
+              <WxChip label={t('tBase')} tip={t('thermalBaseTip')} value={`${weather.thermal_base} m`} />
             </>
           ) : (
             <span className="wx-hint">—</span>
@@ -67,6 +74,15 @@ export default function WeatherBar({ weather, forecastH = 0, onForecastChange, l
       >
         {LANG_LABEL[lang]}
       </button>
+
+      <button
+        className="theme-toggle"
+        onClick={toggleTheme}
+        title={themeLabel}
+        aria-label={themeLabel}
+      >
+        {theme === 'dark' ? '☀' : '☾'}
+      </button>
     </div>
   );
 }
@@ -81,11 +97,43 @@ function WindValue({ speed, dir, label }) {
   );
 }
 
-function WxChip({ label, value }) {
+// Half the bubble's width, plus a little, so a chip near either screen edge
+// nudges its bubble inward instead of letting it run off.
+const WX_BUBBLE_HALF = 110;
+
+function WxChip({ label, value, tip }) {
+  const ref = useRef(null);
+  const [pos, setPos] = useState(null);
+
+  // Fixed positioning, measured on hover, rather than an absolutely positioned
+  // child like the sidebar metrics use. .top-bar sets overflow:hidden — it has
+  // to, since the chips run past its right edge on a narrow window — and it is
+  // only 50px tall, so an absolute bubble would be clipped away to nothing. A
+  // fixed one is laid out against the viewport and escapes that clip.
+  const show = () => {
+    const r = ref.current?.getBoundingClientRect();
+    if (!r) return;
+    setPos({
+      top:  r.bottom + 6,
+      left: Math.min(Math.max(r.left + r.width / 2, WX_BUBBLE_HALF),
+                     window.innerWidth - WX_BUBBLE_HALF),
+    });
+  };
+
   return (
-    <div className="wx-chip">
+    <div
+      className="wx-chip"
+      ref={ref}
+      onMouseEnter={tip ? show : undefined}
+      onMouseLeave={tip ? () => setPos(null) : undefined}
+    >
       <span className="wx-chip-label">{label}</span>
       <span className="wx-chip-value">{value}</span>
+      {tip && pos && (
+        <span className="wx-bubble" role="tooltip" style={{ top: pos.top, left: pos.left }}>
+          {tip}
+        </span>
+      )}
     </div>
   );
 }

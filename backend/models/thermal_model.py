@@ -6,7 +6,7 @@ import numpy as np
 from datetime import datetime, timezone
 from pathlib import Path
 from config import (MODEL_PATH, BUFFER_PATH, GRID_RADIUS, LAT_MIN, LAT_MAX, LON_MIN, LON_MAX,
-                    XGB_FIT_THREADS, XGB_PREDICT_THREADS)
+                    XGB_FIT_THREADS, XGB_PREDICT_THREADS, ENABLE_LANDCOVER)
 from evaluation.holdout import split as bench_split
 from evaluation.metrics import grouped_auc, paired_delta_ci
 from pipeline.feature_engineering import FEATURE_COUNT
@@ -28,6 +28,25 @@ def _set_aside(path: Path, suffix: str) -> Path | None:
         return dest
     except OSError as exc:
         log.warning(f"[model] could not set aside {path.name} ({exc}) — leaving it in place")
+        return None
+
+
+async def _land_props(lat: float, lon: float, shape):
+    """
+    Per-cell (heat, albedo) for a training grid, or None when disabled.
+
+    Training and serving must build identical feature spaces, so this is gated
+    on the same flag /predict reads.  A failure returns None rather than
+    propagating: a sample carrying the placeholder constants is still a usable
+    sample, whereas losing it costs two rate-limited API calls to recollect.
+    """
+    if not ENABLE_LANDCOVER:
+        return None
+    try:
+        from data.landcover_client import fetch_landcover_fine
+        return await fetch_landcover_fine(lat, lon, shape)
+    except Exception as exc:
+        log.warning(f"[model] land cover unavailable at ({lat:.2f},{lon:.2f}): {exc}")
         return None
 
 
@@ -398,6 +417,7 @@ class ThermalModel:
                     lat_bounds=lat_bounds,
                     lon_bounds=lon_bounds,
                     alt_amsl=g["alt"],
+                    land_use_props=await _land_props(g["lat"], g["lon"], elev.shape),
                 )
                 if meteo["solar_ghi"] < _MIN_SOLAR_GHI:
                     dark += 1
@@ -612,7 +632,7 @@ class ThermalModel:
 
     async def seed_from_history(
         self,
-        days_back: int = 3,
+        days_back: float | None = None,
         limit: int = 5000,
         reset: bool = False,
     ) -> dict:
@@ -641,7 +661,7 @@ class ThermalModel:
         from data.ogn_client import SOARING_AC_TYPES
         from pipeline.feature_engineering import build_feature_matrix
 
-        from config import DB_PATH as db_path
+        from config import DB_PATH as db_path, BEACON_RETENTION_DAYS
         if not db_path.exists():
             return {"error": "no DB found"}
 
@@ -650,6 +670,21 @@ class ThermalModel:
             self._buffer_X = []
             self._buffer_y = []
             log.info(f"[seed] reset — discarded {discarded} existing buffer samples")
+
+        # Retention decides what actually exists, so it is the ceiling here.  A
+        # days_back past the window is not an error the caller ever sees: the
+        # query just matches fewer rows and the seed reports success on a short
+        # sample.  Clamp it and say so, rather than seeding on history that was
+        # purged.  None means "whatever the window still holds".
+        if days_back is None:
+            days_back = BEACON_RETENTION_DAYS
+        elif days_back > BEACON_RETENTION_DAYS:
+            log.warning(
+                f"[seed] days_back={days_back:g} exceeds the "
+                f"{BEACON_RETENTION_DAYS:g}-day retention window — clamped; "
+                f"beacons older than that were already purged"
+            )
+            days_back = BEACON_RETENTION_DAYS
 
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days_back)).isoformat()
 
@@ -759,6 +794,7 @@ class ThermalModel:
                         lat_bounds=lat_bounds,
                         lon_bounds=lon_bounds,
                         alt_amsl=alt,
+                        land_use_props=await _land_props(lat, lon, elev.shape),
                     )
                     # The beacon's own cell, not the grid centre: snapping moves
                     # the centre off the aircraft by up to half a coarse cell.

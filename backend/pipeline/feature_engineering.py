@@ -59,7 +59,8 @@ def build_feature_matrix(meteo: dict, elev_grid: np.ndarray,
                          dt: datetime | None = None,
                          lat_bounds: tuple[float, float] | None = None,
                          lon_bounds: tuple[float, float] | None = None,
-                         alt_amsl: float | None = None) -> np.ndarray:
+                         alt_amsl: float | None = None,
+                         land_use_props: tuple[np.ndarray, np.ndarray] | None = None) -> np.ndarray:
     """
     Build a flat (N, FEATURE_COUNT) feature matrix — one row per grid cell.
 
@@ -96,6 +97,14 @@ def build_feature_matrix(meteo: dict, elev_grid: np.ndarray,
     that generated it, not on your altimeter reading.  That also makes the column
     vary across the grid rather than being one constant.  Omit it for a
     ground-level (0 m AGL) matrix.
+
+    land_use_props is an optional (heat, albedo) pair of per-cell arrays, shaped
+    like elev_grid — normally from data.landcover_client.  Without it, columns 13
+    and 14 come from the `land_use` string via a table of placeholder constants,
+    which makes them identical for every cell in every grid: across 5,149
+    collected samples each held exactly one distinct value, so two of the
+    twenty-two inputs carried no information at all.  Passing real per-cell
+    values is what turns them into features rather than padding.
     """
     if dt is None:
         dt = datetime.now(timezone.utc)
@@ -111,7 +120,21 @@ def build_feature_matrix(meteo: dict, elev_grid: np.ndarray,
         elev_grid, lat_deg=(sum(lat_bounds) / 2 if lat_bounds else None)
     )
     wind_u, wind_v = _wind_components(meteo["wind_speed"], meteo["wind_dir"])
-    heat, albedo = _LAND_USE.get(land_use, _LAND_USE["default"])
+
+    if land_use_props is None:
+        heat_v, albedo_v = _LAND_USE.get(land_use, _LAND_USE["default"])
+        heat = np.full(n_cells := rows * cols, heat_v)
+        albedo = np.full(n_cells, albedo_v)
+    else:
+        heat_grid, albedo_grid = land_use_props
+        if heat_grid.shape != elev_grid.shape or albedo_grid.shape != elev_grid.shape:
+            # Mismatched layers would attach each cell's cover to the wrong
+            # ground, which is worse than the constant it replaces.
+            raise ValueError(
+                f"land_use_props {heat_grid.shape}/{albedo_grid.shape} does not "
+                f"match elevation grid {elev_grid.shape}"
+            )
+        heat, albedo = heat_grid.ravel(), albedo_grid.ravel()
 
     hour_sin, hour_cos = _cyclic(dt.hour + dt.minute / 60, 24)
     doy_sin, doy_cos   = _cyclic(dt.timetuple().tm_yday, 365)
@@ -139,8 +162,8 @@ def build_feature_matrix(meteo: dict, elev_grid: np.ndarray,
         np.full(n, meteo["cin"]),               # 10 cin
         np.full(n, meteo["solar_ghi"]),         # 11 solar_ghi
         np.full(n, meteo["lapse_rate"]),        # 12 lapse_rate
-        np.full(n, heat),                       # 13 land_use_heat
-        np.full(n, albedo),                     # 14 land_use_albedo
+        heat,                                   # 13 land_use_heat
+        albedo,                                 # 14 land_use_albedo
         np.full(n, hour_sin),                   # 15 hour_sin
         np.full(n, hour_cos),                   # 16 hour_cos
         np.full(n, doy_sin),                    # 17 day_of_year_sin

@@ -130,3 +130,46 @@ def test_default_bounds_are_index_placeholders():
     mat = build_feature_matrix(METEO, ELEV, dt=DT)
     assert mat[0, 0] == pytest.approx(0.0)
     assert mat[0, 1] == pytest.approx(0.0)
+
+
+def test_land_use_columns_are_constant_without_real_cover():
+    """The placeholder path: one value repeated over every cell."""
+    mat = build_feature_matrix(METEO, ELEV, dt=DT)
+    assert len(np.unique(mat[:, 13])) == 1
+    assert len(np.unique(mat[:, 14])) == 1
+
+
+def test_land_use_props_make_columns_13_and_14_per_cell():
+    heat = np.linspace(0.1, 0.9, ELEV.size).reshape(ELEV.shape)
+    albedo = np.linspace(0.05, 0.4, ELEV.size).reshape(ELEV.shape)
+    mat = build_feature_matrix(METEO, ELEV, dt=DT, land_use_props=(heat, albedo))
+    assert np.allclose(mat[:, 13], heat.ravel())
+    assert np.allclose(mat[:, 14], albedo.ravel())
+    assert len(np.unique(mat[:, 13])) == ELEV.size
+
+
+def test_land_use_props_follow_the_same_cell_order_as_elevation():
+    """
+    Column 13 must line up with column 2 cell for cell. A ravel-order mismatch
+    would attach each cell's ground cover to different ground entirely, which is
+    worse than the constant it replaces.
+    """
+    heat = np.arange(ELEV.size, dtype=float).reshape(ELEV.shape)
+    mat = build_feature_matrix(METEO, ELEV, dt=DT,
+                               land_use_props=(heat, np.zeros_like(heat)))
+    for row in range(mat.shape[0]):
+        i, j = divmod(int(mat[row, 13]), ELEV.shape[1])
+        assert mat[row, 2] == ELEV[i, j]
+
+
+def test_mismatched_land_use_props_raise():
+    bad = np.zeros((2, 2))
+    with pytest.raises(ValueError, match="does not match elevation grid"):
+        build_feature_matrix(METEO, ELEV, dt=DT, land_use_props=(bad, bad))
+
+
+def test_land_use_props_do_not_change_the_matrix_width():
+    """Columns 13/14 change meaning, not count — so no FEATURE_COUNT bump."""
+    heat = np.full(ELEV.shape, 0.7)
+    mat = build_feature_matrix(METEO, ELEV, dt=DT, land_use_props=(heat, heat))
+    assert mat.shape[1] == FEATURE_COUNT

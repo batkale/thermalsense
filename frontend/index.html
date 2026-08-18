@@ -4,6 +4,26 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ThermalSense</title>
+    <!--
+      Theme, resolved before the bundle parses. React sets the same attribute on
+      mount, but that is after first paint: without this the app flashes dark on
+      its way to light. Mirrors resolveInitialTheme() in theme/ThemeContext.jsx.
+    -->
+    <script>
+      (function () {
+        var t = 'dark';
+        try {
+          var saved = localStorage.getItem('thermalsense.theme');
+          if (saved === 'dark' || saved === 'light') {
+            t = saved;
+          } else if (window.matchMedia &&
+                     window.matchMedia('(prefers-color-scheme: light)').matches) {
+            t = 'light';
+          }
+        } catch (e) { /* storage or matchMedia blocked - keep the default */ }
+        document.documentElement.dataset.theme = t;
+      })();
+    </script>
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌡</text></svg>" />
   </head>
   <body>

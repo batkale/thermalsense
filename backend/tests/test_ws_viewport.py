@@ -2,6 +2,9 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
+from fastapi.testclient import TestClient
+
+import main
 from main import (_parse_bounds, _in_bounds, _round_probs, _positions_to_wire,
                   _attach_cached_agl, _to_wire)
 from data import terrain_client
@@ -234,3 +237,70 @@ def test_a_pending_precise_sample_keeps_the_coarse_reading(monkeypatch):
     monkeypatch.setattr("main.asyncio.create_task", lambda coro: coro.close())
     g, = _attach_cached_agl([_parked(39.8123, 30.5187, 850)])
     assert g["agl"] == 50
+
+
+# ---------------------------------------------------------------------------
+# /ws/live — the *first* frame has to respect the viewport too
+#
+# The filter is per-connection state the client declares over the socket, so
+# there is a window where the server knows nothing about the viewport.  Sending
+# during that window is worse than sending nothing: the client draws every
+# glider on the planet, then the next frame arrives scoped and the map wipes
+# itself.  That reads as "all the gliders disappeared", not as a filter working.
+# ---------------------------------------------------------------------------
+
+INONU = {"lat_min": 39.0, "lat_max": 40.5, "lon_min": 29.5, "lon_max": 31.5}
+
+_FEED = [
+    {"id": "NEAR", "lat": 39.8, "lon": 30.1, "alt": 1400, "vario": 1.2,
+     "heading": 90, "speed_kmh": 95, "circling": False, "is_tow": False,
+     "under_tow": False, "ac_type": 1, "ac_type_name": "glider"},
+    {"id": "FRANCE", "lat": 45.3, "lon": 5.9, "alt": 1800, "vario": 0.4,
+     "heading": 270, "speed_kmh": 110, "circling": False, "is_tow": False,
+     "under_tow": False, "ac_type": 1, "ac_type_name": "glider"},
+]
+
+
+@pytest.fixture
+def stub_feed(monkeypatch):
+    """A two-glider world, no elevation lookups, no beacon buffers."""
+    async def _feed():
+        return [dict(g) for g in _FEED]
+
+    monkeypatch.setattr(main, "fetch_ogn_gliders", _feed)
+    monkeypatch.setattr(main, "drain_beacon_buffers", lambda cursor: ({}, cursor))
+    monkeypatch.setattr(main, "beacon_cursor", lambda: 0)
+    # A hit for every point keeps the background elevation warm from firing.
+    monkeypatch.setattr(main, "cached_elevation", lambda lat, lon, dp=2: 800)
+
+
+def test_first_frame_is_already_scoped_to_the_viewport(stub_feed):
+    """The bug: frame 1 used to carry the whole planet, frame 2 only the view."""
+    with TestClient(main.app).websocket_connect("/ws/live") as ws:
+        ws.send_json({"bounds": INONU})
+        frame = ws.receive_json()
+    assert [g["id"] for g in frame["gliders"]] == ["NEAR"]
+
+
+def test_a_client_that_never_declares_bounds_still_gets_the_full_feed(
+        stub_feed, monkeypatch):
+    """An older frontend degrades to the previous behaviour, not to a blank map."""
+    monkeypatch.setattr(main, "_BOUNDS_GRACE_S", 0.05)
+    with TestClient(main.app).websocket_connect("/ws/live") as ws:
+        frame = ws.receive_json()
+    assert {g["id"] for g in frame["gliders"]} == {"NEAR", "FRANCE"}
+
+
+def test_a_later_move_still_rescopes_the_stream(stub_feed):
+    """The grace period must not turn the viewport into connect-time-only state."""
+    with TestClient(main.app).websocket_connect("/ws/live") as ws:
+        ws.send_json({"bounds": INONU})
+        assert [g["id"] for g in ws.receive_json()["gliders"]] == ["NEAR"]
+        ws.send_json({"bounds": {"lat_min": 44.0, "lat_max": 46.0,
+                                 "lon_min": 5.0, "lon_max": 7.0}})
+        # Frames are 2 s apart, so allow a couple before the new view lands.
+        for _ in range(3):
+            ids = [g["id"] for g in ws.receive_json()["gliders"]]
+            if ids == ["FRANCE"]:
+                return
+        pytest.fail(f"viewport update never applied, last frame: {ids}")

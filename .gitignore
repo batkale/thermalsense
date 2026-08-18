@@ -35,6 +35,10 @@ Thumbs.db
 backend/data/*.db
 backend/data/*.sqlite
 backend/data/*.db-journal
+# WAL mode leaves these two alongside the DB; they are live scratch state and
+# meaningless without it, so they must never be committed.
+backend/data/*.db-wal
+backend/data/*.db-shm
 
 # Persisted terrain cache (DATA_DIR defaults to backend/ for local runs)
 backend/cache/

@@ -48,6 +48,7 @@ export function useBackend() {
   const [gridMeta,    setGridMeta]    = useState(null);
   const [gliders,     setGliders]     = useState([]);
   const [weather,     setWeather]     = useState(null);
+  const [predictAlt,  setPredictAlt]  = useState(null);
   const [loading,     setLoading]     = useState(false);
   const [error,       setError]       = useState(null);
   const wsRef             = useRef(null);
@@ -69,6 +70,39 @@ export function useBackend() {
     }
   }, []);
 
+  /**
+   * Backfill one glider's flight so far from SQLite, once.
+   *
+   * Called when a glider is pinned, not when it appears. Only the pinned
+   * glider's path is ever drawn, and seeding on sight meant a viewer opening
+   * the map fired one /ogn/track request per glider in view — measured at ~480
+   * at once against a beacon table holding a week of the worldwide feed. That
+   * buried the event loop for a minute at a time, which starved /ws/live of the
+   * very frames the tracks were being fetched to decorate.
+   */
+  const seedTrack = useCallback((id) => {
+    const seeded = seededIdsRef.current;
+    if (!id || seeded.has(id)) return;
+    seeded.add(id);
+    const paths = gliderPathsRef.current;
+    if (!paths[id]) paths[id] = [];
+    fetchGliderTrack(id)
+      .then(track => {
+        if (track.length === 0) return;
+        const live = paths[id] || [];
+        // Drop any live positions that duplicate the tail of the historical track
+        // (beacon buffer and SQLite are written independently so the last few
+        // positions can appear in both — a duplicate causes a visible kink)
+        const lastHist = track[track.length - 1];
+        const deduped = live.filter(
+          p => Math.abs(p.lat - lastHist.lat) > 1e-6 || Math.abs(p.lon - lastHist.lon) > 1e-6
+        );
+        paths[id] = [...track, ...deduped];
+      })
+      // Re-arm on failure: the live tail still draws, and pinning again retries.
+      .catch(() => { seeded.delete(id); });
+  }, []);
+
   const predict = useCallback(async (lat, lon, forecastH = 0, alt = null) => {
     setLoading(true);
     setError(null);
@@ -87,6 +121,16 @@ export function useBackend() {
         cols:   data.cols,
         radius: PREDICT_RADIUS,
       });
+      // The height the heatmap answers for. A map click leaves it to the backend
+      // (mean terrain plus a working height), a glider click sends that glider's
+      // own altitude — so the same spot legitimately returns two different maps.
+      // Only the backend knows the derived value, so it is read, never computed.
+      // Null for a backend too old to report it, which just hides the row.
+      setPredictAlt(
+        data.alt_amsl != null
+          ? { amsl: data.alt_amsl, agl: data.alt_agl, source: data.alt_source }
+          : null
+      );
       setWeather(data.weather);
     } catch (e) {
       setError(e.message);
@@ -111,8 +155,7 @@ export function useBackend() {
       ws.onmessage = (evt) => {
         try {
           const { gliders: raw, new_positions = {} } = JSON.parse(evt.data);
-          const paths  = gliderPathsRef.current;
-          const seeded = seededIdsRef.current;
+          const paths = gliderPathsRef.current;
 
           // Append every intermediate beacon the backend buffered since last frame.
           // This is what makes thermalling spirals visible — we get all positions,
@@ -127,26 +170,6 @@ export function useBackend() {
             g.lat >= GLIDER_LAT_MIN && g.lat <= GLIDER_LAT_MAX &&
             g.lon >= GLIDER_LON_MIN && g.lon <= GLIDER_LON_MAX
           );
-
-          // Seed historical track from SQLite the first time we see a glider
-          for (const g of european) {
-            if (!seeded.has(g.id)) {
-              seeded.add(g.id);
-              if (!paths[g.id]) paths[g.id] = [];
-              fetchGliderTrack(g.id).then(track => {
-                if (track.length === 0) return;
-                const live = paths[g.id] || [];
-                // Drop any live positions that duplicate the tail of the historical track
-                // (beacon buffer and SQLite are written independently so the last few
-                // positions can appear in both — a duplicate causes a visible kink)
-                const lastHist = track[track.length - 1];
-                const deduped = live.filter(
-                  p => Math.abs(p.lat - lastHist.lat) > 1e-6 || Math.abs(p.lon - lastHist.lon) > 1e-6
-                );
-                paths[g.id] = [...track, ...deduped];
-              });
-            }
-          }
 
           setGliders(european.map(g => ({ ...g, gridPos: latlonToGridXY(g.lat, g.lon) })));
         } catch { /* ignore malformed frames */ }
@@ -165,5 +188,7 @@ export function useBackend() {
 
   const activeThermals = useMemo(() => clusterCirclingGliders(gliders), [gliders]);
 
-  return { heatmap, gridMeta, gliders, activeThermals, weather, loading, error, predict, setViewport, gliderPathsRef };
+  return { heatmap, gridMeta, gliders, activeThermals, weather, predictAlt,
+           loading, error,
+           predict, setViewport, seedTrack, gliderPathsRef };
 }

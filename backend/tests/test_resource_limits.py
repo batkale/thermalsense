@@ -163,3 +163,77 @@ async def test_purge_job_survives_a_failing_disk_guard(monkeypatch):
         raise OSError("statvfs failed")
     monkeypatch.setattr(main, "_free_disk_gb", boom)
     await main._purge_job()    # logs and moves on
+
+
+# ---------------------------------------------------------------------------
+# Seed window vs retention window
+#
+# Lowering BEACON_RETENTION_DAYS moves the floor under /seed.  The failure it
+# used to cause is silent — the query simply matches fewer rows and the seed
+# reports success on a short sample — so it is pinned here rather than left to
+# whoever next tunes retention.
+# ---------------------------------------------------------------------------
+
+import sqlite3
+from datetime import datetime, timezone, timedelta
+
+import config
+from config import BEACON_RETENTION_DAYS
+from data.ogn_client import SOARING_AC_TYPES
+
+
+def _beacon_db(path, ages_days):
+    """A beacons table holding one soaring, untowed row at each given age."""
+    con = sqlite3.connect(path)
+    con.execute(
+        "CREATE TABLE beacons ("
+        " ts TEXT NOT NULL, id TEXT NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL,"
+        " alt REAL NOT NULL, vario REAL NOT NULL, circling INTEGER NOT NULL,"
+        " is_tow INTEGER NOT NULL, ac_type INTEGER, under_tow INTEGER)"
+    )
+    ac = sorted(SOARING_AC_TYPES)[0]
+    for i, age in enumerate(ages_days):
+        ts = (datetime.now(timezone.utc) - timedelta(days=age)).isoformat()
+        con.execute(
+            "INSERT INTO beacons VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (ts, f"G{i}", 39.8, 30.1, 1200.0, 2.0, 1, 0, ac, 0),
+        )
+    con.commit()
+    con.close()
+
+
+@pytest.mark.asyncio
+async def test_seed_clamps_days_back_to_the_retention_window(tmp_path, monkeypatch):
+    """A days_back past the window must not silently seed on purged history."""
+    db = tmp_path / "ogn.db"
+    _beacon_db(db, ages_days=[BEACON_RETENTION_DAYS + 3])
+    monkeypatch.setattr(config, "DB_PATH", db)
+
+    result = await tm.ThermalModel().seed_from_history(days_back=30)
+
+    # Clamped to the window, so the only row — older than it — is out of scope.
+    assert result["added"] == 0
+    assert result["rows_scanned"] == 0
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_to_the_whole_retention_window(tmp_path, monkeypatch):
+    """None means "whatever the window still holds" — not a hardcoded 3 days."""
+    db = tmp_path / "ogn.db"
+    # Inside the window but past a hardcoded 3-day default would have been, when
+    # retention is wider than 3; at the current 2 days this is simply in scope.
+    _beacon_db(db, ages_days=[BEACON_RETENTION_DAYS / 2])
+    monkeypatch.setattr(config, "DB_PATH", db)
+
+    seen = []
+
+    async def _no_meteo(lat, lon, dt, strict=False):
+        seen.append((lat, lon))
+        return None      # stops before terrain/network, but proves the row was picked
+
+    monkeypatch.setattr("data.meteo_client.fetch_meteo_historical", _no_meteo)
+
+    result = await tm.ThermalModel().seed_from_history()
+
+    assert result["rows_scanned"] == 1
+    assert seen, "row inside the retention window was not scanned"

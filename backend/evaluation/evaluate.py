@@ -22,7 +22,7 @@ Two properties make this able to answer questions the live gate could not:
 import argparse
 import numpy as np
 
-from config import BUFFER_PATH
+from config import BUFFER_PATH, DATA_DIR
 from evaluation.holdout import earlystop_mask, group_ids, grouped_folds, split
 from evaluation.metrics import CHANCE, bootstrap_ci, grouped_auc, paired_delta_ci
 from pipeline.feature_engineering import FEATURE_COUNT
@@ -53,9 +53,162 @@ def solar_column(X: np.ndarray) -> np.ndarray:
     return cos_incidence(X[:, _COL_SLOPE], X[:, _COL_ASPECT], elev, azim)
 
 
+_COL_HEAT, _COL_ALBEDO = 13, 14
+
+# Land cover is fetched per 0.5deg area rather than per row: 5,149 buffer rows
+# occupy only ~411 such areas, against ~1,414 at 0.1deg, and one 51x51 grid over
+# 0.5deg still resolves 0.01deg cells — same resolution, a quarter of the
+# requests.
+_LC_SNAP = 0.5
+_LC_RADIUS = 0.25
+_LC_SHAPE = (51, 51)
+_LC_CACHE = DATA_DIR / "cache" / "buffer_landcover.npz"
+
+
+def row_datetimes(X: np.ndarray, year: int | None = None):
+    """
+    Reconstruct each row's UTC timestamp from its cyclic time columns.
+
+    The year is not recoverable from a sin/cos encoding of day-of-year, so it is
+    assumed to be the current one.  That is only used to look up lagged history,
+    where being a year out would simply find nothing rather than find something
+    wrong.
+    """
+    from datetime import datetime, timedelta, timezone
+    if year is None:
+        year = datetime.now(timezone.utc).year
+    hour = _decode_cyclic(X[:, _COL_HOUR_SIN], X[:, _COL_HOUR_COS], 24)
+    doy = _decode_cyclic(X[:, _COL_DOY_SIN], X[:, _COL_DOY_COS], 365)
+    base = datetime(year, 1, 1, tzinfo=timezone.utc)
+    return [base + timedelta(days=float(d) - 1, hours=float(h))
+            for d, h in zip(doy, hour)]
+
+
+def _lc_keys(X: np.ndarray):
+    lat = np.round(X[:, _COL_LAT] / _LC_SNAP) * _LC_SNAP
+    lon = np.round(X[:, _COL_LON] / _LC_SNAP) * _LC_SNAP
+    return lat, lon
+
+
+# Per-point results, not per-area.  Caching an area's representative value
+# would make a rerun disagree with the run that populated it — every row in the
+# area would collapse onto whichever row happened to be written last, quietly
+# coarsening the feature between runs.  Points are also what the fold
+# transforms ask for repeatedly: oof_scores calls each transform twice per
+# fold, so without this the whole fetch would run ten times over.
+_lc_points: dict[tuple[float, float], tuple[float, float]] = {}
+
+
+def _load_lc_cache() -> None:
+    if _lc_points or not _LC_CACHE.exists():
+        return
+    try:
+        with np.load(_LC_CACHE, allow_pickle=False) as d:
+            for la, lo, h, a in zip(d["lat"], d["lon"], d["heat"], d["albedo"]):
+                _lc_points[(float(la), float(lo))] = (float(h), float(a))
+    except Exception:
+        _lc_points.clear()
+
+
+def _save_lc_cache() -> None:
+    try:
+        _LC_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        keys = sorted(_lc_points)
+        np.savez(
+            _LC_CACHE,
+            lat=np.array([k[0] for k in keys]),
+            lon=np.array([k[1] for k in keys]),
+            heat=np.array([_lc_points[k][0] for k in keys]),
+            albedo=np.array([_lc_points[k][1] for k in keys]),
+        )
+    except Exception:
+        pass
+
+
+def landcover_columns(X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(heat, albedo) per row from ESA WorldCover, memoised by exact point."""
+    import asyncio
+    from data.landcover_client import fetch_landcover_props
+
+    _load_lc_cache()
+    pts = [(round(float(la), 6), round(float(lo), 6))
+           for la, lo in zip(X[:, _COL_LAT], X[:, _COL_LON])]
+    todo = sorted({p for p in pts if p not in _lc_points})
+
+    if todo:
+        # Group by 0.5deg area so one grid fetch serves every point inside it.
+        by_area: dict[tuple[float, float], list] = {}
+        for lat, lon in todo:
+            key = (round(round(lat / _LC_SNAP) * _LC_SNAP, 3),
+                   round(round(lon / _LC_SNAP) * _LC_SNAP, 3))
+            by_area.setdefault(key, []).append((lat, lon))
+
+        async def _fill():
+            for n, (area, points) in enumerate(sorted(by_area.items()), 1):
+                try:
+                    heat, albedo = await fetch_landcover_props(
+                        area[0], area[1], radius=_LC_RADIUS, shape=_LC_SHAPE
+                    )
+                    rows, cols = heat.shape
+                    for lat, lon in points:
+                        gi = int(round((lat - (area[0] - _LC_RADIUS)) / (2 * _LC_RADIUS) * (rows - 1)))
+                        gj = int(round((lon - (area[1] - _LC_RADIUS)) / (2 * _LC_RADIUS) * (cols - 1)))
+                        gi, gj = min(max(gi, 0), rows - 1), min(max(gj, 0), cols - 1)
+                        _lc_points[(lat, lon)] = (float(heat[gi, gj]), float(albedo[gi, gj]))
+                except Exception:
+                    for p in points:
+                        _lc_points[p] = (0.4, 0.2)      # neutral default
+                if n % 50 == 0:
+                    print(f"  landcover {n}/{len(by_area)} areas", flush=True)
+
+        print(f"fetching land cover: {len(todo)} new points in "
+              f"{len(by_area)} areas", flush=True)
+        asyncio.run(_fill())
+        _save_lc_cache()
+
+    vals = np.array([_lc_points[p] for p in pts])
+    return vals[:, 0], vals[:, 1]
+
+
+_prior_ready = False
+
+
+def prior_column(X: np.ndarray) -> np.ndarray:
+    """
+    Lagged per-cell climb rate from this project's own beacon history.
+
+    The hourly aggregate is rebuilt on first use rather than assumed present, so
+    the comparison always reflects the beacons currently on disk instead of
+    whatever a stale index happened to hold.
+    """
+    global _prior_ready
+    from config import DB_PATH
+    from data.circling_prior import ClimbPrior, build_index
+
+    if not _prior_ready:
+        stats = build_index(DB_PATH)
+        print(f"climb prior: {stats.get('buckets', 0)} buckets over "
+              f"{stats.get('hours', 0)} h, global rate "
+              f"{stats.get('global_rate', 0):.4f}", flush=True)
+        _prior_ready = True
+    return ClimbPrior(DB_PATH).values(X[:, _COL_LAT], X[:, _COL_LON], row_datetimes(X))
+
+
+def _with_landcover(X: np.ndarray) -> np.ndarray:
+    """Replace the two constant land-use columns in place — no width change."""
+    heat, albedo = landcover_columns(X)
+    out = X.copy()
+    out[:, _COL_HEAT] = heat
+    out[:, _COL_ALBEDO] = albedo
+    return out
+
+
 VARIANTS = {
     "base": lambda X: X,
     "solar": lambda X: np.column_stack([X, solar_column(X)]),
+    "landcover": _with_landcover,
+    "prior": lambda X: np.column_stack([X, prior_column(X)]),
+    "both": lambda X: np.column_stack([_with_landcover(X), prior_column(X)]),
 }
 
 

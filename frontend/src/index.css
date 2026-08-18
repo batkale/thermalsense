@@ -1,10 +1,123 @@
+/* ---------------------------------------------------------------------------
+   Theme tokens
+
+   Dark is the original palette and stays the fallback; light is an override
+   keyed on data-theme, which index.html sets before the bundle runs so the
+   first paint is already correct.
+
+   Named by role, not by colour: the light values are not the dark ones
+   lightened. Gold text and white text are legible on #161b27 and invisible on
+   white, so those roles change hue, not just lightness.
+
+   Deliberately NOT themed: the map. Its tiles are satellite imagery and its
+   markers are canvas-drawn over them, so both stay dark in either mode - and
+   the legend swatches that key those markers stay with them. See .dot below.
+   --------------------------------------------------------------------------- */
+:root {
+  --bg-app:            #0f1117;
+  --bg-chrome:         #161b27;
+  --bg-surface:        #1e2535;
+  --bg-surface-hover:  #252d40;
+  --bg-sunken:         #151c2c;
+  --bg-elevated:       #1a2035;
+  --bg-active:         #2a3450;
+
+  --border:            #2d3748;
+  --border-strong:     #4a5568;
+
+  --text-title:        #ffffff;
+  --text-bright:       #f7fafc;
+  --text-primary:      #e2e8f0;
+  --text-body:         #cbd5e0;
+  --text-secondary:    #a0aec0;
+  --text-muted:        #718096;
+  --text-faint:        #4a5568;
+
+  --accent:            #90cdf4;
+  --accent-strong:     #63b3ed;
+
+  --ok:                #68d391;
+  --ok-soft:           #9ae6b4;
+  --warn:              #f6ad55;
+  --danger:            #fc8181;
+  --gold-text:         #ffd700;
+  --sky-text:          #87ceeb;
+  --purple:            #b794f4;
+
+  --status-loading-bg: #1e3a5f;
+  --status-error-bg:   #3b1a1a;
+  --status-hint-bg:    #1a2a1a;
+  --status-retrain-bg: #1a2a3a;
+
+  --tag-glider-bg:     #1a3a5c;
+  --tag-airport-bg:    #1a3a2a;
+  --tag-place-bg:      #2d2a4a;
+
+  --btn-primary-bg:    #3182ce;
+  --btn-primary-fg:    #ffffff;
+  --btn-secondary-bg:  #2d3748;
+
+  --dot-ring:          transparent;
+  --shadow-bubble:     0 4px 14px rgba(0,0,0,0.55);
+  --shadow-dropdown:   0 6px 20px rgba(0,0,0,0.5);
+}
+
+:root[data-theme="light"] {
+  --bg-app:            #eef1f6;
+  --bg-chrome:         #ffffff;
+  --bg-surface:        #f1f4f9;
+  --bg-surface-hover:  #e2e8f2;
+  --bg-sunken:         #e8ecf3;
+  --bg-elevated:       #ffffff;
+  --bg-active:         #dbe4f5;
+
+  --border:            #d3dae6;
+  --border-strong:     #a8b4c8;
+
+  --text-title:        #0d131c;
+  --text-bright:       #0d131c;
+  --text-primary:      #1f2733;
+  --text-body:         #334155;
+  --text-secondary:    #475569;
+  --text-muted:        #5c6c83;   /* 4.85:1 on --bg-surface; #64748b missed AA at 4.32 */
+  --text-faint:        #78869c;   /* 3.35:1 — de-emphasised by role, so AA-large is the bar */
+
+  --accent:            #1d4ed8;
+  --accent-strong:     #2563eb;
+
+  --ok:                #15803d;
+  --ok-soft:           #166534;
+  --warn:              #b45309;
+  --danger:            #b91c1c;
+  --gold-text:         #a16207;   /* #ffd700 is unreadable on white */
+  --sky-text:          #0369a1;
+  --purple:            #6d28d9;
+
+  --status-loading-bg: #dbeafe;
+  --status-error-bg:   #fee2e2;
+  --status-hint-bg:    #dcfce7;
+  --status-retrain-bg: #dbeafe;
+
+  --tag-glider-bg:     #dbeafe;
+  --tag-airport-bg:    #dcfce7;
+  --tag-place-bg:      #ede9fe;
+
+  --btn-primary-bg:    #2563eb;
+  --btn-primary-fg:    #ffffff;
+  --btn-secondary-bg:  #e2e8f2;
+
+  --dot-ring:          rgba(15,23,42,0.28);
+  --shadow-bubble:     0 4px 14px rgba(15,23,42,0.18);
+  --shadow-dropdown:   0 6px 20px rgba(15,23,42,0.16);
+}
+
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
   font-family: system-ui, -apple-system, sans-serif;
   font-size: 13px;
-  background: #0f1117;
-  color: #e2e8f0;
+  background: var(--bg-app);
+  color: var(--text-primary);
   height: 100dvh;
   overflow: hidden;
 }
@@ -35,8 +148,8 @@ body {
 .top-bar {
   height: 50px;
   flex-shrink: 0;
-  background: #161b27;
-  border-bottom: 1px solid #2d3748;
+  background: var(--bg-chrome);
+  border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
   gap: 0;
@@ -48,11 +161,11 @@ body {
 .top-bar-title {
   font-size: 15px;
   font-weight: 700;
-  color: #fff;
+  color: var(--text-title);
   letter-spacing: 0.03em;
   flex-shrink: 0;
   padding-right: 14px;
-  border-right: 1px solid #2d3748;
+  border-right: 1px solid var(--border);
   margin-right: 14px;
 }
 
@@ -66,7 +179,7 @@ body {
 .wx-section-label {
   font-size: 9px;
   font-weight: 700;
-  color: #4a5568;
+  color: var(--text-faint);
   text-transform: uppercase;
   letter-spacing: 0.07em;
   writing-mode: horizontal-tb;
@@ -75,7 +188,7 @@ body {
 .wx-divider {
   width: 1px;
   height: 28px;
-  background: #2d3748;
+  background: var(--border);
   flex-shrink: 0;
   margin: 0 14px;
 }
@@ -88,7 +201,7 @@ body {
 
 .wx-hint {
   font-size: 11px;
-  color: #4a5568;
+  color: var(--text-faint);
   font-style: italic;
 }
 
@@ -96,15 +209,40 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  background: #1e2535;
+  background: var(--bg-surface);
   border-radius: 6px;
   padding: 3px 9px;
   min-width: 54px;
 }
+.wx-chip:hover { background: var(--bg-surface-hover); }
+
+/* position:fixed, not absolute — .top-bar is overflow:hidden and 50px tall, so
+   anything positioned against the chip itself is clipped out of existence.
+   Coordinates come from the chip's rect on hover; see WxChip. */
+.wx-bubble {
+  position: fixed;
+  transform: translateX(-50%);
+  width: 220px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.45;
+  text-align: left;
+  text-transform: none;     /* .wx-chip-label uppercases; the prose must not */
+  letter-spacing: normal;
+  white-space: normal;
+  padding: 7px 9px;
+  border-radius: 7px;
+  z-index: 2000;            /* over .top-bar (1100) and .sidebar (1000) */
+  box-shadow: var(--shadow-bubble);
+  pointer-events: none;
+}
 
 .wx-chip-label {
   font-size: 9px;
-  color: #718096;
+  color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   line-height: 1.2;
@@ -114,7 +252,7 @@ body {
 .wx-chip-value {
   font-size: 12px;
   font-weight: 600;
-  color: #f7fafc;
+  color: var(--text-bright);
   line-height: 1.4;
   white-space: nowrap;
 }
@@ -126,22 +264,22 @@ body {
   flex-shrink: 0;
   margin-left: auto;
   padding-left: 14px;
-  border-left: 1px solid #2d3748;
+  border-left: 1px solid var(--border);
 }
 
 .forecast-ctrl-label {
   font-size: 11px;
-  color: #718096;
+  color: var(--text-muted);
   white-space: nowrap;
 }
 
-.forecast-slider { width: 90px; accent-color: #63b3ed; }
+.forecast-slider { width: 90px; accent-color: var(--accent-strong); }
 
 .forecast-ctrl-value {
   min-width: 28px;
   font-size: 12px;
   font-weight: 600;
-  color: #90cdf4;
+  color: var(--accent);
 }
 
 .lang-toggle {
@@ -152,24 +290,24 @@ body {
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.06em;
-  color: #90cdf4;
-  background: #1e2535;
-  border: 1px solid #2d3748;
+  color: var(--accent);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
   border-radius: 6px;
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
 
-.lang-toggle:hover {
-  background: #2d3748;
-  color: #fff;
+.lang-toggle:hover, .theme-toggle:hover {
+  background: var(--bg-surface-hover);
+  color: var(--text-title);
 }
 
 .sidebar {
   width: 220px;
   flex-shrink: 0;
-  background: #161b27;
-  border-left: 1px solid #2d3748;
+  background: var(--bg-chrome);
+  border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -184,10 +322,10 @@ body {
   border-radius: 6px;
   font-size: 12px;
 }
-.status.loading  { background: #1e3a5f; color: #90cdf4; }
-.status.error    { background: #3b1a1a; color: #fc8181; }
-.status.hint     { background: #1a2a1a; color: #9ae6b4; }
-.status.retrain  { background: #1a2a3a; color: #90cdf4; }
+.status.loading  { background: var(--status-loading-bg); color: var(--accent); }
+.status.error    { background: var(--status-error-bg);   color: var(--danger); }
+.status.hint     { background: var(--status-hint-bg);    color: var(--ok-soft); }
+.status.retrain  { background: var(--status-retrain-bg); color: var(--accent); }
 
 /* ── Panel ── */
 .panel { display: flex; flex-direction: column; gap: 6px; }
@@ -198,51 +336,50 @@ body {
 .metric {
   display: flex;
   justify-content: space-between;
-  background: #1e2535;
+  background: var(--bg-surface);
   border-radius: 6px;
   padding: 5px 8px;
+  position: relative;   /* anchors .metric-bubble */
 }
-.metric-label { color: #718096; }
-.metric-value { font-weight: 600; color: #f7fafc; }
+.metric:hover { background: var(--bg-surface-hover); }
+.metric-label { color: var(--text-muted); }
+.metric-value { font-weight: 600; color: var(--text-bright); text-align: right; }
 
-.metric-tip {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 12px; height: 12px;
-  border-radius: 50%;
-  background: #2d3748;
-  color: #718096;
-  font-size: 8px;
-  font-weight: 700;
-  margin-left: 4px;
-  vertical-align: middle;
-  cursor: default;
-  position: relative;
+/* Provenance under a metric — says where the number came from, so it has to
+   read as a caption rather than compete with the value above it. */
+.metric-sub {
+  display: block;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-muted);
+  margin-top: 1px;
 }
-.metric-tip:hover { background: #4a5568; color: #e2e8f0; }
 
-.metric-tip-bubble {
+/* Explanation for the row above it. Opens downward on purpose: .sidebar is an
+   overflow-y:auto scroll container, so a bubble above the first metric would be
+   clipped by the top of it — below, there is always panel left to draw over.
+   left/right:0 keeps it inside the 220px column, which is clipped just as hard. */
+.metric-bubble {
   display: none;
   position: absolute;
-  bottom: calc(100% + 6px);
-  left: 50%;
-  transform: translateX(-50%);
-  width: 175px;
-  background: #1e2535;
-  border: 1px solid #4a5568;
-  color: #e2e8f0;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  color: var(--text-primary);
   font-size: 11px;
   font-weight: 400;
   line-height: 1.45;
+  text-align: left;
   padding: 7px 9px;
   border-radius: 7px;
   white-space: normal;
   z-index: 9999;
-  box-shadow: 0 4px 14px rgba(0,0,0,0.55);
+  box-shadow: var(--shadow-bubble);
   pointer-events: none;
 }
-.metric-tip:hover .metric-tip-bubble { display: block; }
+.metric:hover .metric-bubble { display: block; }
 
 /* ── Glider row ── */
 .glider-row {
@@ -250,9 +387,9 @@ body {
   justify-content: space-between;
   align-items: center;
   font-size: 12px;
-  color: #a0aec0;
+  color: var(--text-secondary);
 }
-.circling { color: #FFD700; font-weight: 600; }
+.circling { color: var(--gold-text); font-weight: 600; }
 
 /* ── Search ── */
 .search-wrap {
@@ -261,47 +398,47 @@ body {
 .search-box {
   display: flex;
   align-items: center;
-  background: #1e2535;
-  border: 1px solid #2d3748;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 0 8px;
   gap: 4px;
 }
 .search-box:focus-within {
-  border-color: #63b3ed;
+  border-color: var(--accent-strong);
 }
 .search-input {
   flex: 1;
   background: transparent;
   border: none;
   outline: none;
-  color: #e2e8f0;
+  color: var(--text-primary);
   font-size: 12px;
   padding: 7px 0;
 }
-.search-input::placeholder { color: #4a5568; }
+.search-input::placeholder { color: var(--text-faint); }
 .search-clear {
   background: none;
   border: none;
-  color: #718096;
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 16px;
   line-height: 1;
   padding: 0 2px;
 }
-.search-clear:hover { color: #e2e8f0; }
+.search-clear:hover { color: var(--text-primary); }
 
 .search-dropdown {
   position: absolute;
   top: calc(100% + 4px);
   left: 0; right: 0;
-  background: #1a2035;
-  border: 1px solid #2d3748;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
   border-radius: 8px;
   list-style: none;
   overflow: hidden;
   z-index: 2000;
-  box-shadow: 0 6px 20px rgba(0,0,0,0.5);
+  box-shadow: var(--shadow-dropdown);
 }
 .search-item {
   display: flex;
@@ -310,8 +447,8 @@ body {
   padding: 7px 10px;
   cursor: pointer;
 }
-.search-item:not(:last-child) { border-bottom: 1px solid #2d3748; }
-.search-item.active { background: #2a3450; }
+.search-item:not(:last-child) { border-bottom: 1px solid var(--border); }
+.search-item.active { background: var(--bg-active); }
 
 .search-tag {
   font-size: 10px;
@@ -323,20 +460,20 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
-.tag-glider  { background: #1a3a5c; color: #90cdf4; }
-.tag-airport { background: #1a3a2a; color: #68d391; }
-.tag-place   { background: #2d2a4a; color: #b794f4; }
+.tag-glider  { background: var(--tag-glider-bg);  color: var(--accent); }
+.tag-airport { background: var(--tag-airport-bg); color: var(--ok); }
+.tag-place   { background: var(--tag-place-bg);   color: var(--purple); }
 
 .search-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .search-label {
-  color: #e2e8f0;
+  color: var(--text-primary);
   font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .search-sub {
-  color: #718096;
+  color: var(--text-muted);
   font-size: 10px;
   white-space: nowrap;
   overflow: hidden;
@@ -345,8 +482,8 @@ body {
 
 /* ── Pinned glider card ── */
 .pin-card {
-  background: #1e2535;
-  border: 1px solid #FC8181;
+  background: var(--bg-surface);
+  border: 1px solid var(--danger);
   border-radius: 8px;
   padding: 9px 10px;
   display: flex;
@@ -361,46 +498,46 @@ body {
 .pin-callsign {
   font-size: 13px;
   font-weight: 700;
-  color: #FC8181;
+  color: var(--danger);
   letter-spacing: 0.05em;
   font-family: monospace;
 }
 .pin-close {
   background: none;
   border: none;
-  color: #718096;
+  color: var(--text-muted);
   font-size: 18px;
   line-height: 1;
   cursor: pointer;
   padding: 0 2px;
 }
-.pin-close:hover { color: #e2e8f0; }
+.pin-close:hover { color: var(--text-primary); }
 .pin-metrics {
   display: flex;
   gap: 8px;
 }
 .pin-metric {
   flex: 1;
-  background: #151c2c;
+  background: var(--bg-sunken);
   border-radius: 5px;
   padding: 4px 7px;
   display: flex;
   flex-direction: column;
   gap: 1px;
 }
-.pin-metric-label { font-size: 10px; color: #718096; }
-.pin-metric-value { font-size: 12px; font-weight: 600; color: #f7fafc; }
-.vario-up   { color: #68d391; }
-.vario-down { color: #FC8181; }
-.agl-low    { color: #F6AD55; }  /* orange warning when AGL < 200 m */
+.pin-metric-label { font-size: 10px; color: var(--text-muted); }
+.pin-metric-value { font-size: 12px; font-weight: 600; color: var(--text-bright); }
+.vario-up   { color: var(--ok); }
+.vario-down { color: var(--danger); }
+.agl-low    { color: var(--warn); }  /* orange warning when AGL < 200 m */
 .pin-status { font-size: 11px; }
-.pin-circling { color: #FFD700; font-weight: 600; }
-.pin-straight { color: #a0aec0; }
-.pin-glider   { color: #87CEEB; font-weight: 600; margin-right: 6px; }
-.pin-tow      { color: #FFFFFF; font-weight: 600; margin-right: 6px; }
+.pin-circling { color: var(--gold-text); font-weight: 600; }
+.pin-straight { color: var(--text-secondary); }
+.pin-glider   { color: var(--sky-text); font-weight: 600; margin-right: 6px; }
+.pin-tow      { color: var(--text-title); font-weight: 600; margin-right: 6px; }
 .pin-coords {
   font-size: 10px;
-  color: #718096;
+  color: var(--text-muted);
   font-family: monospace;
 }
 
@@ -410,7 +547,7 @@ body {
   align-items: center;
   gap: 7px;
   font-size: 0.82rem;
-  color: #cbd5e0;
+  color: var(--text-body);
   cursor: pointer;
   user-select: none;
   margin: 2px 0;
@@ -418,12 +555,12 @@ body {
 .toggle-row input[type="checkbox"] {
   width: 14px;
   height: 14px;
-  accent-color: #63b3ed;
+  accent-color: var(--accent-strong);
   cursor: pointer;
   flex-shrink: 0;
 }
 .toggle-hint {
-  color: #718096;
+  color: var(--text-muted);
   font-size: 0.76rem;
 }
 
@@ -438,16 +575,16 @@ body {
   cursor: pointer;
   transition: opacity 0.15s;
 }
-.btn-primary  { background: #3182ce; color: #fff; }
-.btn-secondary { background: #2d3748; color: #a0aec0; }
+.btn-primary  { background: var(--btn-primary-bg); color: var(--btn-primary-fg); }
+.btn-secondary { background: var(--btn-secondary-bg); color: var(--text-secondary); }
 .btn-primary:disabled { opacity: 0.4; cursor: default; }
 .btn-primary:not(:disabled):hover  { opacity: 0.85; }
-.btn-secondary:hover { background: #4a5568; }
+.btn-secondary:hover { background: var(--bg-surface-hover); }
 
 
 /* ── Legend ── */
 .legend { margin-top: auto; }
-.legend-title { font-size: 11px; color: #718096; margin-bottom: 4px; }
+.legend-title { font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
 
 .legend-bar {
   height: 10px;
@@ -464,7 +601,7 @@ body {
   display: flex;
   justify-content: space-between;
   font-size: 10px;
-  color: #718096;
+  color: var(--text-muted);
   margin-top: 2px;
 }
 
@@ -473,7 +610,7 @@ body {
   gap: 12px;
   margin-top: 6px;
   font-size: 11px;
-  color: #a0aec0;
+  color: var(--text-secondary);
 }
 .dot {
   display: inline-block;
@@ -481,11 +618,38 @@ body {
   border-radius: 50%;
   margin-right: 3px;
   vertical-align: middle;
+  /* The tow swatch is white to match the map; on a light panel it needs an edge. */
+  box-shadow: 0 0 0 1px var(--dot-ring);
 }
-.dot.yellow  { background: #FFD700; }
+.dot.yellow  { background: #FFD700; }   /* map colour, not a theme colour */
 .dot.blue    { background: rgba(140,200,255,0.9); }
 .dot.orange  { background: #FFFFFF; }
 .dot.thermal { background: radial-gradient(circle, #FF8C00 40%, rgba(255,140,0,0.3) 100%); border: 1px solid rgba(255,140,0,0.6); }
 
 /* ── Leaflet container fix ── */
+/* Stays dark in both themes: it shows only for the instant before the
+   satellite tiles paint, and a white flash under them reads as a bug. */
 .leaflet-container { background: #1a1f2e; }
+
+/* Thermal-peak colour scale. Lived as inline styles on the value; moved here so
+   the light theme can darken them - #9ae6b4 on white is barely a colour. */
+.peak-high { color: var(--danger); }
+.peak-mid  { color: var(--warn); }
+.peak-low  { color: var(--ok); }
+.tow-count { color: var(--text-title); }
+
+/* ---- Theme toggle ---- */
+.theme-toggle {
+  flex-shrink: 0;
+  margin-left: 6px;
+  padding: 4px 9px;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.2;
+  color: var(--accent);
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}

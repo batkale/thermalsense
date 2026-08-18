@@ -9,14 +9,15 @@ import asyncio, json, logging
 import numpy as np
 from datetime import datetime, timezone, timedelta
 from data.ogn_client      import fetch_ogn_gliders, start_ogn_stream, fetch_glider_track, drain_beacon_buffers, beacon_cursor, is_thermal_evidence, flush_beacons, purge_old_beacons
-from data import meteo_client, terrain_client
+from data import meteo_client, terrain_client, landcover_client
 from data.meteo_client    import fetch_meteo_features
+from data.landcover_client import fetch_landcover_fine
 from data.terrain_client  import fetch_elevation_grid, fetch_elevation_point, fetch_elevation_batch, snap_grid_centre, cached_elevation
 from pipeline.feature_engineering import build_feature_matrix
 from models.thermal_model import ThermalModel
 from config import (UPDATE_INTERVAL, GRID_RES, GRID_RADIUS, CORS_ORIGINS, ADMIN_TOKEN,
                     STATIC_DIR, DATA_DIR, BEACON_RETENTION_DAYS, PREDICT_CONCURRENCY,
-                    MIN_FREE_DISK_GB, MIN_RETENTION_DAYS)
+                    MIN_FREE_DISK_GB, MIN_RETENTION_DAYS, ENABLE_LANDCOVER)
 from pathlib import Path
 import shutil
 
@@ -97,8 +98,10 @@ async def _disk_guard() -> None:
     window reclaims it — a purge job that failed for a few cycles, a disk shared
     with Docker image layers, a /seed rebuild landing at the wrong moment.
     Beacon history is the cheapest thing on this box to give up, so it goes
-    first, and loudly: a shortened window silently starves /seed, whose default
-    days_back=3 would start returning "no rows" instead of failing.
+    first, and loudly.  /seed no longer silently starves when the window moves:
+    its default follows BEACON_RETENTION_DAYS and an explicit days_back past the
+    window is clamped with a warning.  An emergency purge still shortens history
+    under /seed's feet mid-run, which the warning will not catch.
     """
     free = await asyncio.to_thread(_free_disk_gb)
     if free >= MIN_FREE_DISK_GB:
@@ -175,6 +178,7 @@ async def lifespan(app: FastAPI):
     flush_beacons()                                # same, for queued OGN beacons
     await meteo_client.aclose()
     await terrain_client.aclose()
+    await landcover_client.aclose()
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(
@@ -296,16 +300,24 @@ async def predict(lat: float, lon: float, alt: int | None = None, forecast_h: in
             fetch_elevation_grid(lat, lon),
         )
         radius   = GRID_RADIUS  # matches fetch_elevation_grid default
+        # Kept as a name rather than inlined: it is both the basis for the
+        # default altitude and the reference the response reports height
+        # against, and the two must be the same number.
+        terrain_mean = float(terrain.mean())
         alt_amsl = (
             float(alt) if alt is not None
-            else float(terrain.mean()) + DEFAULT_WORKING_AGL
+            else terrain_mean + DEFAULT_WORKING_AGL
         )
+        land_props = None
+        if ENABLE_LANDCOVER:
+            land_props = await fetch_landcover_fine(lat, lon, terrain.shape, radius)
         features = build_feature_matrix(
             meteo, terrain,
             dt=datetime.now(timezone.utc) + timedelta(hours=forecast_h),
             lat_bounds=(grid_lat - radius, grid_lat + radius),
             lon_bounds=(grid_lon - radius, grid_lon + radius),
             alt_amsl=alt_amsl,
+            land_use_props=land_props,
         )
         grid_rows, grid_cols = terrain.shape
         # to_thread, not inline: predict() runs _MC_SAMPLES synchronous passes
@@ -329,6 +341,16 @@ async def predict(lat: float, lon: float, alt: int | None = None, forecast_h: in
         "cols":         grid_cols,
         "grid_lat":     grid_lat,
         "grid_lon":     grid_lon,
+        # The altitude this heatmap actually answers for, and where it came
+        # from.  A caller that omits alt gets a height derived from terrain it
+        # never sees, so without this the same coordinates can return two
+        # different maps with nothing on the wire to explain the difference.
+        # alt_agl is measured against the grid's mean terrain, not the ground
+        # under any single cell -- it is the reference DEFAULT_WORKING_AGL is
+        # defined in, so the default case always reports exactly that value.
+        "alt_amsl":     round(alt_amsl),
+        "alt_agl":      round(alt_amsl - terrain_mean),
+        "alt_source":   "observer" if alt is not None else "default",
         "thermal_base": meteo["cape_base"],
         "cape":         meteo["cape"],
         "weather": {
@@ -536,7 +558,12 @@ async def point_elevation(lat: float, lon: float):
 @app.get("/ogn/track/{glider_id}")
 async def glider_track(glider_id: str):
     """Return the last 8 hours of positions for a single glider."""
-    return {"track": fetch_glider_track(glider_id)}
+    # to_thread, not inline: this is a synchronous sqlite3 query against a table
+    # holding a week of the worldwide feed (4+ GB, tens of millions of rows), and
+    # sqlite3 holds the GIL across it.  Run on the event loop it stalls /ws/live
+    # for every viewer, which is what turned a handful of track requests into
+    # minute-long gaps between live frames.
+    return {"track": await asyncio.to_thread(fetch_glider_track, glider_id)}
 
 
 @app.get("/ogn/live")
@@ -585,7 +612,7 @@ async def trigger_train(background_tasks: BackgroundTasks):
     return {"status": "started"}
 
 
-async def _seed_job(days_back: int, limit: int, reset: bool = False) -> None:
+async def _seed_job(days_back: float | None, limit: int, reset: bool = False) -> None:
     async with _training_lock:
         log.info(f"[seed] starting — days_back={days_back}, limit={limit}, reset={reset}")
         try:
@@ -623,7 +650,7 @@ async def _seed_job(days_back: int, limit: int, reset: bool = False) -> None:
 @app.post("/seed", dependencies=[Depends(_require_admin)])
 async def seed_from_history(
     background_tasks: BackgroundTasks,
-    days_back: int = 3,
+    days_back: float | None = None,
     limit: int = 5000,
     reset: bool = False,
 ):
@@ -635,7 +662,9 @@ async def seed_from_history(
     check server logs for progress. Triggers a retrain automatically when done
     if the buffer crosses the minimum sample threshold.
 
-    - days_back: how many days of history to scan (default 3)
+    - days_back: how many days of history to scan (default: the whole beacon
+      retention window, BEACON_RETENTION_DAYS). Values past that window are
+      clamped with a warning — the older beacons have already been purged.
     - limit: max beacon rows to process (default 5000; sampled uniformly across the window)
     - reset: discard the existing buffer first so the rebuild replaces it rather
       than appending (use after a feature-pipeline correction)
@@ -720,6 +749,20 @@ def _in_bounds(g: dict, b: Bounds) -> bool:
     return any(lon_min <= lon + off <= lon_max for off in (0.0, 360.0, -360.0))
 
 
+# How long the first frame waits for the client to say where it is looking.
+#
+# Without this wait the stream opens unfiltered, so frame 1 carries every glider
+# on the planet and frame 2 — once the viewport has been read — carries only the
+# handful on screen.  The client draws both, so the map fills with hundreds of
+# aircraft and then empties itself seconds later, which reads as "all the
+# gliders disappeared" rather than as the filter engaging.
+#
+# The client sends its bounds from onopen, so this is a round trip, not a poll.
+# Expiring is not an error: a frontend that never sends bounds is an older one,
+# and it still gets the full feed exactly as before — one frame later.
+_BOUNDS_GRACE_S = 2.0
+
+
 @app.websocket("/ws/live")
 async def websocket_live(ws: WebSocket):
     """Live glider stream, scoped to the client's map viewport.
@@ -734,6 +777,7 @@ async def websocket_live(ws: WebSocket):
     """
     await ws.accept()
     bounds: Bounds | None = None
+    declared = asyncio.Event()          # client has told us where it is looking
 
     async def _read_client() -> None:
         """Apply viewport updates until the socket closes."""
@@ -746,6 +790,7 @@ async def websocket_live(ws: WebSocket):
                     continue            # malformed frame — keep the current viewport
                 if isinstance(msg, dict) and "bounds" in msg:
                     bounds = _parse_bounds(msg["bounds"])
+                    declared.set()
         except (WebSocketDisconnect, RuntimeError):
             pass                        # the send loop notices and tears down
 
@@ -753,6 +798,10 @@ async def websocket_live(ws: WebSocket):
     # Per-connection cursor: every viewer reads the same beacons at its own pace.
     cursor = beacon_cursor()
     try:
+        try:
+            await asyncio.wait_for(declared.wait(), timeout=_BOUNDS_GRACE_S)
+        except asyncio.TimeoutError:
+            pass                        # no viewport declared — send the full feed
         while True:
             try:
                 gliders         = await fetch_ogn_gliders()

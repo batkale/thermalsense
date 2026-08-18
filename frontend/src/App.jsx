@@ -28,8 +28,8 @@ export default function App() {
 
   const {
     heatmap, gridMeta, gliders, activeThermals,
-    weather, loading, error,
-    predict, setViewport, gliderPathsRef,
+    weather, predictAlt, loading, error,
+    predict, setViewport, seedTrack, gliderPathsRef,
   } = useBackend();
 
   // A bare map click carries no altitude — the backend picks a working height
@@ -92,6 +92,9 @@ export default function App() {
             onMapClick={handleMapClick}
             onGliderClick={g => {
               setPinnedId(g.id);
+              // The flight so far is only drawn for the pinned glider, so it is
+              // only fetched here — see seedTrack.
+              seedTrack(g.id);
               locationRef.current = { lat: g.lat, lon: g.lon, alt: g.alt };
               predict(g.lat, g.lon, forecastH, g.alt);
             }}
@@ -111,6 +114,7 @@ export default function App() {
             thermalBase={weather?.thermal_base}
             cape={weather?.cape}
             heatmapMax={heatmapMax}
+            predictAlt={predictAlt}
             showAirborneOnly={showAirborneOnly}
             onAirborneToggle={setShowAirborneOnly}
             showOgnHeatmap={showOgnHeatmap}
