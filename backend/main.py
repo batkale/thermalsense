@@ -15,7 +15,7 @@ from data.landcover_client import fetch_landcover_fine
 from data.terrain_client  import fetch_elevation_grid, fetch_elevation_point, fetch_elevation_batch, snap_grid_centre, cached_elevation
 from pipeline.feature_engineering import build_feature_matrix
 from models.thermal_model import ThermalModel
-from config import (UPDATE_INTERVAL, GRID_RES, GRID_RADIUS, CORS_ORIGINS, ADMIN_TOKEN,
+from config import (UPDATE_INTERVAL, WS_FRAME_INTERVAL, GRID_RES, GRID_RADIUS, CORS_ORIGINS, ADMIN_TOKEN,
                     STATIC_DIR, DATA_DIR, BEACON_RETENTION_DAYS, PREDICT_CONCURRENCY,
                     MIN_FREE_DISK_GB, MIN_RETENTION_DAYS, ENABLE_LANDCOVER)
 from pathlib import Path
@@ -820,7 +820,7 @@ async def websocket_live(ws: WebSocket):
                 "gliders":       _to_wire(_attach_cached_agl(gliders)),
                 "new_positions": _positions_to_wire(new_pos),
             }))
-            await asyncio.sleep(2)
+            await asyncio.sleep(WS_FRAME_INTERVAL)
     except (WebSocketDisconnect, RuntimeError):
         pass  # client navigated away — normal teardown
     finally:

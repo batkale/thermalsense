@@ -152,7 +152,7 @@ Breaking any of these has taken the app down or silently corrupted results befor
 | `GET /healthz` | `{status, model_loaded}` |
 | `POST /train` | Admin. Background retrain |
 | `POST /seed?days_back=&limit=&reset=` | Admin. Rebuild the buffer from beacon history |
-| `WS /ws/live` | 2 s frames. Client sends `{"bounds":{lat_min,lat_max,lon_min,lon_max}}` on connect and on every map move |
+| `WS /ws/live` | Frames every `WS_FRAME_INTERVAL` (1 s). Client sends `{"bounds":{lat_min,lat_max,lon_min,lon_max}}` on connect and on every map move |
 
 Admin endpoints require an `X-Admin-Token` header when `ADMIN_TOKEN` is set.
 
@@ -161,6 +161,31 @@ gliders down to 4 for a 1x1 degree box. Bounds are optional: absent or malformed
 means "send everything", so an old bundle degrades to the previous behaviour
 rather than to a blank map. Deltas were deliberately not implemented (a filtered
 frame is ~500 bytes; resync bookkeeping would risk more than it saves).
+
+**A marker's position is not always a reported position.** Measured on the live
+feed (19 Aug 2026, 1548 aircraft / 10 min): the feed delivers a beacon every
+1.0 s median, but *per aircraft* the median gap is 3.9 s and the slowest tenth
+report only every 45 s. No server setting changes that — it is the aircraft's
+transmit rate and its receiver coverage. So `services/deadReckon.js` projects
+the gap client-side, advancing the icon along its heading at its ground speed.
+
+Three rules keep the synthesis contained, and all three matter:
+- **Circling aircraft are never projected.** A straight line through a
+  thermalling turn walks the icon out of the very thermal it is climbing in.
+- **It stops after `MAX_EXTRAPOLATE_MS` (15 s)**, after which an honestly stale
+  icon beats a confident guess.
+- **It reaches the drawn icon and the click hit-test, nothing else.** The pinned
+  card's coordinates and the flight path must only ever show reported
+  positions — check this before wiring `displayPosition` anywhere new.
+
+`rx` is stamped client-side when a position is observed to *change*, not when a
+frame arrives: an aircraft that has not beaconed is re-sent unchanged every
+frame, so stamping on arrival would reset the clock and freeze every icon. It
+stays null until the first observed change, because the wire carries no beacon
+timestamp and a first sighting could be a minute old.
+
+Icons live on their own canvas (`GliderCanvas`, ~10 fps) precisely so animating
+them does not drag a 40k-cell heatmap repaint along at the same rate.
 
 ## Resource budget
 

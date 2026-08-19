@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { MapContainer, TileLayer, useMap, useMapEvents } from 'react-leaflet';
 
 import { MAP_CENTER, MAP_ZOOM } from '../config.js';
+import { displayPosition } from '../services/deadReckon.js';
 
 // OGN aircraft types that gain height on lift alone: glider, hang glider, paraglider.
 // Mirrors SOARING_AC_TYPES in backend/data/ogn_client.py.
@@ -312,11 +313,19 @@ function ThermalBubbleCanvas({ activeThermals }) {
 // Pass 1: white Gaussians on black offscreen canvas (additive)
 // Pass 2: palette lookup per pixel → blue/cyan/green/yellow/red
 // -----------------------------------------------------------------------------
+// Pass 2 walks every pixel on the canvas — ~1.6M of them at 1080p — so this
+// layer is the most expensive thing on the map. Circling clusters drift far too
+// slowly to be worth that on every stream frame, so data-driven repaints stay
+// on the 2 s cadence they had before WS_FRAME_INTERVAL was halved. Map
+// interaction still repaints immediately: panning moves every blob at once.
+const KDE_MIN_MS = 2000;
+
 function OgnHeatmapCanvas({ gliders }) {
   const map       = useMap();
   const canvasRef = useRef(null);
   const glRef     = useRef(gliders);
   glRef.current   = gliders;
+  const lastDataDrawRef = useRef(0);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -384,7 +393,21 @@ function OgnHeatmapCanvas({ gliders }) {
       if (c) c.getContext('2d').clearRect(0, 0, c.width, c.height);
     },
   });
-  useEffect(() => { draw(); }, [draw, gliders]);
+  // Trailing edge, not leading-only: the timer guarantees the newest frame is
+  // eventually painted, so a burst of updates cannot leave stale lift on screen.
+  useEffect(() => {
+    const since = Date.now() - lastDataDrawRef.current;
+    if (since >= KDE_MIN_MS) {
+      lastDataDrawRef.current = Date.now();
+      draw();
+      return;
+    }
+    const id = setTimeout(() => {
+      lastDataDrawRef.current = Date.now();
+      draw();
+    }, KDE_MIN_MS - since);
+    return () => clearTimeout(id);
+  }, [draw, gliders]);
 
   return createPortal(
     <canvas
@@ -398,21 +421,26 @@ function OgnHeatmapCanvas({ gliders }) {
 // -----------------------------------------------------------------------------
 // Canvas layer — portalled into the Leaflet container so it overlays the tiles
 // -----------------------------------------------------------------------------
-function HeatmapCanvas({ heatmap, gridMeta, gliders, pinnedId, gliderPathsRef }) {
+// Deliberately does not take the glider array. Repainting the grid means up to
+// 40,401 fillRects, and this layer would otherwise redraw all of them on every
+// stream frame purely because a glider moved somewhere off in the corner. The
+// icons live on GliderCanvas above; all this needs of them is whether the
+// pinned one is a tow plane, which decides the path colour.
+function HeatmapCanvas({ heatmap, gridMeta, pinnedIsTow, pinnedId, gliderPathsRef }) {
   const map       = useMap();
   const canvasRef = useRef(null);
 
   // Always-current data refs — lets the stable draw callback read latest values
   // without being recreated every render, eliminating stale-closure wipes from
   // Leaflet internal events (resize, pan-snap) fired after predict() returns.
-  const dataRef = useRef({ heatmap, gridMeta, gliders, pinnedId });
-  dataRef.current = { heatmap, gridMeta, gliders, pinnedId };
+  const dataRef = useRef({ heatmap, gridMeta, pinnedIsTow, pinnedId });
+  dataRef.current = { heatmap, gridMeta, pinnedIsTow, pinnedId };
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const { heatmap, gridMeta, gliders, pinnedId } = dataRef.current;
+    const { heatmap, gridMeta, pinnedIsTow, pinnedId } = dataRef.current;
 
     const { width, height } = map.getContainer().getBoundingClientRect();
     canvas.width  = width;
@@ -454,21 +482,15 @@ function HeatmapCanvas({ heatmap, gridMeta, gliders, pinnedId, gliderPathsRef })
       });
     }
 
-    // ---- clicked glider path (drawn before icon so icon sits on top) ----
+    // ---- clicked glider path (icons are drawn on the layer above this one) ----
+    // Only ever reported positions: the path is the flight that happened, so
+    // no dead-reckoned point is allowed to join it.
     if (pinnedId && gliderPathsRef) {
       const points = gliderPathsRef.current[pinnedId];
-      const pinnedGlider = gliders.find(g => g.id === pinnedId);
       if (points && points.length >= 2) {
-        drawGliderPath(ctx, map, points, pinnedGlider?.is_tow ?? false);
+        drawGliderPath(ctx, map, points, pinnedIsTow);
       }
     }
-
-    // ---- live gliders ----
-    gliders.forEach(g => {
-      const pt = map.latLngToContainerPoint([g.lat, g.lon]);
-      drawGlider(ctx, pt.x, pt.y, g.circling, g.vario, g.id === pinnedId, g.heading,
-                 g.is_tow, g.under_tow);
-    });
   }, [map, gliderPathsRef]); // stable — reads live data from dataRef, not closure
 
   useMapEvents({
@@ -482,12 +504,88 @@ function HeatmapCanvas({ heatmap, gridMeta, gliders, pinnedId, gliderPathsRef })
   });
 
   // Redraw whenever visible data changes
-  useEffect(() => { draw(); }, [draw, heatmap, gridMeta, gliders, pinnedId]);
+  useEffect(() => { draw(); }, [draw, heatmap, gridMeta, pinnedIsTow, pinnedId]);
 
   return createPortal(
     <canvas
       ref={canvasRef}
       style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none', zIndex: 450 }}
+    />,
+    map.getContainer()
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Glider icons — own canvas, own RAF loop, above the heatmap
+//
+// Split out from HeatmapCanvas so the icons can animate between beacons without
+// dragging a full grid repaint along at the same rate. Positions come from
+// displayPosition(), which projects along heading and ground speed while a
+// beacon is outstanding, so an aircraft reporting every 40 s still moves.
+// -----------------------------------------------------------------------------
+const ICON_FPS = 10;   // 100 ms — smooth enough for aircraft, far below RAF's 60
+
+function GliderCanvas({ gliders, pinnedId }) {
+  const map       = useMap();
+  const canvasRef = useRef(null);
+  const rafRef    = useRef(null);
+  const lastRef   = useRef(0);
+  const dataRef   = useRef({ gliders, pinnedId });
+  dataRef.current = { gliders, pinnedId };   // current without restarting the loop
+
+  const paint = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const { gliders, pinnedId } = dataRef.current;
+
+    const { width, height } = map.getContainer().getBoundingClientRect();
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width  = width;
+      canvas.height = height;
+    }
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, width, height);
+
+    const now = Date.now();
+    for (const g of gliders) {
+      const { lat, lon } = displayPosition(g, now);
+      const pt = map.latLngToContainerPoint([lat, lon]);
+      // Cull off-screen work: the backend pads the streamed viewport by 25 %,
+      // so a full frame carries icons that land outside the canvas.
+      if (pt.x < -40 || pt.y < -40 || pt.x > width + 40 || pt.y > height + 40) continue;
+      drawGlider(ctx, pt.x, pt.y, g.circling, g.vario, g.id === pinnedId, g.heading,
+                 g.is_tow, g.under_tow);
+    }
+  }, [map]);
+
+  const loop = useCallback((ts) => {
+    rafRef.current = requestAnimationFrame(loop);
+    if (ts - lastRef.current < 1000 / ICON_FPS) return;
+    lastRef.current = ts;
+    paint();
+  }, [paint]);
+
+  useEffect(() => {
+    rafRef.current = requestAnimationFrame(loop);
+    return () => { if (rafRef.current) cancelAnimationFrame(rafRef.current); };
+  }, [loop]);
+
+  // Panning and zooming move every icon even when no aircraft has reported, and
+  // those events outpace ICON_FPS, so they repaint directly instead of waiting.
+  useMapEvents({
+    move:    paint,
+    zoomend: paint,
+    resize:  paint,
+    zoomstart() {
+      const canvas = canvasRef.current;
+      if (canvas) canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+    },
+  });
+
+  return createPortal(
+    <canvas
+      ref={canvasRef}
+      style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none', zIndex: 451 }}
     />,
     map.getContainer()
   );
@@ -501,10 +599,15 @@ const GLIDER_HIT_PX = 18;  // click radius in screen pixels
 function MapClickHandler({ onMapClick, gliders, onGliderClick }) {
   const map = useMapEvents({
     click(e) {
-      const cp = e.containerPoint;
+      const cp  = e.containerPoint;
+      const now = Date.now();
       let best = null, bestDist = Infinity;
       for (const g of gliders) {
-        const pt = map.latLngToContainerPoint([g.lat, g.lon]);
+        // Hit-test where the icon is drawn, not where it last reported —
+        // otherwise a projected marker has its clickable area left behind at
+        // the stale position and clicking the aircraft misses it entirely.
+        const { lat, lon } = displayPosition(g, now);
+        const pt = map.latLngToContainerPoint([lat, lon]);
         const d  = Math.hypot(cp.x - pt.x, cp.y - pt.y);
         if (d < GLIDER_HIT_PX && d < bestDist) { best = g; bestDist = d; }
       }
@@ -554,6 +657,13 @@ function FlyToController({ target }) {
 // Public component
 // -----------------------------------------------------------------------------
 export default function ThermalMap({ heatmap, gridMeta, gliders, activeThermals = [], showOgnHeatmap = true, onMapClick, onGliderClick, onViewportChange, pinnedId, flyTarget, gliderPathsRef }) {
+  // Passed to HeatmapCanvas as a plain boolean rather than the glider object:
+  // that layer repaints the whole grid when its props change, and an object
+  // would arrive with a fresh identity on every stream frame.
+  const pinnedIsTow = pinnedId
+    ? gliders.find(g => g.id === pinnedId)?.is_tow ?? false
+    : false;
+
   return (
     <MapContainer
       center={MAP_CENTER}
@@ -576,8 +686,9 @@ export default function ThermalMap({ heatmap, gridMeta, gliders, activeThermals 
       />
 
       {showOgnHeatmap && <OgnHeatmapCanvas gliders={gliders} />}
-      <HeatmapCanvas heatmap={heatmap} gridMeta={gridMeta} gliders={gliders} pinnedId={pinnedId} gliderPathsRef={gliderPathsRef} />
+      <HeatmapCanvas heatmap={heatmap} gridMeta={gridMeta} pinnedIsTow={pinnedIsTow} pinnedId={pinnedId} gliderPathsRef={gliderPathsRef} />
       <ThermalBubbleCanvas activeThermals={activeThermals} />
+      <GliderCanvas gliders={gliders} pinnedId={pinnedId} />
       <MapClickHandler onMapClick={onMapClick} gliders={gliders} onGliderClick={onGliderClick} />
       <ViewportReporter onChange={onViewportChange} />
       <FlyToController target={flyTarget} />

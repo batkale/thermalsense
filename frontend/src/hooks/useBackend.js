@@ -55,6 +55,11 @@ export function useBackend() {
   const gliderPathsRef    = useRef({});   // { [id]: [{lat, lon, alt}] }
   const seededIdsRef      = useRef(new Set());
   const boundsRef         = useRef(null); // latest map viewport, resent on reconnect
+  // { [id]: {lat, lon, rx} } — when each *position* first arrived, not when the
+  // frame carrying it did. A glider that has not beaconed is re-sent unchanged
+  // on every frame, so stamping on arrival would reset the dead-reckoning clock
+  // once a second and the icon would never move.
+  const posRxRef          = useRef({});
 
   /**
    * Tell the backend which patch of the world this client is looking at, so it
@@ -171,7 +176,33 @@ export function useBackend() {
             g.lon >= GLIDER_LON_MIN && g.lon <= GLIDER_LON_MAX
           );
 
-          setGliders(european.map(g => ({ ...g, gridPos: latlonToGridXY(g.lat, g.lon) })));
+          const now  = Date.now();
+          const seen = posRxRef.current;
+          const next = {};
+          const stamped = european.map(g => {
+            const prev = seen[g.id];
+            let rx;
+            if (!prev) {
+              // First sighting. The wire carries no beacon timestamp, so this
+              // position could be a second or a minute old — projecting from
+              // it would march the icon away from a point it already left.
+              // null means "don't project", and the next beacon supplies a
+              // stamp we actually measured.
+              rx = null;
+            } else if (prev.lat !== g.lat || prev.lon !== g.lon) {
+              rx = now;          // a real beacon landed between frames
+            } else {
+              rx = prev.rx;      // unchanged — keep projecting from the old stamp
+            }
+            next[g.id] = { lat: g.lat, lon: g.lon, rx };
+            return { ...g, rx, gridPos: latlonToGridXY(g.lat, g.lon) };
+          });
+          // Rebuilt rather than pruned: the viewport filter churns this set as
+          // the map moves, and keeping stamps for gliders no longer streamed
+          // would grow the dict without bound over a long session.
+          posRxRef.current = next;
+
+          setGliders(stamped);
         } catch { /* ignore malformed frames */ }
       };
 

@@ -69,6 +69,16 @@ TERRAIN_RES       = 0.01
 # and served features have to describe the same patch of ground.
 GRID_RADIUS       = 0.05          # degrees (~11 x 7 km at UK latitudes)
 UPDATE_INTERVAL   = 300           # seconds between OGN polls
+# Seconds between /ws/live frames.  Measured on the live feed (19 Aug 2026,
+# 1548 aircraft over 10 min): the feed as a whole delivers a beacon every 1.0 s
+# median, but per aircraft the median gap is 3.9 s and the slowest tenth report
+# only every 45 s.  So this interval is not what makes a marker sit still --
+# that is the aircraft's own transmit rate and its receiver coverage, which no
+# setting here can change.  What it does fix is the fastest quarter of the fleet:
+# their per-aircraft median gap is ~0.9 s, which a 2 s frame plainly undersamples.
+# The cost is linear in viewers x gliders on screen, and the default view is now
+# Europe-wide, so treat this as the knob to raise first if the VM gets busy.
+WS_FRAME_INTERVAL = float(os.getenv("WS_FRAME_INTERVAL", "1.0"))
 MODEL_PATH        = str(DATA_DIR / "models" / "thermal_xgb.json")
 BUFFER_PATH       = str(DATA_DIR / "models" / "training_buffer.npz")
 DB_PATH           = DATA_DIR / "data" / "ogn_history.db"

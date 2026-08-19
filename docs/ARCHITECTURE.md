@@ -231,7 +231,7 @@ turned each track into a 4M-row scan holding the GIL for 1.5 s.
 
 ### WebSocket
 
-`/ws/live` sends a frame every 2 s containing visible gliders and their new
+`/ws/live` sends a frame every `WS_FRAME_INTERVAL` (1 s) containing visible gliders and their new
 positions. The client declares its viewport on connect and on every map move
 (`Leaflet getBounds().pad(0.25)`), and the server filters both lists before
 serialising — measured 157 gliders down to 4 for a 1x1 degree box.
