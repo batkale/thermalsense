@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { fetchPrediction, fetchGliderTrack } from '../services/api.js';
+import { fetchPrediction, fetchGliderTrack, fetchGlider } from '../services/api.js';
 import { LAT_MIN, LAT_MAX, LON_MIN, LON_MAX, GRID_RES, PREDICT_RADIUS, WS_URL, GLIDER_LAT_MIN, GLIDER_LAT_MAX, GLIDER_LON_MIN, GLIDER_LON_MAX } from '../config.js';
 
 const GRID_COLS = Math.round((LON_MAX - LON_MIN) / GRID_RES);
@@ -43,7 +43,13 @@ function latlonToGridXY(lat, lon) {
   };
 }
 
-export function useBackend() {
+// How often a followed glider is fetched by id. Slower than the socket on
+// purpose: this is the safety net for when the socket is not carrying the
+// aircraft at all, not the primary path, and while the aircraft is on screen
+// the socket beats it anyway.
+const PIN_POLL_MS = 5000;
+
+export function useBackend(pinnedId = null) {
   const [heatmap,     setHeatmap]     = useState(null);
   const [gridMeta,    setGridMeta]    = useState(null);
   const [gliders,     setGliders]     = useState([]);
@@ -51,6 +57,9 @@ export function useBackend() {
   const [predictAlt,  setPredictAlt]  = useState(null);
   const [loading,     setLoading]     = useState(false);
   const [error,       setError]       = useState(null);
+  // Last direct fetch of the followed glider — the copy used only when the
+  // viewport-scoped socket is not carrying it. See the poll effect below.
+  const [polledPinned, setPolledPinned] = useState(null);
   const wsRef             = useRef(null);
   const gliderPathsRef    = useRef({});   // { [id]: [{lat, lon, alt}] }
   const seededIdsRef      = useRef(new Set());
@@ -217,9 +226,39 @@ export function useBackend() {
     };
   }, []);
 
+  // Poll the followed glider by id, every PIN_POLL_MS, for as long as it is
+  // pinned. /ws/live only carries what is inside the declared viewport, so
+  // panning away — or simply letting the aircraft drift past the padded edge —
+  // stops the stream mentioning it, and the card then holds its last frame
+  // indefinitely while looking exactly as live as before.
+  useEffect(() => {
+    if (!pinnedId) { setPolledPinned(null); return; }
+    let cancelled = false;
+    // Fired immediately as well as on the interval, so pinning an aircraft that
+    // is already off-stream fills the card now rather than in five seconds.
+    const tick = () => {
+      fetchGlider(pinnedId)
+        .then(g => { if (!cancelled && g) setPolledPinned(g); })
+        .catch(() => { /* transient — the next tick retries */ });
+    };
+    tick();
+    const timer = setInterval(tick, PIN_POLL_MS);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [pinnedId]);
+
+  // The socket's copy wins whenever it has one: it arrives every
+  // WS_FRAME_INTERVAL against this poll's five seconds, so preferring the poll
+  // would make the followed glider the *least* current thing on the map.
+  const pinnedGlider = useMemo(() => {
+    if (!pinnedId) return null;
+    const streamed = gliders.find(g => g.id === pinnedId);
+    if (streamed) return streamed;
+    return polledPinned && polledPinned.id === pinnedId ? polledPinned : null;
+  }, [gliders, polledPinned, pinnedId]);
+
   const activeThermals = useMemo(() => clusterCirclingGliders(gliders), [gliders]);
 
   return { heatmap, gridMeta, gliders, activeThermals, weather, predictAlt,
-           loading, error,
+           loading, error, pinnedGlider,
            predict, setViewport, seedTrack, gliderPathsRef };
 }

@@ -147,6 +147,7 @@ Breaking any of these has taken the app down or silently corrupted results befor
 | `GET /ogn/live?wait_agl=` | Live snapshot. AGL from the warm cache unless `wait_agl=true` |
 | `GET /ogn/search?q=&limit=` | Server-side id search — the client no longer holds a full glider list |
 | `GET /ogn/track/{id}` | Last 8 h of positions (runs in a thread; the table holds millions of rows) |
+| `GET /ogn/glider/{id}` | One aircraft by **exact** id, ignoring the viewport. `{"glider": null}` when it is gone — not a 404 |
 | `GET /thermals/active` | Clusters of circling gliders |
 | `GET /elevation?lat=&lon=` | Single SRTM point |
 | `GET /healthz` | `{status, model_loaded}` |
@@ -186,6 +187,16 @@ timestamp and a first sighting could be a minute old.
 
 Icons live on their own canvas (`GliderCanvas`, ~10 fps) precisely so animating
 them does not drag a 40k-cell heatmap repaint along at the same rate.
+
+**A pinned glider is polled as well as streamed.** Viewport scoping means the
+socket stops carrying a followed aircraft once it leaves the padded bounds, and
+the card would then hold its last frame while looking perfectly live. So
+`useBackend(pinnedId)` fetches `/ogn/glider/{id}` every `PIN_POLL_MS` (5 s) for
+as long as something is pinned. The streamed copy always wins when it exists —
+it arrives every `WS_FRAME_INTERVAL`, so preferring the poll would make the
+followed glider the least current thing on the map. Note the pinned *track*
+still only extends from `new_positions`, which stays viewport-filtered, so a
+path gains a gap while its aircraft is off-screen.
 
 ## Resource budget
 

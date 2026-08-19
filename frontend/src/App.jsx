@@ -28,9 +28,9 @@ export default function App() {
 
   const {
     heatmap, gridMeta, gliders, activeThermals,
-    weather, predictAlt, loading, error,
+    weather, predictAlt, loading, error, pinnedGlider: livePinned,
     predict, setViewport, seedTrack, gliderPathsRef,
-  } = useBackend();
+  } = useBackend(pinnedId);
 
   // A bare map click carries no altitude — the backend picks a working height
   // above the terrain. Clicking a glider sends that glider's own altitude, which
@@ -67,7 +67,12 @@ export default function App() {
 
   const heatmapMax = heatmap ? heatmap.reduce((a, b) => Math.max(a, b), 0) : null;
 
-  const livePinned = pinnedId ? gliders.find(g => g.id === pinnedId) ?? null : null;
+  // livePinned comes from the socket when it carries the aircraft and from the
+  // 5 s by-id poll when it does not, so it stays current wherever the map is
+  // pointing. The ref only bridges the frame or two before the first of those
+  // answers — and is dropped the moment the pin changes, or it would bridge
+  // that gap with the *previous* aircraft's numbers under the new one's id.
+  if (lastPinnedRef.current?.id !== pinnedId) lastPinnedRef.current = null;
   if (livePinned) lastPinnedRef.current = livePinned;
   const pinnedGlider = pinnedId ? (livePinned ?? lastPinnedRef.current) : null;
 

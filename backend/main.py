@@ -603,6 +603,30 @@ async def ogn_search(q: str, limit: int = 5):
     hits.sort(key=lambda g: (not g["id"].lower().startswith(lq), g["id"]))
     return {"gliders": _to_wire(hits[:max(0, min(limit, 25))])}
 
+@app.get("/ogn/glider/{glider_id}")
+async def ogn_glider(glider_id: str):
+    """Current state of one aircraft, looked up across the whole live feed.
+
+    /ws/live is scoped to the client's viewport, so an aircraft being followed
+    drops out of the stream the moment it leaves the padded bounds — and the
+    pinned card then goes on showing its last frame with nothing to say it has
+    stopped updating.  This is the viewport-independent lookup that keeps a
+    followed aircraft current wherever the map happens to be pointing.
+
+    Exact id match, not /ogn/search's substring one: following "FLR112AC0" must
+    never quietly switch to a different aircraft whose id merely contains it.
+
+    A missing id returns null rather than 404.  Landing, or ageing out of
+    _GLIDER_TTL_S, is ordinary rather than exceptional, and the client's job
+    there is to keep showing the last known state — not to render an error.
+    """
+    gliders = await fetch_ogn_gliders()
+    hit = next((g for g in gliders if g["id"] == glider_id), None)
+    if hit is None:
+        return {"glider": None}
+    return {"glider": _to_wire(_attach_cached_agl([hit]))[0]}
+
+
 @app.post("/train", dependencies=[Depends(_require_admin)])
 async def trigger_train(background_tasks: BackgroundTasks):
     """Manually trigger model retraining in the background."""

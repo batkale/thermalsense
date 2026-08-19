@@ -41,6 +41,18 @@ export async function searchGliders(query, limit = 3) {
   return data.gliders ?? [];
 }
 
+/**
+ * One aircraft's current state by exact id, independent of the viewport the
+ * live socket is scoped to. Resolves to null when the feed no longer carries
+ * it — landed, or aged out — which is a normal outcome, not an error.
+ */
+export async function fetchGlider(gliderId) {
+  const res = await fetch(`${API_BASE}/ogn/glider/${encodeURIComponent(gliderId)}`);
+  if (!res.ok) return null;
+  const data = await res.json();
+  return data.glider ?? null;
+}
+
 export async function triggerRetrain() {
   const res = await fetch(`${API_BASE}/train`, {
     method: 'POST',

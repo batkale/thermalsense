@@ -304,3 +304,43 @@ def test_a_later_move_still_rescopes_the_stream(stub_feed):
             if ids == ["FRANCE"]:
                 return
         pytest.fail(f"viewport update never applied, last frame: {ids}")
+
+
+# ---------------------------------------------------------------------------
+# /ogn/glider/{id} — the viewport-independent lookup behind the pinned card
+#
+# The stream is scoped to the client's bounds, so a followed aircraft stops
+# appearing in it the moment it leaves them.  This endpoint is what keeps the
+# card current in that case, so what matters is that it ignores the viewport
+# entirely, matches the id exactly, and treats "gone" as a normal answer.
+# ---------------------------------------------------------------------------
+
+def test_glider_lookup_ignores_the_viewport(stub_feed):
+    """FRANCE is outside İnönü, which is exactly when this endpoint is needed."""
+    res = TestClient(main.app).get("/ogn/glider/FRANCE")
+    assert res.status_code == 200
+    assert res.json()["glider"]["id"] == "FRANCE"
+
+
+def test_glider_lookup_returns_wire_shape(stub_feed):
+    """The card reads the same fields the socket delivers, agl included."""
+    body = TestClient(main.app).get("/ogn/glider/NEAR").json()["glider"]
+    assert body["lat"] == 39.8 and body["alt"] == 1400
+    assert "agl" in body
+
+
+def test_unknown_glider_is_null_not_an_error(stub_feed):
+    """Landing or ageing out is ordinary: the client keeps its last state."""
+    res = TestClient(main.app).get("/ogn/glider/NOSUCH")
+    assert res.status_code == 200
+    assert res.json()["glider"] is None
+
+
+def test_glider_lookup_does_not_match_on_substring(stub_feed):
+    """Following one aircraft must never silently switch to another.
+
+    /ogn/search matches substrings by design; this endpoint must not, or a
+    pinned "NEAR" could be answered with any id that happens to contain it.
+    """
+    assert TestClient(main.app).get("/ogn/glider/EAR").json()["glider"] is None
+    assert TestClient(main.app).get("/ogn/glider/near").json()["glider"] is None
