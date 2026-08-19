@@ -46,8 +46,15 @@ export const WS_URL = resolveWsUrl();
 // retraining with curl instead.
 export const ADMIN_TOKEN = import.meta.env.VITE_ADMIN_TOKEN ?? '';
 
-export const MAP_CENTER = [39.8167, 30.1167]; // İnönü havaalanı (THK yelken kanat merkezi)
-export const MAP_ZOOM   = 11;
+// Opening view: the European soaring belt. The OGN feed is worldwide and its
+// traffic sits here, so the map lands on live gliders instead of on an empty
+// airfield. This is deliberately *not* the prediction grid above (İnönü) —
+// a prediction is built around whatever point is clicked, so the two are free
+// to disagree. Zoom 5 spans roughly Ireland → Black Sea on a laptop-width
+// window; İnönü havaalanı (THK yelken kanat merkezi) is [39.8167, 30.1167] for
+// anyone restoring the old regional default.
+export const MAP_CENTER = [46.5, 15.5];
+export const MAP_ZOOM   = 5;
 
 // Must match backend fetch_elevation_grid default radius (config.py GRID_RADIUS).
 // The grid spans centre ± this on both axes, inclusive of both edges, so it is
