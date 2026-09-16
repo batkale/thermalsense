@@ -26,11 +26,12 @@ general case but costs more than this whole application.
 import asyncio
 import logging
 import math
-import struct
 import zlib
 
 import httpx
 import numpy as np
+
+from data import cog
 
 from config import GRID_RADIUS, TERRAIN_RES, DATA_DIR, WORLDCOVER_BASE
 
@@ -75,9 +76,6 @@ _cog_cache: dict[str, list[dict] | None] = {}
 _grid_cache: dict[tuple[float, float, float], np.ndarray] = {}
 
 _client: httpx.AsyncClient | None = None
-_TAG_NAMES = {254: "subfile", 256: "width", 257: "height", 258: "bits",
-              259: "compression", 317: "predictor", 322: "tile_w", 323: "tile_h",
-              324: "offsets", 325: "counts", 33550: "scale", 33922: "tiepoint"}
 
 
 def _get_client() -> httpx.AsyncClient:
@@ -111,51 +109,9 @@ def tile_url(name: str) -> str:
     return f"{WORLDCOVER_BASE}/ESA_WorldCover_10m_2021_v200_{name}_Map.tif"
 
 
-def _parse_ifds(buf: bytes) -> list[dict]:
-    """
-    Parse the IFD chain of a classic little-endian TIFF into level descriptors.
-
-    Level 0 is full resolution; the rest are the COG's internal overviews, each
-    roughly half the previous. Only the tags this reader needs are decoded.
-    """
-    if buf[:2] != b"II":
-        raise ValueError("not a little-endian TIFF")
-    if struct.unpack("<H", buf[2:4])[0] != 42:
-        raise ValueError("BigTIFF is not supported by this reader")
-
-    fmt_of = {1: "B", 3: "H", 4: "I", 12: "d"}
-    levels: list[dict] = []
-    off = struct.unpack("<I", buf[4:8])[0]
-
-    while off and off + 2 <= len(buf):
-        count = struct.unpack("<H", buf[off:off + 2])[0]
-        if count == 0 or count > 200:
-            break
-        entry = {}
-        for i in range(count):
-            e = off + 2 + i * 12
-            tag, typ, n = struct.unpack("<HHI", buf[e:e + 8])
-            name = _TAG_NAMES.get(tag)
-            if name is None:
-                continue
-            fmt = fmt_of.get(typ)
-            if fmt is None:
-                continue
-            item = struct.calcsize(fmt)
-            if item * n <= 4:
-                entry[name] = struct.unpack(f"<{n}{fmt}", buf[e + 8:e + 8 + item * n])
-            else:
-                ptr = struct.unpack("<I", buf[e + 8:e + 12])[0]
-                end = ptr + item * n
-                if end > len(buf):
-                    raise ValueError(f"tag {tag} array at {ptr}..{end} beyond header")
-                entry[name] = struct.unpack(f"<{n}{fmt}", buf[ptr:end])
-        levels.append(entry)
-        off = struct.unpack("<I", buf[off + 2 + count * 12: off + 6 + count * 12])[0]
-
-    if not levels:
-        raise ValueError("no IFDs found")
-    return levels
+# The IFD parser lives in data/cog.py, shared with the Copernicus elevation
+# reader; kept under this name because the tests and _fetch_header call it.
+_parse_ifds = cog.parse_ifds
 
 
 def _geo(levels: list[dict], level: int) -> tuple[float, float, float]:

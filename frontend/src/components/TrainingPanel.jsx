@@ -79,7 +79,10 @@ export default function TrainingPanel({ onClose }) {
   if (!data) {
     body = <div className="tp-hint">{failed ? t('trainingStatusFailed') : t('loadingStatus')}</div>;
   } else {
-    const { feed, model, buffer, archive, climatology, terrain_api: api } = data;
+    const { feed, model, buffer, archive, climatology, terrain_api: api, terrain } = data;
+    // An older backend sends no `terrain` block; it only ever used the API.
+    const source = terrain?.source ?? 'opentopodata';
+    const cop = terrain?.copernicus;
     const fit = model.last_fit;
     const groups = buffer.benchmark_groups ?? 0;
     const need = buffer.benchmark_groups_needed ?? 30;
@@ -147,8 +150,18 @@ export default function TrainingPanel({ onClose }) {
                tone={data.disk_free_gb < 3 ? 'bad' : undefined} />
         </Section>
 
-        <Section title={t('sectionTerrainApi')}>
-          <Row label={t('requestsToday')} value={`${n(api.requests)} / ${n(api.quota)}`}
+        <Section title={t('sectionTerrain')}>
+          <Row label={t('terrainSource')}
+               value={source === 'copernicus' ? t('sourceCopernicus') : t('sourceOpenTopoData')} />
+          {cop && (
+            <Row label={t('copernicusToday')}
+                 value={t('copernicusValue', { p: n(cop.points), b: n(cop.blocks), mb: n(Math.round(cop.bytes / 1e6)) })}
+                 tone={cop.errors > 0 ? 'warn' : undefined} />
+          )}
+          {/* With Copernicus primary this is fallback traffic only, so it should
+              stay near zero; on the API it is the collection ceiling itself. */}
+          <Row label={source === 'copernicus' ? t('apiFallbackToday') : t('requestsToday')}
+               value={`${n(api.requests)} / ${n(api.quota)}`}
                tone={api.requests >= api.quota ? 'bad' : api.requests >= 0.8 * api.quota ? 'warn' : undefined} />
           <Bar value={api.requests} max={api.quota} warnAt={0.8} />
           {api.rate_limited > 0 && <div className="tp-hint">{t('rateLimited', { n: n(api.rate_limited) })}</div>}

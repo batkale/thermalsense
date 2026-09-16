@@ -332,6 +332,9 @@ async def training_status():
             else {"error": "pyarrow not installed"}),
         "climatology": await section(_prior_stats),
         "terrain_api": terrain_client.api_usage(),
+        # Which source is carrying terrain and today's work on each.  With
+        # Copernicus primary, the API figure above is only the fallback traffic.
+        "terrain": terrain_client.source_usage(),
         "disk_free_gb": round(await asyncio.to_thread(_free_disk_gb), 1),
     }
 

@@ -12,6 +12,22 @@ DATA_DIR = Path(os.getenv("THERMALSENSE_DATA_DIR", Path(__file__).parent)).resol
 OPEN_METEO_BASE      = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_HIST_BASE = "https://historical-forecast-api.open-meteo.com/v1/forecast"
 SRTM_BASE         = "https://api.opentopodata.org/v1/srtm30m"
+
+# Where ground elevation comes from.
+#
+# "copernicus" reads Copernicus GLO-30 Cloud-Optimized GeoTIFFs straight from
+# public S3 with range requests — no API, no quota, commercial use allowed.
+# "opentopodata" is the original free API: 1,000 requests a day, which a
+# training node spent in its first 40 minutes, after which collection stops.
+#
+# Measured on 36 grids against the cached SRTM values, after the upsample the
+# model actually sees: elevation differs by 4.4 m on average, slope by 0.26°
+# (correlation 0.92), aspect by 3.2° — the features barely move.  Points
+# Copernicus cannot answer (a tile not published, a read failure) fall back to
+# OpenTopoData, so the two sources are cached separately and never mixed.
+TERRAIN_SOURCE    = os.getenv("TERRAIN_SOURCE", "copernicus").strip().lower()
+COPERNICUS_DEM_BASE = os.getenv(
+    "COPERNICUS_DEM_BASE", "https://copernicus-dem-30m.s3.amazonaws.com")
 # ESA WorldCover 10 m, public S3. Cloud-Optimized GeoTIFFs, so the reader takes
 # HTTP range requests over internal overviews instead of the 73 MB full tile.
 # No key and no rate limit, unlike OpenTopoData.

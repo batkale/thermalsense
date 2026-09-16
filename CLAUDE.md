@@ -22,7 +22,7 @@ All backend commands run from `backend/`. A Windows venv exists at
 `backend/.venv` with every dependency installed — prefer it.
 
 ```bash
-# Tests — 280 tests, ~5 s
+# Tests — 293 tests, ~5 s
 cd backend && ./.venv/Scripts/python.exe -m pytest tests/ -q
 
 # Single test file
@@ -63,7 +63,9 @@ There is no lint or typecheck step configured. `pytest.ini` sets
 | [backend/models/thermal_model.py](backend/models/thermal_model.py) | `ThermalModel`: load/save, MC-dropout predict, online retrain + quality gate, physics fallback |
 | [backend/data/ogn_client.py](backend/data/ogn_client.py) | APRS TCP client, beacon parser, SQLite history, retention purge |
 | [backend/data/meteo_client.py](backend/data/meteo_client.py) | Open-Meteo forecast + historical NWP (no API key). Archived hours are cached to disk forever, keyed on the same (0.5°, hour) bucket `/seed` groups on — 10k calls/day against ~1M buckets a year means an uncached rebuild is months, not an afternoon, and Open-Meteo revises its archive so an uncached rebuild would not even reproduce the same buffer |
-| [backend/data/terrain_client.py](backend/data/terrain_client.py) | OpenTopoData SRTM elevation, grid snapping, disk cache |
+| [backend/data/terrain_client.py](backend/data/terrain_client.py) | Elevation lookups, grid snapping, disk cache. `TERRAIN_SOURCE=copernicus` (default) reads Copernicus first and sends only the points it cannot answer to OpenTopoData; each source has its own cache directory so the two are never stitched into one grid |
+| [backend/data/dem_client.py](backend/data/dem_client.py) | Copernicus GLO-30 COG reader: range requests on public S3, no key, no quota. Verified against GDAL on 65 points (Türkiye, Alps, >50°N, both hemispheres, integer-degree edges): max difference 0.0000 m. A missing tile is `None`, never 0 m |
+| [backend/data/cog.py](backend/data/cog.py) | Minimal COG parsing shared by land cover and elevation: little-endian tiled DEFLATE, integer and float samples, horizontal and floating-point predictors |
 | [backend/data/landcover_client.py](backend/data/landcover_client.py) | ESA WorldCover 10 m via COG range reads. Off by default (`ENABLE_LANDCOVER`) |
 | [backend/data/circling_prior.py](backend/data/circling_prior.py) | Lagged per-cell climb rate from own beacon history. `update_index()` accumulates hourly and is wired into the scheduler; the *feature* is still evaluation-only |
 | [backend/data/archive.py](backend/data/archive.py) | Cold beacon archive: completed days as date-partitioned Parquet, kept forever. `purge_old_beacons` will not delete a day this has not written |
@@ -276,9 +278,19 @@ The deployment target is 2 vCPU / 896 MB, and most odd-looking choices come from
   rounds — a DB created before `auto_vacuum=INCREMENTAL` never returns freed
   pages to the OS, so waiting for free space to recover would spin forever.
 
-**Upstream ceilings:** OpenTopoData 1000 calls/day and 1 req/s (one call per
-prediction, cached); Open-Meteo 10k/day; ESA WorldCover needs no key and has no
-published limit.
+**Upstream ceilings:** Copernicus DEM has no key and no quota (the terrain
+default); OpenTopoData 1000 calls/day and 1 req/s, now only the fallback — as
+the primary source a training node spent the whole day's quota in its first 40
+minutes; Open-Meteo 10k/day; ESA WorldCover needs no key and has no published
+limit.
+
+**Copernicus vs SRTM** (36 grids, after the production upsample): elevation
+4.4 m mean difference, slope 0.26° (r = 0.92), aspect 3.2°. The features barely
+move, but a buffer collected under one source should not be silently extended
+under the other — reset or set it aside when switching. Copernicus requires
+attribution; the credit is on the map's attribution control. Its tiles above
+50°N are narrower (2400 columns, then fewer), which is why the reader keeps
+separate x and y pixel sizes.
 
 ## Config that surprises people
 

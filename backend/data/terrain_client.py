@@ -5,7 +5,8 @@ import httpx
 import numpy as np
 from pathlib import Path
 from scipy.ndimage import zoom as ndimage_zoom
-from config import SRTM_BASE, GRID_RES, TERRAIN_RES, GRID_RADIUS, DATA_DIR
+from config import SRTM_BASE, GRID_RES, TERRAIN_RES, GRID_RADIUS, DATA_DIR, TERRAIN_SOURCE
+from data import dem_client
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +41,12 @@ _grid_cache: dict[tuple[float, float, float], np.ndarray] = {}
 # Only the *coarse* grid is stored (10x10 = 100 floats). The upsample back to
 # 200x200 costs microseconds, and storing the fine grid instead would be 400x
 # larger on disk for no gain.
-_CACHE_DIR = DATA_DIR / "cache" / "terrain"
+# One directory per source.  SRTM and Copernicus agree to a few metres but not
+# exactly, and a grid assembled half from one and half from the other would put
+# a seam through its slope and aspect.  Switching TERRAIN_SOURCE therefore starts
+# a fresh cache rather than reading the other source's values.
+_CACHE_DIR = DATA_DIR / "cache" / ("terrain-copernicus" if TERRAIN_SOURCE == "copernicus"
+                                   else "terrain")
 _POINT_CACHE_PATH = _CACHE_DIR / "points.json"
 _point_writes_since_flush = 0
 _POINT_FLUSH_EVERY = 50
@@ -126,6 +132,7 @@ async def aclose() -> None:
     if _client is not None and not _client.is_closed:
         await _client.aclose()
     _client = None
+    await dem_client.aclose()
 
 
 # Serialise all outbound requests: opentopodata.org free tier = 1 req/s
@@ -166,6 +173,12 @@ def api_usage() -> dict:
     return {**_usage, "quota": DAILY_QUOTA}
 
 
+def source_usage() -> dict:
+    """Which source serves terrain, with today's work for each."""
+    return {"source": TERRAIN_SOURCE, "api": api_usage(),
+            "copernicus": dem_client.usage() if TERRAIN_SOURCE == "copernicus" else None}
+
+
 async def _get_with_retry(client: httpx.AsyncClient, url: str, max_retries: int = 3) -> httpx.Response:
     """GET with fixed back-off on 429 (max 3 retries, 2 s each = 6 s total)."""
     for attempt in range(max_retries):
@@ -181,6 +194,11 @@ async def _get_with_retry(client: httpx.AsyncClient, url: str, max_retries: int 
 
 async def fetch_elevation_point(lat: float, lon: float) -> int | None:
     """Return ground elevation in metres at a single point, or None on failure."""
+    if TERRAIN_SOURCE == "copernicus":
+        v = (await dem_client.fetch_elevations([(lat, lon)])).get((lat, lon))
+        if v is not None:
+            return int(round(v))
+        # Unpublished tile or a read failure: the API still covers it.
     try:
         r = await _get_with_retry(_get_client(), f"{SRTM_BASE}?locations={lat:.5f},{lon:.5f}")
         r.raise_for_status()
@@ -244,6 +262,28 @@ async def fetch_elevation_batch(
             pending.setdefault(key, []).append((lat, lon))
 
     keys      = list(pending)
+
+    # Copernicus first: no quota, so no budget.  Whatever it cannot answer —
+    # typically a tile that is not published — drops through to the API below,
+    # which keeps its request budget for exactly those points.
+    if TERRAIN_SOURCE == "copernicus" and keys:
+        try:
+            got = await dem_client.fetch_elevations(keys)
+        except Exception as exc:
+            log.warning(f"[terrain] copernicus lookup failed ({exc}) — using the API")
+            got = {}
+        for key in keys:
+            v = got.get(key)
+            if v is None:
+                continue
+            elev = int(round(v))
+            _elev_cache[key] = elev
+            _point_writes_since_flush += 1
+            for pair in pending[key]:
+                out[pair] = elev
+        keys = [k for k in keys if got.get(k) is None]
+        flush_point_cache()
+
     budgeted  = keys[: max_requests * MAX_BATCH_POINTS]
     for key in keys[len(budgeted):]:
         for pair in pending[key]:

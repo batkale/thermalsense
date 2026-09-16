@@ -680,7 +680,11 @@ export default function ThermalMap({ heatmap, gridMeta, gliders, activeThermals 
       {/* Road labels on top — CartoDB, free, no API key */}
       <TileLayer
         url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}{r}.png"
-        attribution='&copy; <a href="https://carto.com">CARTO</a>'
+        // Terrain credit rides on this layer because the elevation behind every
+        // heatmap is Copernicus GLO-30, whose licence requires attribution
+        // wherever derived products are shown. Legal credit, not UI copy, so
+        // it is not translated — the tile credits beside it are not either.
+        attribution='&copy; <a href="https://carto.com">CARTO</a> | Terrain: Copernicus DEM &copy; DLR e.V. 2010&ndash;2014, &copy; Airbus Defence and Space GmbH 2014&ndash;2018, provided under COPERNICUS by the EU and ESA'
         opacity={0.7}
         subdomains="abcd"
       />
