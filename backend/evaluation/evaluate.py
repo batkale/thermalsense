@@ -389,7 +389,74 @@ def main() -> int:
         print(f"\npaired delta (served): {b} - {a} = {d['point']:+.3f}  "
               f"[{d['lo']:+.3f}, {d['hi']:+.3f}]  over {d['groups']} groups")
         print(f"verdict: {verdict}")
+
+    _report_regions(Xe, ye, ge, served, n_boot=args.boot)
     return 0
+
+
+# Named boxes (lat_min, lat_max, lon_min, lon_max), checked in order; a row goes
+# to the first that contains it.  Türkiye is listed on purpose even while it is
+# nearly empty: the pooled score is dominated by Germany (51% of the feed) and
+# the Alps (26%) and says nothing about the market this product is for, so its
+# own row has to exist — and has to say "not measurable" out loud rather than be
+# silently absorbed into the average.
+REGIONS = [
+    ("Türkiye",  35.8, 42.2,  25.6, 44.9),
+    ("Alps",     44.0, 48.5,   5.0, 16.5),
+    ("Germany",  47.2, 55.0,   5.8, 15.1),
+    ("Iberia",   36.0, 43.8,  -9.5,  3.3),
+]
+
+# Below this many mixed-label groups a regional score is reported as not
+# measurable.  Same threshold the live gate uses before it trusts a benchmark.
+_MIN_REGION_GROUPS = 30
+
+
+def region_of(X: np.ndarray) -> np.ndarray:
+    lat, lon = X[:, _COL_LAT], X[:, _COL_LON]
+    out = np.full(len(X), "other", dtype=object)
+    free = np.ones(len(X), dtype=bool)
+    for name, la0, la1, lo0, lo1 in REGIONS:
+        m = free & (lat >= la0) & (lat <= la1) & (lon >= lo0) & (lon <= lo1)
+        out[m] = name
+        free &= ~m
+    return out
+
+
+def _report_regions(Xe, ye, ge, served: dict, n_boot: int) -> None:
+    """
+    Model against the terrain heuristic, separately per region.
+
+    Groups never straddle a region (a group is one 0.5deg cell), so slicing rows
+    by region slices groups cleanly and each regional score is a real
+    within-group AUC, not an average over borders.
+    """
+    reg = region_of(Xe)
+    terrain = _terrain_multiplier(Xe)
+    names = [r[0] for r in REGIONS] + ["other"]
+    print("\nby region (served model vs terrain_multiplier)")
+    print(f"{'region':10s} {'rows':>6s} {'pos':>5s} {'groups':>6s}   "
+          + "   ".join(f"{v:>22s}" for v in served) + "   terrain   delta vs terrain")
+    for name in names:
+        m = reg == name
+        if not m.any():
+            print(f"{name:10s} {0:>6d} {0:>5d} {0:>6d}   no data")
+            continue
+        stats = grouped_auc(np.zeros(int(m.sum())), ye[m], ge[m])
+        head = f"{name:10s} {int(m.sum()):>6d} {int(ye[m].sum()):>5d} {stats['groups']:>6d}   "
+        if stats["groups"] < _MIN_REGION_GROUPS:
+            print(head + f"not measurable ({stats['groups']} mixed-label groups, "
+                         f"need {_MIN_REGION_GROUPS})")
+            continue
+        cells = []
+        for v, s in served.items():
+            ci = bootstrap_ci(s[m], ye[m], ge[m], n_boot=n_boot)
+            cells.append(f"{ci['point']:.3f} [{ci['lo']:.3f},{ci['hi']:.3f}]")
+        t = grouped_auc(terrain[m], ye[m], ge[m])["micro"]
+        first = next(iter(served.values()))
+        d = paired_delta_ci(terrain[m], first[m], ye[m], ge[m], n_boot=n_boot)
+        print(head + "   ".join(f"{c:>22s}" for c in cells)
+              + f"   {t:.3f}     {d['point']:+.3f} [{d['lo']:+.3f},{d['hi']:+.3f}]")
 
 
 if __name__ == "__main__":

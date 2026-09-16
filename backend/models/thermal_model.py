@@ -65,22 +65,24 @@ def _above_thermal_base(alt_amsl: float, ground_elev: float, thermal_base_agl: f
 
 def _plausible_coords(X: np.ndarray) -> np.ndarray:
     """
-    Boolean mask of rows whose lat/lon (cols 0,1) are real coordinates inside the
-    configured bounding box, rather than the grid indices an unbounded
-    build_feature_matrix call produces.
+    Boolean mask of rows whose lat/lon (cols 0,1) are real coordinates on Earth,
+    rather than the grid indices an unbounded build_feature_matrix call produces
+    (the documented pre-fix signature is lat=100).
 
-    Note this guard is only as tight as the box.  While the feed was Europe-only
-    it also caught index pairs like (50, 100) — lon 100 was outside the box.  Now
-    that the box is worldwide, (50, 100) reads as a valid point in Mongolia and
-    survives; only the lat > 90 signature (the documented one, lat=100) is still
-    caught.  That is inherent to accepting worldwide traffic — a sample really can
-    come from anywhere — and it affects legacy pre-fix buffer rows only, not
-    anything written since.
+    Deliberately *not* the configured feed box.  It used to be, and the box is an
+    operational setting that moves: a training node narrowed to Europe dropped
+    1,276 perfectly valid American samples on its first start, logged them as
+    "pre-fix rows", and the next save made the loss permanent.  Moving the box
+    south for the winter would then have erased every European sample the same
+    way.  A labelled observation stays a valid observation wherever the feed is
+    pointed now; each costs two rate-limited API calls to replace.
+
+    The price is that a legacy index pair such as (50, 100) reads as a point in
+    Mongolia and survives.  That was already true under the worldwide default,
+    and it affects buffers written before the lat_bounds fix only.
     """
     lat, lon = X[:, 0], X[:, 1]
-    return (
-        (lat >= LAT_MIN) & (lat <= LAT_MAX) & (lon >= LON_MIN) & (lon <= LON_MAX)
-    )
+    return (np.abs(lat) <= 90.0) & (np.abs(lon) <= 180.0)
 
 
 def _grid_index(lat: float, lon: float,
@@ -183,6 +185,16 @@ _NEGATIVE_MAX_VARIO = -0.5   # m/s
 
 # Circling *and* climbing faster than this is a confirmed thermal.
 _POSITIVE_MIN_VARIO = 1.5    # m/s
+
+# Meaning of the labels a buffer was collected under, stored alongside it.
+#   1 — negative = any aircraft present and not thermalling (pseudo-absence)
+#   2 — negative = straight and sinking; the ambiguous band is discarded
+# The feature width did not change between the two, so the `.vN` width check
+# cannot tell them apart, and mixing them puts two definitions of "no lift" into
+# one fit and one frozen benchmark.  A buffer from an older version is set aside
+# on load, the same way a width mismatch is.  Bump this whenever _label_for
+# changes what a 0 or a 1 means.
+_LABEL_VERSION = 2
 
 
 def _label_for(circling: bool, vario: float) -> int | None:
@@ -424,15 +436,37 @@ class ThermalModel:
         # inside the context manager and only touch the file after it closes.
         X = y = None
         width = None
+        label_version = 1
         try:
             with np.load(str(bp), allow_pickle=False) as data:
                 width = data["X"].shape[1]
+                # Absent means written before labels were versioned, i.e. v1.
+                if "label_version" in data.files:
+                    label_version = int(data["label_version"])
                 if width == FEATURE_COUNT:
                     X = data["X"]
                     y = data["y"].astype(int)
         except Exception as exc:
             log.warning(f"[model] buffer unreadable ({exc}) — setting it aside")
             _set_aside(bp, ".unreadable")
+            return
+
+        if width == FEATURE_COUNT and label_version != _LABEL_VERSION:
+            dest = _set_aside(bp, f".labels-v{label_version}")
+            log.warning(
+                f"[model] buffer was labelled under rule v{label_version}, current is "
+                f"v{_LABEL_VERSION} — set aside as {dest.name if dest else 'n/a'}; "
+                f"starting a fresh buffer"
+            )
+            # Leave an empty current-version buffer behind.  Without it the file
+            # is simply missing, and _seed_data_dir copies the image's bundled
+            # (v1) buffer straight back in on the next start — to be set aside
+            # again, one timestamped copy per restart, until something is saved.
+            try:
+                np.savez(bp, X=np.empty((0, FEATURE_COUNT)), y=np.empty((0,), dtype=int),
+                         label_version=np.array(_LABEL_VERSION))
+            except Exception as exc:
+                log.warning(f"[model] could not write an empty buffer ({exc})")
             return
 
         if width != FEATURE_COUNT:
@@ -453,8 +487,8 @@ class ThermalModel:
             # (lat=100, lon=0) instead of degrees.  They describe a different
             # feature space than anything we serve, so drop them.
             log.warning(
-                f"[model] dropping {dropped} buffer samples with "
-                f"non-geographic lat/lon — pre-fix online-retrain rows"
+                f"[model] dropping {dropped} buffer samples whose lat/lon are "
+                f"not coordinates on Earth — pre-fix grid-index rows"
             )
             X, y = X[keep], y[keep]
         self._buffer_X = list(X)
@@ -472,6 +506,7 @@ class ThermalModel:
                 BUFFER_PATH,
                 X=np.array(self._buffer_X),
                 y=np.array(self._buffer_y),
+                label_version=np.array(_LABEL_VERSION),
             )
         except Exception as exc:
             log.warning(f"[model] could not save buffer ({exc})")

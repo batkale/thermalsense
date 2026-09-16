@@ -684,6 +684,23 @@ async def seed(igc_texts: list[str], buffer_X: list, buffer_y: list,
 # Entry point
 # ---------------------------------------------------------------------------
 async def main() -> None:
+    # Superseded by POST /seed (ThermalModel.seed_from_history), and no longer
+    # safe to point at a live buffer.  This script builds rows without the
+    # observer altitude, so every alt_agl is 0 and the AGL floor discards all of
+    # them; it labels under the v1 pseudo-absence rule; and it fetches a smaller
+    # meteo variable set than serving uses, so its rows disagree with served
+    # features.  The app sets aside any buffer it writes (no label_version), so
+    # the damage would be a silently discarded run rather than a corrupted
+    # model — but that is still hours of rate-limited API calls for nothing.
+    if "--legacy" not in sys.argv:
+        sys.exit(
+            "seed_historical.py is superseded — use POST /seed?days_back=&limit= "
+            "on the running app (ThermalModel.seed_from_history).\n"
+            "Rows from this script lack alt_agl, use the old labels and a "
+            "different meteo set, and are set aside on load. Pass --legacy to "
+            "run it anyway."
+        )
+    sys.argv.remove("--legacy")
     parser = argparse.ArgumentParser(description="Seed ThermalSense training buffer")
     parser.add_argument("--days",          type=int,  default=30,
                         help="Days back to fetch (default 30)")

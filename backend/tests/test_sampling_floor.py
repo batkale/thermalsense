@@ -134,6 +134,64 @@ def test_negative_threshold_is_at_or_below_still_air_sink():
     assert -1.5 <= tm._NEGATIVE_MAX_VARIO <= 0.0
 
 
+# ---------------------------------------------------------------------------
+# Label versioning
+# ---------------------------------------------------------------------------
+
+async def test_buffer_from_the_old_label_rule_is_set_aside(tmp_path, monkeypatch):
+    """
+    v1 and v2 buffers have the same width, so the `.vN` check cannot tell them
+    apart. Mixing them puts two definitions of "no lift" into one fit and one
+    frozen benchmark — which is exactly what the first training node started
+    with, from the bundled repo buffer.
+    """
+    bp = tmp_path / "b.npz"
+    monkeypatch.setattr(tm, "MODEL_PATH", str(tmp_path / "none.json"))
+    monkeypatch.setattr(tm, "BUFFER_PATH", str(bp))
+    X = np.random.default_rng(0).random((50, FEATURE_COUNT))
+    np.savez(bp, X=X, y=np.zeros(50, dtype=int))          # no label_version -> v1
+
+    m = tm.ThermalModel()
+    await m.load()
+
+    assert m._buffer_X == [], "a v1 buffer must not be loaded into a v2 model"
+    assert (tmp_path / "b.npz.labels-v1").exists(), "the old samples must be kept"
+    # An empty v2 buffer is left in place, so a bundled v1 copy is not re-seeded
+    # on every restart.
+    with np.load(bp) as d:
+        assert int(d["label_version"]) == tm._LABEL_VERSION
+        assert d["X"].shape == (0, FEATURE_COUNT)
+
+
+async def test_current_version_buffer_round_trips(tmp_path, monkeypatch):
+    bp = tmp_path / "b.npz"
+    monkeypatch.setattr(tm, "MODEL_PATH", str(tmp_path / "none.json"))
+    monkeypatch.setattr(tm, "BUFFER_PATH", str(bp))
+    X = np.random.default_rng(1).random((30, FEATURE_COUNT))
+    X[:, 0], X[:, 1] = 39.8, 30.1
+
+    m = tm.ThermalModel()
+    m._buffer_X, m._buffer_y = list(X), [0, 1] * 15
+    m._save_buffer()
+
+    m2 = tm.ThermalModel()
+    await m2.load()
+    assert len(m2._buffer_X) == 30
+    assert not (tmp_path / "b.npz.labels-v1").exists()
+
+
+async def test_empty_current_buffer_loads_cleanly(tmp_path, monkeypatch):
+    """The placeholder left after a set-aside must itself load without error."""
+    bp = tmp_path / "b.npz"
+    monkeypatch.setattr(tm, "MODEL_PATH", str(tmp_path / "none.json"))
+    monkeypatch.setattr(tm, "BUFFER_PATH", str(bp))
+    np.savez(bp, X=np.empty((0, FEATURE_COUNT)), y=np.empty((0,), dtype=int),
+             label_version=np.array(tm._LABEL_VERSION))
+    m = tm.ThermalModel()
+    await m.load()
+    assert m._buffer_X == []
+
+
 def test_floor_is_below_normal_soaring_heights():
     """
     A floor set too high would throw away the low saves the map is most useful

@@ -187,3 +187,16 @@ def test_grouped_folds_cover_every_row_exactly_once():
     for _, test in grouped_folds(g, k=5, seed=0):
         seen[test] += 1
     assert seen.tolist() == [1] * len(g)
+
+
+def test_region_of_assigns_turkiye_and_falls_back_to_other():
+    """Türkiye must get its own slice even while nearly empty, so the pooled
+    score cannot quietly stand in for the market the product is built for."""
+    import numpy as np
+    from evaluation.evaluate import region_of
+    X = np.zeros((4, 22))
+    X[0, 0], X[0, 1] = 39.81, 30.11     # İnönü
+    X[1, 0], X[1, 1] = 46.8, 11.2       # Alps
+    X[2, 0], X[2, 1] = 52.0, 10.0       # Germany
+    X[3, 0], X[3, 1] = 35.0, -106.0     # New Mexico
+    assert list(region_of(X)) == ["Türkiye", "Alps", "Germany", "other"]

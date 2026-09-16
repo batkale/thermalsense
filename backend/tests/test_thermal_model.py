@@ -167,7 +167,9 @@ async def test_load_keeps_a_buffer_with_the_right_feature_count(tmp_path, monkey
     buf = tmp_path / "training_buffer.npz"
     X = np.zeros((3, FEATURE_COUNT))
     X[:, 0], X[:, 1] = 51.5, -1.0       # plausible coordinates
-    np.savez(buf, X=X, y=np.array([0, 1, 0]))
+    # Current label version: an unversioned file now reads as v1 and is set
+    # aside, which is a different test (test_sampling_floor.py).
+    np.savez(buf, X=X, y=np.array([0, 1, 0]), label_version=np.array(tm._LABEL_VERSION))
     monkeypatch.setattr(tm, "BUFFER_PATH", str(buf))
     monkeypatch.setattr(tm, "MODEL_PATH", str(tmp_path / "absent.json"))
 
@@ -251,6 +253,25 @@ def test_plausible_coords_rejects_grid_indices():
     X[1, 0], X[1, 1] = 100.0, 0.0      # grid indices — the pre-fix signature
     X[2, 0], X[2, 1] = 47.0, 8.0       # real
     assert list(_plausible_coords(X)) == [True, False, True]
+
+
+def test_plausible_coords_keeps_valid_rows_outside_the_feed_box(monkeypatch):
+    """
+    The feed box is an operational setting that moves with the season. Rows
+    outside it are still real observations; dropping them on load, as the old
+    box-based check did, erased 1,276 valid samples on a Europe-only node and
+    would erase the European ones when the box moves south.
+    """
+    import models.thermal_model as tm
+    monkeypatch.setattr(tm, "LAT_MIN", 34.0, raising=False)
+    monkeypatch.setattr(tm, "LAT_MAX", 60.0, raising=False)
+    monkeypatch.setattr(tm, "LON_MIN", -10.0, raising=False)
+    monkeypatch.setattr(tm, "LON_MAX", 45.0, raising=False)
+    X = np.zeros((3, 21))
+    X[0, 0], X[0, 1] = 35.0, -106.0    # New Mexico — outside the box, valid
+    X[1, 0], X[1, 1] = -33.9, 18.4     # Cape Town — outside the box, valid
+    X[2, 0], X[2, 1] = 100.0, 0.0      # grid index — invalid anywhere
+    assert list(_plausible_coords(X)) == [True, True, False]
 
 
 def test_predict_varies_across_terrain_without_a_model():
