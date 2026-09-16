@@ -653,3 +653,71 @@ body {
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
+
+/* ---- Training status panel ---- */
+/* An operator view layered over the map rather than a route: the app has no
+   router, and the map underneath stays live while the panel is open. */
+.tp-overlay {
+  position: fixed; inset: 0; z-index: 2000;
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 48px 16px; overflow-y: auto;
+  background: rgba(0, 0, 0, 0.45);
+}
+.tp-panel {
+  width: min(560px, 100%);
+  background: var(--bg-elevated);
+  color: var(--text-body);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 18px 18px;
+  box-shadow: var(--shadow-bubble);
+  font-size: 13px;
+}
+.tp-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.tp-header h2 { margin: 0; font-size: 16px; color: var(--text-title); }
+.tp-close {
+  background: none; border: none; cursor: pointer;
+  font-size: 22px; line-height: 1; color: var(--text-muted);
+}
+.tp-close:hover { color: var(--text-title); }
+
+.tp-verdict {
+  padding: 10px 12px; border-radius: 8px; margin-bottom: 10px;
+  background: var(--bg-surface); border-left: 3px solid var(--warn);
+  color: var(--text-primary); line-height: 1.4;
+}
+.tp-verdict.ready { border-left-color: var(--ok); }
+.tp-verdict .tp-bar { margin-top: 8px; }
+
+.tp-callout {
+  padding: 8px 12px; border-radius: 8px; margin-bottom: 10px;
+  background: var(--bg-sunken); color: var(--text-secondary); line-height: 1.4;
+}
+
+.tp-section { border-top: 1px solid var(--border); padding-top: 10px; margin-top: 10px; }
+.tp-section h3 {
+  margin: 0 0 6px; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted);
+}
+.tp-row { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; }
+.tp-label { color: var(--text-secondary); }
+.tp-value { color: var(--text-bright); font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }
+.tp-value.ok   { color: var(--ok); }
+.tp-value.warn { color: var(--warn); }
+.tp-value.bad  { color: var(--danger); }
+.tp-hint, .tp-error { color: var(--text-muted); padding: 4px 0; }
+.tp-error { color: var(--danger); }
+
+.tp-bar { height: 6px; border-radius: 3px; background: var(--bg-sunken); overflow: hidden; }
+.tp-bar-fill { height: 100%; background: var(--accent-strong); transition: width 0.3s; }
+.tp-bar-fill.warn { background: var(--warn); }
+
+.tp-regions { width: 100%; border-collapse: collapse; margin-top: 6px; font-variant-numeric: tabular-nums; }
+.tp-regions th {
+  text-align: left; font-weight: 500; font-size: 11px; color: var(--text-muted);
+  padding: 4px 6px; border-bottom: 1px solid var(--border);
+}
+.tp-regions td { padding: 4px 6px; color: var(--text-primary); }
+.tp-regions th + th, .tp-regions td + td { text-align: right; }
+/* The home market, so it is found at a glance even when its row is all zeros. */
+.tp-regions tr.home td { color: var(--text-title); font-weight: 600; background: var(--bg-surface); }

@@ -27,6 +27,7 @@ export default function InfoPanel({
   showAirborneOnly, onAirborneToggle,
   showOgnHeatmap, onOgnHeatmapToggle,
   onRetrain,
+  onOpenTraining,
 }) {
   const { t, locale } = useLang();
 
@@ -143,6 +144,12 @@ export default function InfoPanel({
       {onRetrain && (
         <button className="btn-secondary" onClick={onRetrain} title={t('retrainTitle')}>
           {t('retrainModel')}
+        </button>
+      )}
+
+      {onOpenTraining && (
+        <button className="btn-secondary" onClick={onOpenTraining}>
+          {t('openTrainingStatus')}
         </button>
       )}
 

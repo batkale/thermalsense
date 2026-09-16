@@ -61,3 +61,13 @@ export async function triggerRetrain() {
   if (!res.ok) throw new Error(`Retrain failed: ${res.statusText}`);
   return res.json(); // { status: 'started' | 'already_running' }
 }
+
+/**
+ * Collection and training health for the operator panel. Read-only; each
+ * section carries its own `error` field instead of failing the whole call.
+ */
+export async function fetchTrainingStatus() {
+  const res = await fetch(`${API_BASE}/training/status`);
+  if (!res.ok) throw new Error(`Training status failed: ${res.statusText}`);
+  return res.json();
+}

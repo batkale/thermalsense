@@ -5,6 +5,7 @@ import WeatherBar        from './components/WeatherBar.jsx';
 import ExportButton      from './components/ExportButton.jsx';
 import SearchBar         from './components/SearchBar.jsx';
 import PinnedGliderCard  from './components/PinnedGliderCard.jsx';
+import TrainingPanel     from './components/TrainingPanel.jsx';
 import { useBackend }    from './hooks/useBackend.js';
 import { triggerRetrain } from './services/api.js';
 import { useLang }        from './i18n/LanguageContext.jsx';
@@ -23,6 +24,12 @@ export default function App() {
   const [showOgnHeatmap,   setShowOgnHeatmap]   = useState(true);
   const [flyTarget, setFlyTarget] = useState(null);
   const [pinnedId, setPinnedId] = useState(null);
+  // Opens straight into the panel with ?panel=training, so a training node can
+  // be bookmarked to the view it is actually watched through.
+  const [showTraining, setShowTraining] = useState(
+    () => new URLSearchParams(window.location.search).get('panel') === 'training'
+  );
+  const closeTraining = useCallback(() => setShowTraining(false), []);
   const lastPinnedRef = useRef(null);
   const locationRef = useRef(null);
 
@@ -126,6 +133,7 @@ export default function App() {
             showOgnHeatmap={showOgnHeatmap}
             onOgnHeatmapToggle={setShowOgnHeatmap}
             onRetrain={CAN_RETRAIN ? handleRetrain : null}
+            onOpenTraining={() => setShowTraining(true)}
           />
 
           <PinnedGliderCard glider={pinnedGlider} onUnpin={() => { setPinnedId(null); lastPinnedRef.current = null; }} />
@@ -158,6 +166,8 @@ export default function App() {
           </div>
         </aside>
       </div>
+
+      {showTraining && <TrainingPanel onClose={closeTraining} />}
     </div>
   );
 }

@@ -363,6 +363,74 @@ class ThermalModel:
         self._buffer_X: list[np.ndarray] = []
         self._buffer_y: list[int] = []
         self._skipped_fits = 0
+        # Outcome of the most recent fit_and_gate call, for /training/status.
+        # The log already says this, but a training node is watched through a
+        # panel, not by tailing a container — and "why has the model not changed
+        # in three days" has one answer that should be on screen.
+        self.last_fit: dict | None = None
+        self._summary_cache: tuple[int, dict] | None = None
+
+    def _note_fit(self, outcome: str, **detail) -> None:
+        self.last_fit = {
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "outcome": outcome,
+            **detail,
+        }
+
+    def training_summary(self) -> dict:
+        """
+        What the buffer holds, sliced the way decisions are made.
+
+        Cached on buffer length: the benchmark grouping hashes every group, and a
+        status panel polling every 30 s should not redo that on an unchanged
+        buffer.  Runs in a worker thread from the endpoint.
+        """
+        from evaluation.regions import NAMES, region_of
+
+        n = len(self._buffer_X)
+        if self._summary_cache and self._summary_cache[0] == n:
+            return self._summary_cache[1]
+
+        if n == 0:
+            out = {"rows": 0, "positives": 0, "days": 0, "label_version": _LABEL_VERSION,
+                   "usable_rows": 0, "benchmark_groups": 0,
+                   "benchmark_groups_needed": _MIN_BENCH_GROUPS,
+                   "regions": {name: {"rows": 0, "positives": 0} for name in NAMES}}
+            self._summary_cache = (n, out)
+            return out
+
+        # Snapshot first. This runs in a worker thread while retrain() appends on
+        # the event loop, so the two lists can be one row apart between reads;
+        # trimming to the shorter keeps rows and labels aligned.
+        bx, by = list(self._buffer_X), list(self._buffer_y)
+        k = min(len(bx), len(by))
+        X = np.asarray(bx[:k])
+        y = np.asarray(by[:k], dtype=int)
+        days = len(np.unique(X[:, [_COL_DOY_SIN, _COL_DOY_COS]], axis=0))
+
+        # Same population fit_and_gate trains on, so the group count shown is
+        # the one the gate will actually see.
+        keep = X[:, 21] >= _MIN_SAMPLE_AGL
+        Xu, yu = X[keep], y[keep]
+        groups = 0
+        if len(yu):
+            _, _, (_, yb, gb) = bench_split(Xu, yu)
+            if len(yb):
+                groups = grouped_auc(np.zeros(len(yb)), yb, gb)["groups"]
+
+        reg = region_of(Xu)
+        regions = {name: {"rows": int((reg == name).sum()),
+                          "positives": int(yu[reg == name].sum())} for name in NAMES}
+        out = {
+            "rows": int(k), "positives": int(y.sum()), "days": int(days),
+            "label_version": _LABEL_VERSION,
+            "usable_rows": int(len(yu)),
+            "benchmark_groups": int(groups),
+            "benchmark_groups_needed": _MIN_BENCH_GROUPS,
+            "regions": regions,
+        }
+        self._summary_cache = (n, out)
+        return out
 
     def _saved_bench_score(self) -> float | None:
         """
@@ -672,6 +740,7 @@ class ThermalModel:
         n = len(self._buffer_X)
         if n < _MIN_SAMPLES:
             log.info(f"[model] buffer {n}/{_MIN_SAMPLES} samples — skipping fit")
+            self._note_fit("too_few_samples", samples=n, need=_MIN_SAMPLES)
             return
 
         X = np.array(self._buffer_X)
@@ -692,6 +761,7 @@ class ThermalModel:
             if n < _MIN_SAMPLES:
                 log.info(f"[model] {n}/{_MIN_SAMPLES} samples after the AGL floor — "
                          f"skipping fit")
+                self._note_fit("too_few_samples", samples=n, need=_MIN_SAMPLES)
                 return
 
         pos = int(y.sum())
@@ -704,6 +774,8 @@ class ThermalModel:
                 f"[model] only {pos} positives in {n} samples (need {_MIN_POSITIVES}) — "
                 f"skipping fit and keeping the existing model"
             )
+            self._note_fit("too_few_positives", samples=n, positives=pos,
+                           need=_MIN_POSITIVES)
             return
 
         # Frozen, group-disjoint three-way split (see evaluation/holdout.py).
@@ -759,6 +831,8 @@ class ThermalModel:
                     f"(need {_MIN_BENCH_GROUPS}) — cannot verify this fit, "
                     f"keeping the model already in service"
                 )
+                self._note_fit("benchmark_too_small", samples=n, positives=pos,
+                               groups=bench["groups"], need=_MIN_BENCH_GROUPS)
                 self._save_buffer()
                 return
             clf.get_booster().set_attr(**{_BENCH_ATTR: None})
@@ -767,11 +841,15 @@ class ThermalModel:
                 f"({bench['groups']}/{_MIN_BENCH_GROUPS} groups) — accepting an "
                 f"unverified fit on {len(yf)} samples"
             )
+            self._note_fit("accepted_unverified", samples=n, positives=pos,
+                           groups=bench["groups"], need=_MIN_BENCH_GROUPS)
         else:
             challenger = self._score_served(clf, Xb)
             score = grouped_auc(challenger, yb, gb)["micro"]
             if not np.isfinite(score):
                 log.warning("[model] benchmark score is not finite — discarding this fit")
+                self._note_fit("score_not_finite", samples=n, positives=pos,
+                               groups=bench["groups"])
                 return
 
             baseline = self._saved_bench_score()
@@ -795,6 +873,14 @@ class ThermalModel:
                             f"{delta['groups']} groups — reliably worse, keeping the "
                             f"serving model [{self._skipped_fits}/{_MAX_CONSECUTIVE_SKIPS}]"
                         )
+                        self._note_fit(
+                            "rejected", samples=n, positives=pos,
+                            groups=bench["groups"], score=round(score, 4),
+                            serving=round(baseline, 4),
+                            delta=[round(delta["lo"], 4), round(delta["point"], 4),
+                                   round(delta["hi"], 4)],
+                            skips=self._skipped_fits, max_skips=_MAX_CONSECUTIVE_SKIPS,
+                        )
                         self._save_buffer()   # samples are still worth keeping
                         return
                     # Re-baseline rather than stay frozen on a bar we can no
@@ -804,7 +890,12 @@ class ThermalModel:
                         f"accepting benchmark {score:.3f} and re-baselining "
                         f"from {baseline:.3f}"
                     )
+            rebaselined = self._skipped_fits >= _MAX_CONSECUTIVE_SKIPS
             self._skipped_fits = 0
+            self._note_fit("rebaselined" if rebaselined else "accepted",
+                           samples=n, positives=pos, groups=bench["groups"],
+                           score=round(score, 4),
+                           serving=None if baseline is None else round(baseline, 4))
             clf.get_booster().set_attr(**{_BENCH_ATTR: f"{score:.6f}"})
             log.info(
                 f"[model] retrained on {len(yf)} samples ({fit_pos} positives), "

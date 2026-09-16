@@ -138,11 +138,40 @@ def _get_lock() -> asyncio.Semaphore:
     return _api_lock
 
 
+# Real upstream requests made today (UTC), cache hits excluded.  OpenTopoData
+# allows 1,000 a day, and one 10,000-beacon /seed spent 2,197 of them, so the
+# number worth watching is this one, not the cache size.  In memory only: it
+# resets on restart, which undercounts a day with a restart in it — acceptable
+# for a gauge, not for enforcement.
+_usage = {"day": "", "requests": 0, "rate_limited": 0}
+DAILY_QUOTA = 1000
+
+
+def _count(status: int) -> None:
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).date().isoformat()
+    if _usage["day"] != today:
+        _usage.update(day=today, requests=0, rate_limited=0)
+    _usage["requests"] += 1
+    if status == 429:
+        _usage["rate_limited"] += 1
+
+
+def api_usage() -> dict:
+    """Today's upstream request count against the published daily quota."""
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).date().isoformat()
+    if _usage["day"] != today:
+        return {"day": today, "requests": 0, "rate_limited": 0, "quota": DAILY_QUOTA}
+    return {**_usage, "quota": DAILY_QUOTA}
+
+
 async def _get_with_retry(client: httpx.AsyncClient, url: str, max_retries: int = 3) -> httpx.Response:
     """GET with fixed back-off on 429 (max 3 retries, 2 s each = 6 s total)."""
     for attempt in range(max_retries):
         async with _get_lock():
             r = await client.get(url)
+        _count(r.status_code)
         if r.status_code != 429:
             return r
         log.warning(f"[terrain] 429 rate-limited — retrying in 2s (attempt {attempt + 1}/{max_retries})")

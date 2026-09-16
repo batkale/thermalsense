@@ -259,6 +259,82 @@ async def healthz():
     """Liveness probe for the host's health checks."""
     return {"status": "ok", "model_loaded": model.is_loaded}
 
+
+def _beacon_stats() -> dict:
+    """Beacons in the last hour and the hot DB's span. Worker thread only."""
+    import sqlite3
+    from datetime import datetime, timedelta, timezone
+    if not DB_PATH.exists():
+        return {"last_hour": 0, "oldest": None, "newest": None}
+    since = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    with sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=5) as con:
+        # idx_ts serves all three; no full scan on a multi-million-row table.
+        last_hour = con.execute("SELECT COUNT(*) FROM beacons WHERE ts >= ?", (since,)).fetchone()[0]
+        oldest = con.execute("SELECT MIN(ts) FROM beacons").fetchone()[0]
+        newest = con.execute("SELECT MAX(ts) FROM beacons").fetchone()[0]
+    return {"last_hour": last_hour, "oldest": oldest, "newest": newest}
+
+
+def _prior_stats() -> dict:
+    import sqlite3
+    if not DB_PATH.exists():
+        return {"buckets": 0, "first_hour": None, "last_hour": None}
+    try:
+        with sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=5) as con:
+            n, lo, hi = con.execute(
+                "SELECT COUNT(*), MIN(hour), MAX(hour) FROM prior_cells").fetchone()
+        return {"buckets": n, "first_hour": lo, "last_hour": hi}
+    except sqlite3.Error:
+        return {"buckets": 0, "first_hour": None, "last_hour": None}
+
+
+@app.get("/training/status")
+async def training_status():
+    """
+    Is the node collecting, and is the model allowed to learn yet?
+
+    Read-only and cheap by design: it is polled by the training panel. Every
+    section is independent — one failing (say, the archive volume missing) is
+    reported inside that section instead of failing the whole response, because
+    a status page that goes blank when something breaks is useless exactly
+    when it is needed.
+    """
+    from data import archive, ogn_client
+
+    async def section(fn):
+        try:
+            return await asyncio.to_thread(fn)
+        except Exception as exc:
+            return {"error": f"{type(exc).__name__}: {exc}"}
+
+    try:
+        gliders_in_view = len(await fetch_ogn_gliders())
+    except Exception:
+        gliders_in_view = None
+
+    return {
+        "feed": {
+            "connected": ogn_client._active_socket is not None,
+            "filter": ogn_client._active_filter or "worldwide",
+            "gliders_in_view": gliders_in_view,
+            "beacons": await section(_beacon_stats),
+            "retention_days": BEACON_RETENTION_DAYS,
+        },
+        "model": {
+            "loaded": model.is_loaded,
+            "benchmark_score": model._saved_bench_score(),
+            "last_fit": model.last_fit,
+            "retrain_interval_s": UPDATE_INTERVAL,
+        },
+        "buffer": await section(model.training_summary),
+        "archive": await section(
+            lambda: archive.stats(ARCHIVE_DIR) if archive.available()
+            else {"error": "pyarrow not installed"}),
+        "climatology": await section(_prior_stats),
+        "terrain_api": terrain_client.api_usage(),
+        "disk_free_gb": round(await asyncio.to_thread(_free_disk_gb), 1),
+    }
+
 def _apply_ogn_fusion(
     heatmap: list[float],
     gliders: list[dict],

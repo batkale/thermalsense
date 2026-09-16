@@ -22,7 +22,7 @@ All backend commands run from `backend/`. A Windows venv exists at
 `backend/.venv` with every dependency installed — prefer it.
 
 ```bash
-# Tests — 271 tests, ~5 s
+# Tests — 278 tests, ~5 s
 cd backend && ./.venv/Scripts/python.exe -m pytest tests/ -q
 
 # Single test file

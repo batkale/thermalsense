@@ -26,6 +26,7 @@ from config import BUFFER_PATH, DATA_DIR
 from evaluation.holdout import (decision_ids, earlystop_mask, group_ids,
                                 grouped_folds, split)
 from evaluation.metrics import CHANCE, bootstrap_ci, grouped_auc, paired_delta_ci
+from evaluation.regions import NAMES as REGION_NAMES, region_of
 from pipeline.feature_engineering import FEATURE_COUNT
 from pipeline.solar import cos_incidence, sun_position
 
@@ -394,33 +395,9 @@ def main() -> int:
     return 0
 
 
-# Named boxes (lat_min, lat_max, lon_min, lon_max), checked in order; a row goes
-# to the first that contains it.  Türkiye is listed on purpose even while it is
-# nearly empty: the pooled score is dominated by Germany (51% of the feed) and
-# the Alps (26%) and says nothing about the market this product is for, so its
-# own row has to exist — and has to say "not measurable" out loud rather than be
-# silently absorbed into the average.
-REGIONS = [
-    ("Türkiye",  35.8, 42.2,  25.6, 44.9),
-    ("Alps",     44.0, 48.5,   5.0, 16.5),
-    ("Germany",  47.2, 55.0,   5.8, 15.1),
-    ("Iberia",   36.0, 43.8,  -9.5,  3.3),
-]
-
 # Below this many mixed-label groups a regional score is reported as not
 # measurable.  Same threshold the live gate uses before it trusts a benchmark.
 _MIN_REGION_GROUPS = 30
-
-
-def region_of(X: np.ndarray) -> np.ndarray:
-    lat, lon = X[:, _COL_LAT], X[:, _COL_LON]
-    out = np.full(len(X), "other", dtype=object)
-    free = np.ones(len(X), dtype=bool)
-    for name, la0, la1, lo0, lo1 in REGIONS:
-        m = free & (lat >= la0) & (lat <= la1) & (lon >= lo0) & (lon <= lo1)
-        out[m] = name
-        free &= ~m
-    return out
 
 
 def _report_regions(Xe, ye, ge, served: dict, n_boot: int) -> None:
@@ -433,7 +410,7 @@ def _report_regions(Xe, ye, ge, served: dict, n_boot: int) -> None:
     """
     reg = region_of(Xe)
     terrain = _terrain_multiplier(Xe)
-    names = [r[0] for r in REGIONS] + ["other"]
+    names = REGION_NAMES
     print("\nby region (served model vs terrain_multiplier)")
     print(f"{'region':10s} {'rows':>6s} {'pos':>5s} {'groups':>6s}   "
           + "   ".join(f"{v:>22s}" for v in served) + "   terrain   delta vs terrain")
