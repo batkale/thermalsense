@@ -83,6 +83,16 @@ MODEL_PATH        = str(DATA_DIR / "models" / "thermal_xgb.json")
 BUFFER_PATH       = str(DATA_DIR / "models" / "training_buffer.npz")
 DB_PATH           = DATA_DIR / "data" / "ogn_history.db"
 
+# Cold archive: every completed day of the beacon feed, as date-partitioned
+# Parquet, kept forever.  DB_PATH stays a two-day hot cache — that limit is a
+# RAM and iowait constraint, not a data policy, and conflating the two is why
+# the project currently has no climatology and no seasonal coverage.  Measured
+# on this feed: ~10 bytes/row here against ~244 in SQLite, so three months of
+# the worldwide feed is ~7 GB rather than ~169 GB.  Mount it on a volume that
+# is not the container's writable layer.
+ARCHIVE_DIR       = Path(os.getenv("THERMALSENSE_ARCHIVE_DIR",
+                                   DATA_DIR / "archive" / "beacons")).resolve()
+
 # How long beacons are kept before the retention job deletes them.  Without a cap
 # the DB grows without bound.
 #

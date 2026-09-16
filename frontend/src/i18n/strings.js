@@ -49,6 +49,10 @@ const STRINGS = {
     thermalBase:        'Termal taban',
     thermalPeakTip:     'Haritadaki en yüksek termal olasılığı — modelin bu '
                       + 'alandaki en iyi hücreye verdiği güven.',
+    noInsolation:       'Güneş ışınımı yok — termal oluşamaz',
+    noInsolationTip:    'Yüzey ısınması termal oluşumu için gereken eşiğin '
+                      + 'altında. Model bu koşulda hiç eğitilmedi, o yüzden '
+                      + 'tahmin üretmek yerine üretmediğini söylüyor.',
     thermalBaseTip:     'Termallerin tepe yaptığı tahmini yükseklik. Bunun '
                       + 'üzerinde tırmanış beklemeyin.',
     capeTip:            'Konvektif potansiyel enerji. Yüksek değer güçlü '
@@ -146,6 +150,10 @@ const STRINGS = {
     thermalBase:        'Thermal base',
     thermalPeakTip:     'The highest thermal probability on the map — the model '
                       + 'confidence for the best cell in this area.',
+    noInsolation:       'No insolation — thermals cannot form',
+    noInsolationTip:    'Surface heating is below the level any thermal needs. '
+                      + 'The model was never trained in this regime, so it says '
+                      + 'it has no forecast rather than inventing one.',
     thermalBaseTip:     'Estimated height where thermals top out. Expect no '
                       + 'climb above it.',
     capeTip:            'Convective available potential energy. Higher means '

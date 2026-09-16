@@ -144,6 +144,62 @@ _THERMAL_BASE_MARGIN_M = 300
 # in one night) and drowns out the daytime signal.
 _MIN_SOLAR_GHI = 50.0     # W/m2 — roughly deep twilight
 
+# An aircraft this close to the ground is not evidence about lift over it: it is
+# on the field, on the roll, or on approach.  Such a row can only ever be a
+# negative, and it is a negative for a reason that has nothing to do with the
+# terrain underneath.
+#
+# Without this floor the buffer was 18% rows at *exactly* 0 m AGL, every one of
+# them negative, and the model learned the wrong thing: measured on the frozen
+# benchmark, alt_agl alone scored 0.631 within-group against 0.664 for the whole
+# 22-column model, and dropping alt_agl collapsed the model to 0.530 — i.e. the
+# score was almost entirely "aircraft on the ground are not thermalling".  True,
+# and useless, because it says nothing about *where* the lift is.
+#
+# 200 m is deliberately mild.  It removes 38% of rows while costing 4 of 249
+# positives, and leaves the frozen benchmark with 31 mixed-label groups — one
+# above _MIN_BENCH_GROUPS, so the gate keeps working.  A tighter band (500-2500 m)
+# or per-positive altitude matching removes the confound more completely but
+# starves the benchmark to 28-30 groups, which switches the gate off; revisit
+# both once the buffer holds more days.
+_MIN_SAMPLE_AGL = 200.0   # metres above ground level
+
+# Vario at or below which a straight-flying glider is taken as evidence that this
+# cell held no usable lift at this height and time.
+#
+# The old rule made a negative out of every aircraft that was not confirmed
+# thermalling, which is a *pseudo*-absence: it lumps in the glider dolphining
+# through lift without circling and the one running a ridge, both of which are
+# in rising air.  Training on those as negatives teaches the model that lift is
+# absent exactly where it is present.
+#
+# A glider's still-air sink is roughly -0.6 to -1.0 m/s, so a straight aircraft
+# reading below -0.5 is in air that is neutral at best.  That is a *true*
+# absence — the observation the presence-only literature calls the expensive,
+# missing half of the data, and which this project can read straight off its own
+# beacon feed.  Everything between the two thresholds is ambiguous and is now
+# discarded rather than mislabelled.
+_NEGATIVE_MAX_VARIO = -0.5   # m/s
+
+# Circling *and* climbing faster than this is a confirmed thermal.
+_POSITIVE_MIN_VARIO = 1.5    # m/s
+
+
+def _label_for(circling: bool, vario: float) -> int | None:
+    """
+    1 = confirmed thermal, 0 = confirmed absence of lift, None = ambiguous.
+
+    Returning None rather than 0 for the middle band is the whole point: it is
+    the difference between a pseudo-absence and a real one.  Both sampling paths
+    go through here so the live loop and /seed cannot drift apart — they had
+    already duplicated the old expression once each.
+    """
+    if circling and vario > _POSITIVE_MIN_VARIO:
+        return 1
+    if not circling and vario < _NEGATIVE_MAX_VARIO:
+        return 0
+    return None
+
 # A fit needs enough of the positive class to be worth anything.  Below this the
 # AUC comes back nan and the resulting model predicts ~0 everywhere; saving it
 # would replace a working model with a degenerate one.
@@ -163,6 +219,69 @@ _MC_SAMPLES  = 50
 # and keeps the buffer in the tens of MB.  It also bounds how stale the oldest
 # training data can get, which the chronological growth otherwise leaves open.
 _MAX_BUFFER  = 200_000
+
+
+# Columns holding the cyclic day-of-year encoding.  Every row collected on one
+# day carries the identical pair, so they group a buffer by day exactly, with no
+# decoding and no rounding error.
+_COL_DOY_SIN, _COL_DOY_COS = 17, 18
+
+
+def _evict_to_cap(buf_X: list, buf_y: list) -> tuple[list, list, str]:
+    """
+    Trim the buffer to _MAX_BUFFER while preserving day coverage and positives.
+
+    The cap itself is not negotiable — _buffer_X is a Python list of row arrays
+    held in RAM on an 896 MB box.  What was wrong is *which* rows it dropped.
+    Keeping the newest N is a chronological window, so a buffer that fills up
+    holds one recent stretch of weather and nothing else, and the model can only
+    ever know the season it is standing in.  Measured on this project's data,
+    subsampling within a single 5-day stretch moves the score by less than its
+    own noise (0.635 at 25% of groups against 0.664 at 100%): volume inside one
+    regime buys nothing, so spending the whole cap on one is pure waste.
+
+    So the cap is spent on breadth instead.  Every distinct day gets an equal
+    quota; inside a day positives are kept first — they are 4% of the feed and
+    each one cost two rate-limited API calls — and negatives fill the rest,
+    newest first.  Chronological order is preserved in the result because other
+    code reads the tail as "most recent".
+
+    The cold archive holds everything regardless; this only decides what stays
+    resident for the fit.
+    """
+    n = len(buf_X)
+    if n <= _MAX_BUFFER:
+        return buf_X, buf_y, ""
+
+    X = np.asarray(buf_X)
+    y = np.asarray(buf_y)
+    # Exact grouping: rows from one day share the encoded pair bit for bit.
+    _, day = np.unique(X[:, [_COL_DOY_SIN, _COL_DOY_COS]], axis=0,
+                       return_inverse=True)
+    n_days = int(day.max()) + 1
+    quota = max(1, _MAX_BUFFER // n_days)
+
+    keep = np.zeros(n, dtype=bool)
+    for d in range(n_days):
+        idx = np.flatnonzero(day == d)
+        pos = idx[y[idx] == 1]
+        neg = idx[y[idx] == 0]
+        keep[pos[-quota:]] = True                  # positives first
+        room = quota - min(len(pos), quota)
+        if room > 0:
+            keep[neg[-room:]] = True               # then the newest negatives
+
+    # An unequal day mix can leave the total either side of the cap: days with
+    # few rows do not use their quota, days that are all positives can exceed
+    # it.  Settle it chronologically, which is the honest tie-break once every
+    # day is already represented.
+    chosen = np.flatnonzero(keep)
+    if len(chosen) > _MAX_BUFFER:
+        chosen = chosen[-_MAX_BUFFER:]
+
+    note = (f"{n - len(chosen)} rows evicted across {n_days} days "
+            f"(quota {quota}/day, positives kept first)")
+    return [buf_X[i] for i in chosen], [buf_y[i] for i in chosen], note
 
 
 def _for_serving(clf: "xgb.XGBClassifier") -> "xgb.XGBClassifier":
@@ -388,7 +507,7 @@ class ThermalModel:
             return
         # Cap at 20 to avoid hammering APIs per retrain cycle.
         candidates = soaring[:20]
-        above_base = dark = 0
+        above_base = dark = on_ground = ambiguous = 0
         # Ids already sampled this cycle.  A glider can be both a candidate and
         # a co-occupant of another candidate's grid; sampling it twice would
         # duplicate a row and let the same aircraft sit on both sides of the
@@ -447,12 +566,24 @@ class ThermalModel:
                     # every cell, so it is wrong for anyone else.  Recompute against
                     # this aircraft's own altitude and the elevation under its cell.
                     row[21] = max(0.0, float(o["alt"]) - float(row[2]))
+                    # Too low to say anything about lift over this ground — see
+                    # _MIN_SAMPLE_AGL.  Rejected before the thermal-base test
+                    # because it is the cheaper check and the two are disjoint.
+                    if row[21] < _MIN_SAMPLE_AGL:
+                        on_ground += 1
+                        sampled.add(o["id"])   # judged and rejected; do not retry
+                        continue
                     if _above_thermal_base(o["alt"], row[2], meteo["cape_base"]):
                         above_base += 1
                         sampled.add(o["id"])   # judged and rejected; do not retry
                         continue
+                    label = _label_for(bool(o["circling"]), float(o["vario"]))
+                    if label is None:
+                        ambiguous += 1
+                        sampled.add(o["id"])   # judged and rejected; do not retry
+                        continue
                     self._buffer_X.append(row)
-                    self._buffer_y.append(int(o["circling"] and o["vario"] > 1.5))
+                    self._buffer_y.append(label)
                     sampled.add(o["id"])
                     if o["id"] != g["id"]:
                         offset_samples += 1
@@ -460,6 +591,12 @@ class ThermalModel:
             except Exception as exc:
                 log.warning(f"[model] sample skipped: {exc}")
 
+        if on_ground:
+            log.info(f"[model] {on_ground}/{considered} dropped — below "
+                     f"{_MIN_SAMPLE_AGL:.0f} m AGL")
+        if ambiguous:
+            log.info(f"[model] {ambiguous}/{considered} dropped — neither a "
+                     f"confirmed climb nor confirmed sink")
         if above_base:
             log.info(f"[model] {above_base}/{considered} dropped — above thermal base")
         if dark:
@@ -468,10 +605,11 @@ class ThermalModel:
             log.info(f"[model] {considered - offset_samples} centre + {offset_samples} off-centre "
                      f"samples from {len(candidates)} grids (no extra API calls)")
 
-        # Rolling window
-        if len(self._buffer_X) > _MAX_BUFFER:
-            self._buffer_X = self._buffer_X[-_MAX_BUFFER:]
-            self._buffer_y = self._buffer_y[-_MAX_BUFFER:]
+        # Cap the resident buffer, spending it on day coverage rather than recency
+        self._buffer_X, self._buffer_y, note = _evict_to_cap(
+            self._buffer_X, self._buffer_y)
+        if note:
+            log.info(f"[model] {note}")
 
         # Persist before the fit-threshold check.  Collecting a sample costs two
         # rate-limited API calls, so losing a partial buffer to a restart throws
@@ -503,6 +641,24 @@ class ThermalModel:
 
         X = np.array(self._buffer_X)
         y = np.array(self._buffer_y)
+
+        # Apply the ground floor here as well as at collection.  Buffers written
+        # before _MIN_SAMPLE_AGL existed are full of the rows it excludes, and a
+        # rebuild costs two rate-limited API calls per sample — far too expensive
+        # to demand before the fix takes effect.  Filtering at fit time cleans an
+        # old buffer on the next cycle and costs one boolean mask.  Collection
+        # still drops them so they stop consuming the rolling window.
+        keep = X[:, 21] >= _MIN_SAMPLE_AGL
+        if not keep.all():
+            log.info(f"[model] {int((~keep).sum())}/{len(y)} buffer rows below "
+                     f"{_MIN_SAMPLE_AGL:.0f} m AGL excluded from this fit")
+            X, y = X[keep], y[keep]
+            n = len(y)
+            if n < _MIN_SAMPLES:
+                log.info(f"[model] {n}/{_MIN_SAMPLES} samples after the AGL floor — "
+                         f"skipping fit")
+                return
+
         pos = int(y.sum())
 
         # Refuse to fit on a buffer with almost no positives.  XGBoost will happily
@@ -676,13 +832,21 @@ class ThermalModel:
         # query just matches fewer rows and the seed reports success on a short
         # sample.  Clamp it and say so, rather than seeding on history that was
         # purged.  None means "whatever the window still holds".
+        # The hot DB is a cache, not the record.  Anything past its window is
+        # served from the cold archive, so days_back is only clamped when there
+        # is no archive to reach into — which is what made a rebuild unable to
+        # see more than one weather regime.
+        from data import archive as _archive
+        from config import ARCHIVE_DIR
+        archive_days = _archive.archived_days(ARCHIVE_DIR) if _archive.available() else set()
+
         if days_back is None:
             days_back = BEACON_RETENTION_DAYS
-        elif days_back > BEACON_RETENTION_DAYS:
+        elif days_back > BEACON_RETENTION_DAYS and not archive_days:
             log.warning(
                 f"[seed] days_back={days_back:g} exceeds the "
-                f"{BEACON_RETENTION_DAYS:g}-day retention window — clamped; "
-                f"beacons older than that were already purged"
+                f"{BEACON_RETENTION_DAYS:g}-day retention window and no archive "
+                f"is present — clamped; older beacons were already purged"
             )
             days_back = BEACON_RETENTION_DAYS
 
@@ -697,7 +861,16 @@ class ThermalModel:
         # an aerotow was invisible and its climb looked exactly like a thermal.
         placeholders = ",".join("?" * len(SOARING_AC_TYPES))
         soaring_ids  = tuple(sorted(SOARING_AC_TYPES))
-        where = f"ts >= ? AND ac_type IN ({placeholders}) AND under_tow = 0"
+        # Select only beacons _label_for can actually label.  Sampling uniformly
+        # and discarding the ambiguous ones afterwards would spend the rate-limited
+        # terrain and meteo budget on rows that never reach the buffer — and the
+        # ambiguous band is the majority of the feed, so most of the budget.
+        # The thresholds come from the constants so this cannot drift away from
+        # the labelling rule it is meant to mirror.
+        labelable = (f"((circling = 1 AND vario > {_POSITIVE_MIN_VARIO}) OR "
+                     f"(circling = 0 AND vario < {_NEGATIVE_MAX_VARIO}))")
+        where = (f"ts >= ? AND ac_type IN ({placeholders}) AND under_tow = 0 "
+                 f"AND {labelable}")
 
         with sqlite3.connect(db_path) as con:
             cols = {r[1] for r in con.execute("PRAGMA table_info(beacons)")}
@@ -736,6 +909,41 @@ class ThermalModel:
                 (cutoff, *soaring_ids, sample_rate, limit),
             ).fetchall()
 
+        # Days the archive holds that the hot DB no longer does.  The boundary
+        # comes from what the DB *actually* still holds, not from
+        # BEACON_RETENTION_DAYS: the two agree only while the purge is keeping
+        # up, and when it is not — a failed export, an app that was down, a
+        # fresh restore — every overlapping day would be read twice and land in
+        # the buffer twice.  Measured once: a DB holding both days the archive
+        # held turned a 10,000-row seed into 20,000 rows of half-duplicates.
+        #
+        # Requested and archived days are also intersected rather than assumed
+        # contiguous: a gap from a failed export must not silently become a
+        # claim of coverage.
+        want_from = (datetime.now(timezone.utc) - timedelta(days=days_back)).date()
+        hot_first = None
+        try:
+            with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=30) as con:
+                first = con.execute("SELECT MIN(substr(ts, 1, 10)) FROM beacons").fetchone()[0]
+                if first:
+                    hot_first = datetime.fromisoformat(first).date()
+        except Exception as exc:
+            log.warning(f"[seed] could not read the hot DB's oldest day ({exc}) — "
+                        f"skipping the archive to avoid double-counting")
+        older = sorted(d for d in archive_days
+                       if hot_first is not None and want_from <= d < hot_first)
+        if older:
+            try:
+                cold = _archive.training_rows(
+                    ARCHIVE_DIR, older[0], older[-1], sorted(SOARING_AC_TYPES),
+                    _POSITIVE_MIN_VARIO, _NEGATIVE_MAX_VARIO, limit,
+                )
+                log.info(f"[seed] archive contributed {len(cold):,} rows over "
+                         f"{len(older)} day(s) {older[0]}..{older[-1]}")
+                rows = list(rows) + cold
+            except Exception as exc:
+                log.warning(f"[seed] archive read failed, using hot DB only: {exc}")
+
         if not rows:
             return {"rows_scanned": 0, "added": 0, "buffer_total": len(self._buffer_X)}
 
@@ -751,7 +959,8 @@ class ThermalModel:
 
         log.info(f"[seed] {len(rows)} beacons → {len(buckets)} meteo buckets")
 
-        added = errors = skipped_no_meteo = above_base = dark = 0
+        added = errors = skipped_no_meteo = above_base = dark = on_ground = 0
+        ambiguous = 0
         done_buckets = 0
 
         for (lat_b, lon_b, date_str, hour), beacons in buckets.items():
@@ -801,10 +1010,19 @@ class ThermalModel:
                     idx = _grid_index(lat, lon, lat_bounds, lon_bounds, elev.shape)
                     if idx is None:
                         continue
+                    # Same ground floor the live path applies — see
+                    # _MIN_SAMPLE_AGL.  A backfill that skipped it would refill
+                    # the buffer with exactly the rows the live path now drops.
+                    if feat[idx, 21] < _MIN_SAMPLE_AGL:
+                        on_ground += 1
+                        continue
                     if _above_thermal_base(alt, feat[idx, 2], meteo["cape_base"]):
                         above_base += 1
                         continue
-                    label  = int(circling and vario > 1.5)
+                    label = _label_for(bool(circling), float(vario))
+                    if label is None:
+                        ambiguous += 1
+                        continue
                     # .copy() — see retrain(); a view here retains the whole matrix
                     self._buffer_X.append(feat[idx].copy())
                     self._buffer_y.append(label)
@@ -815,10 +1033,13 @@ class ThermalModel:
 
             await asyncio.sleep(0.3)  # polite pacing for the Open-Meteo archive API
 
-        # Rolling window trim
-        if len(self._buffer_X) > _MAX_BUFFER:
-            self._buffer_X = self._buffer_X[-_MAX_BUFFER:]
-            self._buffer_y = self._buffer_y[-_MAX_BUFFER:]
+        # Same day-stratified eviction as the live path — a /seed rebuild is
+        # exactly the case where one long stretch could otherwise crowd out
+        # every other day the archive still holds.
+        self._buffer_X, self._buffer_y, note = _evict_to_cap(
+            self._buffer_X, self._buffer_y)
+        if note:
+            log.info(f"[seed] {note}")
 
         if added > 0:
             self._save_buffer()
@@ -831,6 +1052,8 @@ class ThermalModel:
             "skipped_no_meteo":     skipped_no_meteo,
             "skipped_above_base":   above_base,
             "skipped_dark":         dark,
+            "skipped_on_ground":    on_ground,
+            "skipped_ambiguous":    ambiguous,
             "buffer_total":     len(self._buffer_X),
         }
         log.info(f"[seed] complete: {result}")

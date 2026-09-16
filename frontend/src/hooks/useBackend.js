@@ -55,6 +55,10 @@ export function useBackend(pinnedId = null) {
   const [gliders,     setGliders]     = useState([]);
   const [weather,     setWeather]     = useState(null);
   const [predictAlt,  setPredictAlt]  = useState(null);
+  // Backend says surface heating is too low for any thermal, so the zeroed
+  // heatmap is a stated absence rather than a prediction. Defaults to false so
+  // a backend too old to send the flag behaves exactly as before.
+  const [noInsolation, setNoInsolation] = useState(false);
   const [loading,     setLoading]     = useState(false);
   const [error,       setError]       = useState(null);
   // Last direct fetch of the followed glider — the copy used only when the
@@ -145,6 +149,7 @@ export function useBackend(pinnedId = null) {
           ? { amsl: data.alt_amsl, agl: data.alt_agl, source: data.alt_source }
           : null
       );
+      setNoInsolation(Boolean(data.no_insolation));
       setWeather(data.weather);
     } catch (e) {
       setError(e.message);
@@ -259,6 +264,6 @@ export function useBackend(pinnedId = null) {
   const activeThermals = useMemo(() => clusterCirclingGliders(gliders), [gliders]);
 
   return { heatmap, gridMeta, gliders, activeThermals, weather, predictAlt,
-           loading, error, pinnedGlider,
+           noInsolation, loading, error, pinnedGlider,
            predict, setViewport, seedTrack, gliderPathsRef };
 }

@@ -128,10 +128,19 @@ def flush_beacons() -> None:
         _pending.clear()
 
 
-def purge_old_beacons(days: float | None = None, chunk: int = 50_000) -> int:
+def purge_old_beacons(days: float | None = None, chunk: int = 50_000,
+                      emergency: bool = False) -> int:
     """
     Delete beacons older than `days` (default BEACON_RETENTION_DAYS).  Returns
     the number of rows removed.
+
+    `emergency=True` skips the cold-archive interlock below.  _disk_guard is the
+    last thing standing between a full disk and the outage of 17 Aug 2026, and
+    subordinating it to the archive builds a deadlock: the disk fills, the export
+    fails for want of space, the failed export blocks the purge, and the DB keeps
+    growing into the space that is already gone.  Losing a day of beacons is bad;
+    losing the box — Caddy, sshd and the way back in — is worse, and it takes the
+    live feed with it anyway.
 
     Deleted in bounded chunks rather than as one statement: a single day of the
     worldwide feed is several million rows, and one big DELETE would hold a write
@@ -139,10 +148,33 @@ def purge_old_beacons(days: float | None = None, chunk: int = 50_000) -> int:
     the GIL around its C calls, so call this from a worker thread — never inline
     on the event loop.
     """
-    cutoff = (
+    cutoff_dt = (
         datetime.now(timezone.utc)
         - timedelta(days=BEACON_RETENTION_DAYS if days is None else days)
-    ).isoformat()
+    )
+    # Never delete a day the cold archive does not already hold.  Export and
+    # purge are separate jobs on separate schedules, so without this a single
+    # failed export followed by a successful purge destroys a day that exists
+    # nowhere else — silently, and permanently.  Retention is only allowed to
+    # stay this short *because* the archive keeps the data; the delete has to be
+    # subordinate to that.  With no archive configured this is a no-op and the
+    # old behaviour stands.
+    try:
+        from data import archive
+        from config import ARCHIVE_DIR
+        if emergency:
+            print("[OGN] emergency purge — archive interlock bypassed, "
+                  "unarchived beacons may be lost")
+        elif archive.available():
+            safe = archive.safe_purge_cutoff(ARCHIVE_DIR, cutoff_dt)
+            if safe < cutoff_dt:
+                print(f"[OGN] purge held back to {safe.date()} — later days are "
+                      f"not archived yet")
+            cutoff_dt = safe
+    except Exception as exc:
+        print(f"[OGN] archive check failed, purging conservatively: {exc}")
+        return 0
+    cutoff = cutoff_dt.isoformat()
     deleted = 0
     try:
         # timeout: the stream thread is writing concurrently, and WAL still

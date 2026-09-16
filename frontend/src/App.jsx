@@ -28,7 +28,7 @@ export default function App() {
 
   const {
     heatmap, gridMeta, gliders, activeThermals,
-    weather, predictAlt, loading, error, pinnedGlider: livePinned,
+    weather, predictAlt, noInsolation, loading, error, pinnedGlider: livePinned,
     predict, setViewport, seedTrack, gliderPathsRef,
   } = useBackend(pinnedId);
 
@@ -120,6 +120,7 @@ export default function App() {
             cape={weather?.cape}
             heatmapMax={heatmapMax}
             predictAlt={predictAlt}
+            noInsolation={noInsolation}
             showAirborneOnly={showAirborneOnly}
             onAirborneToggle={setShowAirborneOnly}
             showOgnHeatmap={showOgnHeatmap}

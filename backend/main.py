@@ -14,10 +14,11 @@ from data.meteo_client    import fetch_meteo_features
 from data.landcover_client import fetch_landcover_fine
 from data.terrain_client  import fetch_elevation_grid, fetch_elevation_point, fetch_elevation_batch, snap_grid_centre, cached_elevation
 from pipeline.feature_engineering import build_feature_matrix
-from models.thermal_model import ThermalModel
+from models.thermal_model import ThermalModel, _MIN_SOLAR_GHI
 from config import (UPDATE_INTERVAL, WS_FRAME_INTERVAL, GRID_RES, GRID_RADIUS, CORS_ORIGINS, ADMIN_TOKEN,
                     STATIC_DIR, DATA_DIR, BEACON_RETENTION_DAYS, PREDICT_CONCURRENCY,
-                    MIN_FREE_DISK_GB, MIN_RETENTION_DAYS, ENABLE_LANDCOVER)
+                    MIN_FREE_DISK_GB, MIN_RETENTION_DAYS, ENABLE_LANDCOVER,
+                    DB_PATH, ARCHIVE_DIR)
 from pathlib import Path
 import shutil
 
@@ -117,7 +118,12 @@ async def _disk_guard() -> None:
             f"emergency purge to {days:.1f} days; /seed loses history beyond that"
         )
         try:
-            deleted = await asyncio.to_thread(purge_old_beacons, days)
+            # emergency=True: the archive interlock must not be able to hold
+            # this back.  A full disk is exactly the condition under which the
+            # export fails, and a failed export blocking the purge would let the
+            # DB grow into space that is already gone.
+            deleted = await asyncio.to_thread(
+                lambda: purge_old_beacons(days, emergency=True))
         except Exception as exc:
             log.error(f"[purge] emergency purge failed: {exc}")
             return
@@ -135,8 +141,54 @@ async def _disk_guard() -> None:
         )
 
 
+async def _archive_job() -> None:
+    """
+    Move every completed day of beacons into the cold Parquet archive.
+
+    Runs before the purge and on the same hour, because `purge_old_beacons`
+    refuses to delete a day this has not written.  Ordering the two jobs is not
+    enough on its own — a failure here must block the delete, not merely precede
+    it — but running it first means the normal case needs no second attempt.
+    """
+    from data import archive
+    if not archive.available():
+        return
+    try:
+        results = await asyncio.to_thread(
+            archive.export_completed_days, DB_PATH, ARCHIVE_DIR
+        )
+        for r in results:
+            if r.get("rows"):
+                log.info(f"[archive] {r['day']}: {r['rows']:,} beacons, "
+                         f"{r['bytes']/1e6:.1f} MB ({r['bytes_per_row']} B/row)")
+    except Exception as exc:
+        log.warning(f"[archive] export failed: {exc}")
+
+
+async def _prior_index_job() -> None:
+    """
+    Fold newly complete hours into the climatology aggregate.
+
+    Runs before the purge for the same reason the archive export does: once a
+    beacon is deleted its contribution can never be counted again.  The
+    aggregate is per (hour, 0.01deg cell) — some three orders of magnitude
+    smaller than the rows behind it — so it accumulates indefinitely at
+    negligible cost, and the prior stops being bounded by beacon retention.
+    """
+    try:
+        from data.circling_prior import update_index
+        r = await asyncio.to_thread(update_index, DB_PATH)
+        if r.get("added"):
+            log.info(f"[prior] +{r['added']:,} buckets, now {r['buckets']:,} over "
+                     f"{r['hours']} hours ({r['first_hour']} .. {r['last_hour']})")
+    except Exception as exc:
+        log.warning(f"[prior] index update failed: {exc}")
+
+
 async def _purge_job() -> None:
     """Drop beacons past the retention window so the DB stops growing forever."""
+    await _archive_job()
+    await _prior_index_job()
     try:
         # to_thread, not inline: the delete is a multi-million-row write and
         # running it on the event loop would stall every request behind it.
@@ -176,6 +228,7 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown(wait=False)
     terrain_client.flush_point_cache(force=True)   # don't lose the last partial batch
     flush_beacons()                                # same, for queued OGN beacons
+    meteo_client.flush_historical_cache(force=True)  # same, for archived-hour meteo
     await meteo_client.aclose()
     await terrain_client.aclose()
     await landcover_client.aclose()
@@ -331,6 +384,17 @@ async def predict(lat: float, lon: float, alt: int | None = None, forecast_h: in
         live_gliders = await fetch_ogn_gliders()
         heatmap = _apply_ogn_fusion(heatmap, live_gliders, grid_lat, grid_lon,
                                     radius, grid_rows, grid_cols)
+        # Below the training floor the model is answering a question it was
+        # never shown.  _MIN_SOLAR_GHI drops these rows at collection precisely
+        # because no thermal can form without surface heating, so every night
+        # sample is an extrapolation off the end of the training distribution —
+        # and it does not look like one: measured on the live site at 0 W/m2 the
+        # grid still came back with a 54% peak, which reads as a forecast rather
+        # than as the absence of one.  Zero it and say so on the wire.
+        no_insolation = meteo["solar_ghi"] < _MIN_SOLAR_GHI
+        if no_insolation:
+            heatmap = np.zeros_like(heatmap)
+            heatmap_std = np.zeros_like(heatmap_std)
     except Exception as exc:
         log.error(f"[predict] failed for ({lat},{lon}): {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
@@ -351,6 +415,11 @@ async def predict(lat: float, lon: float, alt: int | None = None, forecast_h: in
         "alt_amsl":     round(alt_amsl),
         "alt_agl":      round(alt_amsl - terrain_mean),
         "alt_source":   "observer" if alt is not None else "default",
+        # True when surface heating is below the level any thermal needs, so the
+        # zeroed heatmap above is a stated "no thermals now" rather than a
+        # prediction of none.  An older bundle that ignores the flag still gets
+        # a dark map, which is the right answer, just unexplained.
+        "no_insolation": bool(no_insolation),
         "thermal_base": meteo["cape_base"],
         "cape":         meteo["cape"],
         "weather": {

@@ -26,6 +26,7 @@ Sparse cells are shrunk toward the global rate rather than trusted: one
 beacon that happened to be circling would otherwise read as a certainty.
 """
 
+import contextlib
 import logging
 import math
 import sqlite3
@@ -143,6 +144,85 @@ def build_index(db_path, soaring_types: frozenset | None = None) -> dict:
         "climbs": climbs or 0,
         "beacons": total or 0,
         "global_rate": (climbs / total) if total else 0.0,
+    }
+
+
+def update_index(db_path, soaring_types: frozenset | None = None) -> dict:
+    """
+    Extend the aggregate with hours it does not already hold, deleting nothing.
+
+    `build_index` truncates and re-aggregates from `beacons`, which ties the
+    climatology to the hot DB's two-day window: the moment a beacon is purged
+    its contribution is gone, and the prior can never describe more than the
+    last 48 hours.  That is the wrong shape for the one feature whose entire
+    value is being *old* — a trigger point that worked last spring works next
+    spring, because it is a property of the ground.
+
+    The aggregate is per (hour, 0.01deg cell), so it is roughly three orders of
+    magnitude smaller than the beacons behind it.  Accumulating it costs almost
+    nothing and makes the climatology outlive retention entirely.
+
+    The current, incomplete hour is skipped.  Indexing it would freeze a partial
+    count that the `hour > max` cursor then never revisits, quietly understating
+    every cell that was still being flown.
+    """
+    if soaring_types is None:
+        from data.ogn_client import SOARING_AC_TYPES
+        soaring_types = SOARING_AC_TYPES
+    this_hour = _hour_key(datetime.now(timezone.utc))
+
+    # closing(): `with sqlite3.connect(...)` commits on exit but leaves the
+    # handle open, and this runs on a schedule for the life of the process.
+    con = sqlite3.connect(db_path)
+    with contextlib.closing(con), con:
+        cols = {r[1] for r in con.execute("PRAGMA table_info(beacons)")}
+        if not cols:
+            return {"error": "no beacons table", "added": 0}
+
+        placeholders = ",".join("?" * len(soaring_types))
+        filters, params = ["ac_type IS NOT NULL"], []
+        if "ac_type" in cols:
+            filters = [f"ac_type IN ({placeholders})"]
+            params = sorted(soaring_types)
+        if "under_tow" in cols:
+            filters.append("under_tow = 0")
+
+        con.execute(f"""
+            CREATE TABLE IF NOT EXISTS {_TABLE} (
+                hour     TEXT    NOT NULL,
+                lat_cell INTEGER NOT NULL,
+                lon_cell INTEGER NOT NULL,
+                climbs   INTEGER NOT NULL,
+                total    INTEGER NOT NULL,
+                PRIMARY KEY (hour, lat_cell, lon_cell)
+            )
+        """)
+        con.execute(f"CREATE INDEX IF NOT EXISTS idx_prior_hour ON {_TABLE}(hour)")
+
+        last = con.execute(f"SELECT MAX(hour) FROM {_TABLE}").fetchone()[0] or ""
+        where = " AND ".join(filters + ["substr(ts, 1, 13) > ?",
+                                        "substr(ts, 1, 13) < ?"])
+        before = con.execute(f"SELECT COUNT(*) FROM {_TABLE}").fetchone()[0]
+        con.execute(f"""
+            INSERT OR REPLACE INTO {_TABLE} (hour, lat_cell, lon_cell, climbs, total)
+            SELECT substr(ts, 1, 13),
+                   CAST(FLOOR(lat / ?) AS INTEGER),
+                   CAST(FLOOR(lon / ?) AS INTEGER),
+                   SUM(CASE WHEN circling = 1 AND vario > 1.5 THEN 1 ELSE 0 END),
+                   COUNT(*)
+            FROM beacons
+            WHERE {where}
+            GROUP BY 1, 2, 3
+        """, (PRIOR_RES, PRIOR_RES, *params, last, this_hour))
+        con.commit()
+        after, n_hours = con.execute(
+            f"SELECT COUNT(*), COUNT(DISTINCT hour) FROM {_TABLE}").fetchone()
+        span = con.execute(
+            f"SELECT MIN(hour), MAX(hour) FROM {_TABLE}").fetchone()
+
+    return {
+        "added": after - before, "buckets": after, "hours": n_hours,
+        "first_hour": span[0], "last_hour": span[1],
     }
 
 

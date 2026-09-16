@@ -121,7 +121,7 @@ def test_retrain_trims_the_buffer_to_the_cap(monkeypatch):
 async def test_disk_guard_is_a_noop_with_headroom(monkeypatch):
     calls = []
     monkeypatch.setattr(main, "_free_disk_gb", lambda: 99.0)
-    monkeypatch.setattr(main, "purge_old_beacons", lambda days=None: calls.append(days))
+    monkeypatch.setattr(main, "purge_old_beacons", lambda days=None, **kw: calls.append(days))
     await main._disk_guard()
     assert calls == []
 
@@ -131,10 +131,11 @@ async def test_disk_guard_shortens_retention_when_tight(monkeypatch):
     calls = []
     monkeypatch.setattr(main, "_free_disk_gb", lambda: 0.5)
     monkeypatch.setattr(main, "purge_old_beacons",
-                        lambda days=None: (calls.append(days), 1000)[1])
+                        lambda days=None, **kw: (calls.append((days, kw.get("emergency", False))), 1000)[1])
     await main._disk_guard()
     assert calls, "a disk under the floor must trigger an emergency purge"
-    assert all(d < main.BEACON_RETENTION_DAYS for d in calls)
+    assert all(d < main.BEACON_RETENTION_DAYS for d, _ in calls)
+    assert all(em for _, em in calls), "the disk guard must bypass the archive interlock"
 
 
 @pytest.mark.asyncio
@@ -142,23 +143,23 @@ async def test_disk_guard_never_purges_below_the_floor(monkeypatch):
     calls = []
     monkeypatch.setattr(main, "_free_disk_gb", lambda: 0.1)
     monkeypatch.setattr(main, "purge_old_beacons",
-                        lambda days=None: (calls.append(days), 1000)[1])
+                        lambda days=None, **kw: (calls.append((days, kw.get("emergency", False))), 1000)[1])
     await main._disk_guard()
-    assert all(d >= main.MIN_RETENTION_DAYS for d in calls)
+    assert all(d >= main.MIN_RETENTION_DAYS for d, _ in calls)
 
 
 @pytest.mark.asyncio
 async def test_disk_guard_gives_up_rather_than_grinding(monkeypatch):
     """Space never recovers on a pre-auto_vacuum DB — the loop must still end."""
     monkeypatch.setattr(main, "_free_disk_gb", lambda: 0.5)
-    monkeypatch.setattr(main, "purge_old_beacons", lambda days=None: 0)
+    monkeypatch.setattr(main, "purge_old_beacons", lambda days=None, **kw: 0)
     await main._disk_guard()   # must return, not spin
 
 
 @pytest.mark.asyncio
 async def test_purge_job_survives_a_failing_disk_guard(monkeypatch):
     """A broken guard must not stop the ordinary retention purge from counting."""
-    monkeypatch.setattr(main, "purge_old_beacons", lambda days=None: 5)
+    monkeypatch.setattr(main, "purge_old_beacons", lambda days=None, **kw: 5)
     def boom():
         raise OSError("statvfs failed")
     monkeypatch.setattr(main, "_free_disk_gb", boom)

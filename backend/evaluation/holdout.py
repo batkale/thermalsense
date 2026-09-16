@@ -80,6 +80,30 @@ def group_ids(X: np.ndarray) -> np.ndarray:
     return (doy * n_lat + lat_idx) * n_lon + lon_idx
 
 
+_COL_HOUR_SIN, _COL_HOUR_COS = 15, 16
+
+
+def decision_ids(X: np.ndarray) -> np.ndarray:
+    """
+    Group ids at the unit the product actually decides over: one hour, one area.
+
+    `group_ids` keys on (day, 0.5deg cell), which pools every hour of a flying
+    day.  A heatmap ranks cells inside one grid at one instant, so a metric
+    grouped by day lets the model earn credit for ranking 11:00 above 17:00 —
+    a real skill, but not the one the map is sold on.  Adding the hour asks the
+    narrower question.
+
+    Measured on the corrected buffer the two barely differ (0.582 vs 0.572,
+    terrain 0.552 vs 0.555), which is itself the useful result: the spatial
+    skill is real rather than borrowed from time of day.  It is kept as a
+    separate function rather than replacing group_ids because the coarse key is
+    what the frozen benchmark split is built on, and changing that would
+    invalidate every score recorded against it.
+    """
+    hour = np.round(_decode_cyclic(X[:, _COL_HOUR_SIN], X[:, _COL_HOUR_COS], 24)).astype(np.int64) % 24
+    return group_ids(X) * 24 + hour
+
+
 def _side(gid: int, salt: bytes, modulus: int) -> bool:
     """True when this group falls on the selected side of a salted hash split."""
     digest = hashlib.blake2b(str(gid).encode(), key=salt, digest_size=8).digest()

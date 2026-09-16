@@ -22,7 +22,7 @@ function Metric({ label, tip, value, valueClass, sub }) {
 }
 
 export default function InfoPanel({
-  thermalBase, cape, heatmapMax, predictAlt,
+  thermalBase, cape, heatmapMax, predictAlt, noInsolation,
   gliders, totalGliders,
   showAirborneOnly, onAirborneToggle,
   showOgnHeatmap, onOgnHeatmapToggle,
@@ -55,12 +55,26 @@ export default function InfoPanel({
       {/* Prediction results */}
       {heatmapMax != null && (
         <div className="metrics">
-          <Metric
-            label={t('thermalPeak')}
-            tip={t('thermalPeakTip')}
-            value={`${heatmapPct}%`}
-            valueClass={heatmapPct > 60 ? 'peak-high' : heatmapPct > 30 ? 'peak-mid' : 'peak-low'}
-          />
+          {/* Without surface heating no thermal can form, and the backend zeroes
+              the grid rather than extrapolating the model outside everything it
+              was trained on. Showing "0%" would read as a forecast of no lift;
+              this says there is no forecast to make. */}
+          {noInsolation ? (
+            <Metric
+              label={t('thermalPeak')}
+              tip={t('noInsolationTip')}
+              value="—"
+              valueClass="peak-low"
+              sub={t('noInsolation')}
+            />
+          ) : (
+            <Metric
+              label={t('thermalPeak')}
+              tip={t('thermalPeakTip')}
+              value={`${heatmapPct}%`}
+              valueClass={heatmapPct > 60 ? 'peak-high' : heatmapPct > 30 ? 'peak-mid' : 'peak-low'}
+            />
+          )}
           {/* Which altitude the heatmap answers for. Shown because the two ways
               of asking disagree: a glider click sends the aircraft's own
               altitude, a bare map click gets a default working height, and the

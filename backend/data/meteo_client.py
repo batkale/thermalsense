@@ -1,4 +1,7 @@
+import json
 import logging
+from pathlib import Path
+
 import httpx
 from datetime import datetime, timedelta, timezone
 from config import OPEN_METEO_BASE, OPEN_METEO_HIST_BASE
@@ -120,6 +123,82 @@ async def fetch_meteo_features(lat: float, lon: float, forecast_h: int) -> dict:
         return _FALLBACK.copy()
 
 
+# --- historical response cache -------------------------------------------
+#
+# Keyed on the (0.5deg, hour) bucket /seed already groups on, so every beacon in
+# a bucket shares one entry — the same de-duplication the seed does, made to
+# survive the process.  Written as JSON Lines and appended: an append cannot
+# corrupt what is already on disk if the box dies mid-write, and a partial last
+# line is simply skipped on load.
+_HIST_SNAP = 0.5
+_hist_cache: dict[str, dict] = {}
+_hist_loaded = False
+_hist_pending: list[str] = []
+_HIST_FLUSH_EVERY = 50
+
+
+def _hist_path():
+    from config import DATA_DIR
+    return Path(DATA_DIR) / "cache" / "meteo_historical.jsonl"
+
+
+def _hist_key(lat: float, lon: float, dt: datetime) -> str:
+    la = round(round(lat / _HIST_SNAP) * _HIST_SNAP, 2)
+    lo = round(round(lon / _HIST_SNAP) * _HIST_SNAP, 2)
+    return f"{la}|{lo}|{dt.strftime('%Y-%m-%dT%H')}"
+
+
+def _hist_cache_load() -> None:
+    global _hist_loaded
+    if _hist_loaded:
+        return
+    _hist_loaded = True
+    p = _hist_path()
+    if not p.exists():
+        return
+    bad = 0
+    try:
+        with p.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                    _hist_cache[rec["k"]] = rec["v"]
+                except Exception:
+                    bad += 1
+        log.info(f"[meteo] historical cache: {len(_hist_cache):,} buckets"
+                 + (f", {bad} unreadable line(s) skipped" if bad else ""))
+    except Exception as exc:
+        log.warning(f"[meteo] historical cache unreadable ({exc}) — starting empty")
+
+
+def _hist_cache_get(key: str):
+    _hist_cache_load()
+    return _hist_cache.get(key)
+
+
+def flush_historical_cache(force: bool = False) -> None:
+    """Append queued entries. Called on a batch boundary and at shutdown."""
+    if not _hist_pending or (not force and len(_hist_pending) < _HIST_FLUSH_EVERY):
+        return
+    p = _hist_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as fh:
+            for k in _hist_pending:
+                fh.write(json.dumps({"k": k, "v": _hist_cache[k]}) + "\n")
+        _hist_pending.clear()
+    except Exception as exc:
+        log.warning(f"[meteo] historical cache write failed: {exc}")
+
+
+def _hist_cache_put(key: str, value: dict) -> dict:
+    _hist_cache_load()
+    _hist_cache[key] = value
+    _hist_pending.append(key)
+    flush_historical_cache()
+    return value
+
+
 async def fetch_meteo_historical(
     lat: float, lon: float, dt: datetime, strict: bool = False
 ) -> dict | None:
@@ -128,6 +207,19 @@ async def fetch_meteo_historical(
     forecast API (model-archive, ~1-day lag).  Same variables as the live
     forecast endpoint so callers can use the result identically.
 
+    Results are cached to disk permanently, keyed by the same (0.5deg, hour)
+    bucket `/seed` groups on.  The cold beacon archive makes the training buffer
+    rebuildable in principle, but only at 10,000 Open-Meteo calls a day: a year
+    of feed is on the order of a million buckets, so an uncached rebuild is
+    months of fetching rather than an afternoon.  The response is a dozen floats
+    and the past does not change, so this is the cheapest possible way to make
+    the archive usable at the scale it is being collected at.
+
+    A cached row also pins the weather a sample was trained against, which the
+    live API does not: Open-Meteo revises its archive as reanalysis lands, so an
+    uncached rebuild would quietly produce a different buffer from the same
+    beacons.
+
     On error this returns _FALLBACK — fixed synthetic values.  That is fine for
     a one-off display request but poisonous for training: it pairs real thermal
     labels with invented weather.  Pass strict=True to get None instead so the
@@ -135,6 +227,10 @@ async def fetch_meteo_historical(
     """
     date_str  = dt.strftime("%Y-%m-%d")
     hour_idx  = dt.hour
+    ckey = _hist_key(lat, lon, dt)
+    hit = _hist_cache_get(ckey)
+    if hit is not None:
+        return hit
     try:
         r = await _get_client().get(OPEN_METEO_HIST_BASE, params={
             "latitude":   lat,
@@ -154,7 +250,7 @@ async def fetch_meteo_historical(
         t2m  = _v("temperature_2m",    "temp_2m")
         t850 = _v("temperature_850hPa", "temp_850")
         t500 = _v("temperature_500hPa", "temp_500")
-        return {
+        return _hist_cache_put(ckey, {
             "temp_2m":    t2m,
             "humidity":   _v("relativehumidity_2m",        "humidity_pct") / 100,
             "wind_speed": _v("windspeed_10m",              "wind_speed"),
@@ -168,7 +264,7 @@ async def fetch_meteo_historical(
             "cape_base":  max(0, int(((t2m - 8) / max(1, (t2m - t850) / 1.5)) * 1000)),
             "pbl_height": _v("boundary_layer_height",      "pbl_height"),
             "soil_temp":  _v("soil_temperature_0_to_7cm",  "soil_temp"),
-        }
+        })
     except Exception as exc:
         detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
         log.warning(

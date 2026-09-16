@@ -23,12 +23,18 @@ import argparse
 import numpy as np
 
 from config import BUFFER_PATH, DATA_DIR
-from evaluation.holdout import earlystop_mask, group_ids, grouped_folds, split
+from evaluation.holdout import (decision_ids, earlystop_mask, group_ids,
+                                grouped_folds, split)
 from evaluation.metrics import CHANCE, bootstrap_ci, grouped_auc, paired_delta_ci
 from pipeline.feature_engineering import FEATURE_COUNT
 from pipeline.solar import cos_incidence, sun_position
 
 _COL_LAT, _COL_LON, _COL_SLOPE, _COL_ASPECT = 0, 1, 3, 4
+# Scored as a baseline in its own right.  It is the one column that describes the
+# *aircraft* rather than the ground, so a model that cannot beat it has learned
+# who is flying high, not where the lift is — which is exactly what happened, and
+# went unnoticed for want of this row in the table.
+_COL_ALT_AGL = 21
 _COL_HOUR_SIN, _COL_HOUR_COS = 15, 16
 _COL_DOY_SIN, _COL_DOY_COS = 17, 18
 
@@ -280,8 +286,16 @@ def main() -> int:
     ap.add_argument("--mode", choices=("cv", "holdout"), default="cv",
                     help="cv: grouped K-fold over the whole buffer (more power). "
                          "holdout: the frozen benchmark the live gate uses.")
+    ap.add_argument("--by-hour", action="store_true",
+                    help="score within (day, cell, HOUR) instead of (day, cell) — "
+                         "the unit one heatmap actually ranks over. Narrower, so "
+                         "it cannot borrow credit from ranking one hour above "
+                         "another. cv mode only.")
     ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--boot", type=int, default=2000)
+    ap.add_argument("--no-agl-floor", action="store_true",
+                    help="keep rows below _MIN_SAMPLE_AGL, which production "
+                         "drops. Useful only to show the leak they cause.")
     args = ap.parse_args()
     variants = args.variant or ["base", "solar"]
 
@@ -293,6 +307,18 @@ def main() -> int:
 
     print(f"buffer      {len(y)} rows, {int(y.sum())} positives ({y.mean()*100:.2f}%)")
 
+    # Match what fit_and_gate trains on.  Without this the harness scores a
+    # population production no longer sees, and its numbers stop being about the
+    # served model — which is the entire point of the harness.
+    if not args.no_agl_floor:
+        from models.thermal_model import _MIN_SAMPLE_AGL
+        keep = X[:, _COL_ALT_AGL] >= _MIN_SAMPLE_AGL
+        if not keep.all():
+            print(f"agl floor   {int((~keep).sum())} rows below {_MIN_SAMPLE_AGL:.0f} m "
+                  f"AGL dropped, {int(y[~keep].sum())} of them positive "
+                  f"(--no-agl-floor to keep them)")
+            X, y = X[keep], y[keep]
+
     if args.mode == "holdout":
         (Xtr, ytr, _), (Xes, yes, _), (Xe, ye, ge) = split(X, y)
         print(f"split       train {len(ytr)} / earlystop {len(yes)} / "
@@ -303,12 +329,20 @@ def main() -> int:
             clf = _fit(tf(Xtr), ytr, tf(Xes), yes)
             scored[name] = clf.predict_proba(tf(Xe))[:, 1]
     else:
-        ge = group_ids(X)
+        # Folds are always cut on the coarse key even when scoring by hour: two
+        # hours of the same day over the same ground share weather and terrain,
+        # so splitting between them would put near-duplicates on both sides —
+        # the leak the group-disjoint split exists to prevent.  The hour only
+        # narrows what a *comparison* is allowed to pool.
+        gfold = group_ids(X)
+        ge = decision_ids(X) if args.by_hour else gfold
         Xe, ye = X, y
         print(f"split       grouped {args.folds}-fold CV over "
-              f"{len(np.unique(ge))} groups (out-of-fold predictions)")
+              f"{len(np.unique(gfold))} groups (out-of-fold predictions)"
+              + (f", scored within {len(np.unique(ge))} (day, cell, hour) units"
+                 if args.by_hour else ""))
         scored = {
-            name: oof_scores(X, y, ge, VARIANTS[name], k=args.folds)
+            name: oof_scores(X, y, gfold, VARIANTS[name], k=args.folds)
             for name in variants
         }
 
@@ -325,6 +359,7 @@ def main() -> int:
         _row("terrain_multiplier", _terrain_multiplier(Xe), ye, ge),
         _row("physics_fallback", _physics(Xe), ye, ge),
         _row("cos_incidence alone", solar_column(Xe), ye, ge),
+        _row("alt_agl alone", Xe[:, _COL_ALT_AGL], ye, ge),
     ]
 
     served = {}

@@ -11,3 +11,8 @@ python-dotenv
 apscheduler
 # ogn-client removed — pure-Python APRS client in data/ogn_client.py
 # geopandas/rasterio removed — imported nowhere, and they drag in GDAL
+
+# Cold beacon archive (data/archive.py). Optional at runtime — the app runs
+# without it, just with no cold storage — but the deployment needs it or
+# retention silently becomes data loss again.
+pyarrow

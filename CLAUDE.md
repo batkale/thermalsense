@@ -22,7 +22,7 @@ All backend commands run from `backend/`. A Windows venv exists at
 `backend/.venv` with every dependency installed — prefer it.
 
 ```bash
-# Tests — 227 tests, ~7 s
+# Tests — 265 tests, ~5 s
 cd backend && ./.venv/Scripts/python.exe -m pytest tests/ -q
 
 # Single test file
@@ -62,11 +62,12 @@ There is no lint or typecheck step configured. `pytest.ini` sets
 | [backend/pipeline/solar.py](backend/pipeline/solar.py) | Sun position, per-cell cos(incidence). Candidate feature, evaluation-only so far |
 | [backend/models/thermal_model.py](backend/models/thermal_model.py) | `ThermalModel`: load/save, MC-dropout predict, online retrain + quality gate, physics fallback |
 | [backend/data/ogn_client.py](backend/data/ogn_client.py) | APRS TCP client, beacon parser, SQLite history, retention purge |
-| [backend/data/meteo_client.py](backend/data/meteo_client.py) | Open-Meteo forecast + historical NWP (no API key) |
+| [backend/data/meteo_client.py](backend/data/meteo_client.py) | Open-Meteo forecast + historical NWP (no API key). Archived hours are cached to disk forever, keyed on the same (0.5°, hour) bucket `/seed` groups on — 10k calls/day against ~1M buckets a year means an uncached rebuild is months, not an afternoon, and Open-Meteo revises its archive so an uncached rebuild would not even reproduce the same buffer |
 | [backend/data/terrain_client.py](backend/data/terrain_client.py) | OpenTopoData SRTM elevation, grid snapping, disk cache |
 | [backend/data/landcover_client.py](backend/data/landcover_client.py) | ESA WorldCover 10 m via COG range reads. Off by default (`ENABLE_LANDCOVER`) |
-| [backend/data/circling_prior.py](backend/data/circling_prior.py) | Lagged per-cell climb rate from own beacon history. Evaluation-only so far |
-| [backend/evaluation/](backend/evaluation/) | Frozen group-disjoint split, grouped AUC, bootstrap CIs, offline A/B harness |
+| [backend/data/circling_prior.py](backend/data/circling_prior.py) | Lagged per-cell climb rate from own beacon history. `update_index()` accumulates hourly and is wired into the scheduler; the *feature* is still evaluation-only |
+| [backend/data/archive.py](backend/data/archive.py) | Cold beacon archive: completed days as date-partitioned Parquet, kept forever. `purge_old_beacons` will not delete a day this has not written |
+| [backend/evaluation/](backend/evaluation/) | Frozen group-disjoint split, grouped AUC, bootstrap CIs, offline A/B harness. `--by-hour` scores within (day, cell, hour) — the unit one heatmap ranks over — while still cutting folds on the coarse key |
 | [backend/scripts/seed_historical.py](backend/scripts/seed_historical.py) | Backfills the training buffer from the beacon DB (`POST /seed`) |
 | [frontend/src/hooks/useBackend.js](frontend/src/hooks/useBackend.js) | Prediction fetch, WebSocket lifecycle, viewport declaration, glider paths |
 | [frontend/src/components/ThermalMap.jsx](frontend/src/components/ThermalMap.jsx) | Leaflet map, heatmap canvas, glider markers and tracks |
@@ -113,13 +114,55 @@ Breaking any of these has taken the app down or silently corrupted results befor
 
 ## Model and training loop
 
-- **Label:** a glider that is circling *and* climbing faster than 1.5 m/s is a
-  positive; a glider present and not thermalling is a negative.
-- **Rejected samples:** below `_MIN_SOLAR_GHI` (50 W/m², no surface heating) and
-  above the estimated thermal base + 300 m (that climb is wave, ridge or engine).
+- **Label** (`_label_for`, used by both the live loop and `/seed`): circling
+  *and* climbing above `_POSITIVE_MIN_VARIO` (1.5 m/s) is a positive; flying
+  straight *and* sinking below `_NEGATIVE_MAX_VARIO` (−0.5 m/s) is a negative;
+  **everything between is ambiguous and discarded.**
+- **Why the middle band is discarded:** "present and not thermalling" is a
+  *pseudo*-absence. It labels the glider dolphining through lift without
+  circling, and the one running a ridge, as evidence of *no* lift — teaching the
+  model that lift is absent exactly where it is present. Straight-and-sinking is
+  a *true* absence: still-air sink is −0.6 to −1.0 m/s, so a straight glider
+  below −0.5 is in air that is neutral at best. Measured on 24 min of live feed:
+  of 55,856 rows the old rule called negative, only 14,940 (27%) are true
+  absences. This is the presence-only → presence-absence move from the SDM
+  literature, and the feed already carries the missing half for free.
+  `/seed` filters on the same thresholds **in SQL**, so the rate-limited terrain
+  and meteo budget is not spent on rows that get discarded afterwards.
+- **Rejected samples:** below `_MIN_SOLAR_GHI` (50 W/m², no surface heating),
+  below `_MIN_SAMPLE_AGL` (200 m AGL — on the field, on the roll or on approach)
+  and above the estimated thermal base + 300 m (that climb is wave, ridge or
+  engine). The AGL floor is applied at collection *and* again in `fit_and_gate`,
+  so a buffer written before it existed is cleaned without a `/seed` rebuild.
+- **Why the AGL floor exists:** without it 18% of the buffer sat at exactly 0 m
+  AGL, all negative, and the model learned "aircraft on the ground are not
+  thermalling". Measured: `alt_agl` alone scored 0.631 within-group against 0.664
+  for all 22 columns, and removing `alt_agl` collapsed the model to 0.530.
+  Restricted to 500–2500 m AGL the model did not beat `terrain_multiplier` at all
+  (−0.008 [−0.034, +0.039]). The 200 m floor costs 4 of 249 positives, removes
+  38% of rows, and leaves the frozen benchmark at 31 mixed-label groups — one
+  above `_MIN_BENCH_GROUPS`. **Tighter altitude matching starves the gate:
+  ±250 m per-positive matching drops it to 28 groups and switches it off.**
+  Revisit once the buffer holds more days. `alt_agl alone` is now a scored
+  baseline in `evaluation/evaluate.py` so this class of leak shows up in the
+  table instead of hiding in the headline.
 - **Cadence:** APScheduler every `UPDATE_INTERVAL` (300 s), at most 20 candidates
-  per cycle. The buffer is capped at `_MAX_BUFFER = 200_000` rows (~35 days of
-  live collection). The fit runs via `asyncio.to_thread`.
+  per cycle. The fit runs via `asyncio.to_thread`.
+- **Buffer eviction is day-stratified, not chronological** (`_evict_to_cap`).
+  The `_MAX_BUFFER = 200_000` cap stays — it is a RAM limit on an 896 MB box —
+  but keeping the *newest* N meant a full buffer held one stretch of weather, so
+  the model could only know the season it stood in. Every distinct day now gets
+  an equal quota; inside a day positives are kept first (4% of the feed, two
+  rate-limited API calls each), then the newest negatives. Measured: subsampling
+  within one 5-day stretch moves the score less than its own noise (0.635 at 25%
+  of groups vs 0.664 at 100%), so spending the cap on breadth costs nothing and
+  buys regimes.
+- **The model is refitted from scratch every cycle, deliberately.** There is no
+  `xgb_model=` warm start and there should not be: appending trees to the
+  serving booster would make the challenger and the incumbent share structure,
+  which destroys the paired gate; stale trees would have no eviction path; and
+  `best_iteration` stops meaning anything. The cure for "no memory" is a buffer
+  that spans regimes, not a booster that never forgets.
 - **Quality gate:** the challenger and the serving model are scored on identical
   rows from a *frozen, group-disjoint* benchmark (`evaluation/holdout.py`), and
   the challenger is rejected unless a paired bootstrap CI (`paired_delta_ci`)
@@ -136,8 +179,15 @@ Breaking any of these has taken the app down or silently corrupted results befor
   0.48–0.53 s warm on the VM, ~2.4 s cold (terrain/meteo cache miss, not the
   model).
 - **Physics fallback** runs when no model is loaded and yields realistic
-  0.32–0.88 probabilities. A *blank* map therefore means an HTTP 500, not the
-  fallback.
+  0.32–0.88 probabilities. A *blank* map therefore means an HTTP 500 or
+  `no_insolation`, not the fallback. Note the fallback ranks cells no better
+  than chance within a group (0.515 [0.478, 0.565]) — it produces plausible
+  absolute numbers, not a usable heatmap.
+- **Night guard:** `/predict` zeroes the grid and sets `no_insolation: true`
+  when `solar_ghi < _MIN_SOLAR_GHI`. Training drops those rows, so the model has
+  never seen the regime and was extrapolating — measured on the live site at
+  0 W/m² it still returned a 54% peak. The flag is additive: an older bundle
+  gets a dark map, which is right, just unexplained.
 
 ## API
 
@@ -209,6 +259,15 @@ The deployment target is 2 vCPU / 896 MB, and most odd-looking choices come from
   takes all of them.
 - `mem_limit: 700m` on the app service — a blast radius, not a target (steady
   state is ~135–190 MB).
+- **Retention is now eviction, not deletion.** `_archive_job` writes every
+  completed day to `ARCHIVE_DIR` as Parquet before `_purge_job` deletes it, and
+  `purge_old_beacons` refuses to delete past the unbroken archived prefix — an
+  export failure stops the delete rather than being outrun by it. Measured on
+  this feed: 10.0 B/row archived against 244 B/row in SQLite (18–24×), so a year
+  of the worldwide feed is ~28 GB rather than ~0.7 TB. `_prior_index_job` runs
+  in the same slot and folds completed hours into `prior_cells`, which is ~35×
+  smaller again (~2.6 GB/year) and so outlives retention entirely — the
+  climatology is no longer bounded by `BEACON_RETENTION_DAYS`.
 - **The beacon DB grows ~7.7M rows / ~1.4 GB per day** on the worldwide feed.
   `BEACON_RETENTION_DAYS` defaults to **2**, lowered from 7 after the 17 Aug 2026
   outage: the binding constraint is RAM, not disk. A 4.26 GB DB against ~165 MB
@@ -240,7 +299,6 @@ published limit.
 
 - `.claude/` is gitignored; `CLAUDE.md` at the repo root is not, so durable
   project knowledge belongs here.
-- `backend/_g.json` is a stray committed copy of `index.html` — safe to delete.
 - `myVm_key.pem` sits in the repo root and is covered by the `*.pem` gitignore
   rule.
 - The 22-column feature list goes stale often. Read `FEATURE_COUNT` and the

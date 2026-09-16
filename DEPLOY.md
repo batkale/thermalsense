@@ -27,7 +27,8 @@ pins `--workers 1`; do not raise it.
 | `STATIC_DIR` | `../frontend/dist` | Built frontend. Set by the Dockerfile. |
 | `CORS_ORIGINS` | `*` | Comma-separated. Leave as `*` for single-container; set explicitly if you split. |
 | `ADMIN_TOKEN` | *(unset)* | When set, `POST /train` and `POST /seed` require `X-Admin-Token`. **Set this in production.** |
-| `BEACON_RETENTION_DAYS` | `2` | Beacon history window. ~1.4 GB/day measured, so 2 days ≈ 2.8 GB. Lowered from 7 after the 17 Aug 2026 outage — the binding constraint is RAM (page cache), not disk. `/seed` clamps `days_back` to this window. |
+| `BEACON_RETENTION_DAYS` | `2` | **Hot** beacon window in SQLite. ~1.4 GB/day measured, so 2 days ≈ 2.8 GB. Lowered from 7 after the 17 Aug 2026 outage — the binding constraint is RAM (page cache), not disk. Nothing is lost at the edge of this window any more: completed days go to `ARCHIVE_DIR` first. |
+| `THERMALSENSE_ARCHIVE_DIR` | `$DATA_DIR/archive/beacons` | Cold beacon archive, date-partitioned Parquet, kept forever. The default already lands inside the mounted `/data` volume, so the compose deploy needs no change — but it **grows without bound**, ~28 GB/year on the worldwide feed (10 B/row against 244 in SQLite). Watch it alongside the DB. |
 | `MIN_FREE_DISK_GB` | `3` | Below this the purge job shortens retention rather than let the disk fill. |
 | `MIN_RETENTION_DAYS` | `1` | Floor the emergency purge will not go under. |
 | `PREDICT_CONCURRENCY` | `1` | Simultaneous `/predict` runs. Each saturates its cores and holds ~30 MB; raise only with cores to match. |
@@ -283,8 +284,19 @@ az monitor metrics alert create -g thermalsense-rg -n low-cpu-credits \
 **Disk.** The beacon DB is the thing that grows: ~1.4 GB/day, bounded by
 `BEACON_RETENTION_DAYS` at roughly 2.8 GB steady state on a 29 GB disk (it was
 sized for ~10 GB at the old 7-day window). Note the real ceiling is RAM, not
-disk — see the retention comment in `config.py`. Two non-obvious points:
+disk — see the retention comment in `config.py`. Three non-obvious points:
 
+- **The cold archive grows forever, on purpose.** `_archive_job` writes every
+  completed day to `ARCHIVE_DIR` before the purge deletes it, at ~10 bytes/row
+  against 244 in SQLite — ~80 MB/day, ~28 GB/year on the worldwide feed. That is
+  the price of having a climatology and a benchmark that does not move, and it
+  is the only copy of anything past the retention window. `purge_old_beacons`
+  refuses to delete a day the archive does not hold, **except** under
+  `_disk_guard`, which passes `emergency=True` and deletes regardless: a full
+  disk is exactly when the export fails, and letting a failed export block the
+  purge would rebuild the 17 Aug outage with extra steps. So if the disk fills,
+  expect to lose unarchived beacons — move the archive off this volume before it
+  gets close rather than relying on the guard.
 - **Docker is usually the bigger consumer.** Build cache accumulates a layer set
   per `docker compose build` and is never reclaimed automatically. Check with
   `docker system df` and reclaim with `docker builder prune`.

@@ -54,6 +54,11 @@ def _buffer(groups=150, per_group=16, seed=0):
     X[:, 1] = 29.0 + (gi // 40) * 0.5                # lon cell
     X[:, 3] = rng.uniform(0, 30, n)                  # slope
     X[:, 4] = rng.uniform(0, 360, n)                 # aspect
+    # Soaring heights, not the [0,1) the rest of the matrix carries: fit_and_gate
+    # drops rows below _MIN_SAMPLE_AGL, so a buffer left at the default would be
+    # filtered away entirely and every gate test would exercise the early return
+    # instead of the decision it is about.
+    X[:, 21] = rng.uniform(300, 2500, n)             # alt_agl
 
     # Label tracks slope, so a fit has real within-group signal to find.
     p = 1 / (1 + np.exp(-(X[:, 3] - 15) / 4))
