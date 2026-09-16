@@ -218,6 +218,65 @@ for A1. Frankfurt provisions quickly and is a good latency choice for OGN.
 
 Same Docker commands as above.
 
+## Training node
+
+A second role, alongside the public site rather than instead of it. The public
+box serves pilots; the training node collects the feed, archives it and
+retrains, and **serves nobody**. It runs from `docker-compose.training.yml`,
+which leaves `docker-compose.yml` untouched.
+
+| | Public site | Training node |
+|---|---|---|
+| Inbound | 22, 80, 443 | **22 only, restricted to the operator's IP** |
+| Caddy / TLS | yes | **no** — reach the app with `ssh -L 8000:localhost:8000` |
+| App port | `expose` behind Caddy | `127.0.0.1:8000` on the host |
+| `--proxy-headers` | yes (Caddy sets the header) | **dropped** — no proxy, invariant 6 |
+| Data | named volume on the OS disk | **host path on a separate data disk** (`deleteOption=Detach`) |
+| `XGB_FIT_THREADS` | 1 (serving has priority) | 2 (nothing to serve) |
+| Feed box | worldwide | Türkiye + Europe by default, env-tunable |
+
+Why each one:
+
+- **The data is the product.** A named volume lives under `/var/lib/docker` on
+  the OS disk and dies with the VM. The data disk survives deleting the VM and
+  can be attached to a replacement, so a broken box costs a rebuild, not months
+  of collection.
+- **No visitors, so no public surface.** Closing 80/443 and dropping Caddy
+  removes everything but SSH from the internet.
+- **Heavy analysis belongs on a laptop, not here.** The node collects, archives
+  and runs the hourly retrain. Cross-validation and feature experiments run
+  locally against a copy of the Parquet archive, which is megabytes a day —
+  this box has 1 GiB of RAM and is not asked to fit anything larger than the
+  live buffer.
+- **The feed box is seasonal.** Northern-hemisphere thermals fade from October,
+  so a Türkiye + Europe node produces few positives through the winter. Move
+  `OGN_LAT_*` / `OGN_LON_*` south in `.env` and `docker compose -f
+  docker-compose.training.yml up -d`; no rebuild.
+
+Provisioning (`belgiumcentral` was the only allowed region offering B-series on
+the student subscription it was built on — check yours as in the region note):
+
+```bash
+az group create -n thermalsense-rg -l belgiumcentral
+az vm create -g thermalsense-rg -n thermalsense-dev \
+  --image Canonical:ubuntu-24_04-lts:server:latest \
+  --size Standard_B2ats_v2 --admin-username <you> \
+  --ssh-key-values ~/.ssh/thermalsense_dev_ed25519.pub \
+  --public-ip-sku Standard --public-ip-address-dns-name <label> \
+  --storage-sku StandardSSD_LRS --os-disk-size-gb 32 \
+  --data-disk-sizes-gb 32 --data-disk-delete-option Detach \
+  --os-disk-delete-option Delete --nic-delete-option Delete
+# SSH only, from your address
+az network nsg rule update -g thermalsense-rg --nsg-name thermalsense-devNSG \
+  -n default-allow-ssh --source-address-prefixes "$(curl -s ifconfig.me)/32"
+```
+
+~$16.33/month (B2ats_v2 $7.88, two 32 GB Standard SSDs $4.80, static IPv4
+$3.65) — about six months of a $100 credit. On the VM: format and mount the
+data disk at `/data`, add the 2 GB swap from step 2 above, install Docker, then
+`mkdir -p /data/thermalsense` and bring the stack up with the training compose
+file. Rotating your home IP locks SSH out; fix the NSG rule from the portal.
+
 ## TLS and domains
 
 `docker compose` already runs Caddy in front of the app, so TLS is automatic for

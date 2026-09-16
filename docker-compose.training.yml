@@ -1,0 +1,54 @@
+# Training node: collects the feed, archives it and retrains. Serves nobody.
+#
+#   docker compose -f docker-compose.training.yml up -d --build
+#
+# docker-compose.yml is the public site — Caddy, TLS, ports 80/443 — and stays
+# untouched. This is the other role: a box whose product is the data, reached
+# only over SSH. See DEPLOY.md "Training node" for why each difference exists.
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      # /seed and /train still exist and still mutate the buffer. Loopback-only
+      # is not a reason to leave them unguarded — anyone with a shell on the box
+      # could otherwise reset months of collection with one request.
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN in .env}
+      THERMALSENSE_DATA_DIR: /data
+      # Same RAM constraint as the public box (1 GiB), and older days are in the
+      # archive anyway, so the hot window stays at two days.
+      BEACON_RETENTION_DAYS: ${BEACON_RETENTION_DAYS:-2}
+      # No /predict traffic competes for cores here, so the fit can take both.
+      # On the public box this is 1 so a retrain cannot stall serving.
+      XGB_FIT_THREADS: ${XGB_FIT_THREADS:-2}
+      # Türkiye + Europe by default. The worldwide feed is ~1.4 GB/day of hot
+      # SQLite, which is the 17 Aug 2026 outage on a 1 GiB box, and it spends the
+      # 1,000/day OpenTopoData quota on regions nobody is asking about. Narrowing
+      # the box also switches OGN to the filtered port (14580) — see config.py.
+      #
+      # Seasonal: northern-hemisphere thermals fade from October. A training node
+      # that should keep learning through the winter needs these moved south;
+      # change them in .env and `up -d`, no rebuild.
+      OGN_LAT_MIN: ${OGN_LAT_MIN:-34}
+      OGN_LAT_MAX: ${OGN_LAT_MAX:-60}
+      OGN_LON_MIN: ${OGN_LON_MIN:--10}
+      OGN_LON_MAX: ${OGN_LON_MAX:-45}
+    volumes:
+      # A host path on the separate data disk, not a named volume. Named volumes
+      # live under /var/lib/docker on the OS disk, which dies with the VM; the
+      # data disk is created with deleteOption=Detach precisely so it does not.
+      - ${DATA_ROOT:-/data/thermalsense}:/data
+    mem_limit: 700m
+    memswap_limit: 700m
+    # Loopback only. Reach it with `ssh -L 8000:localhost:8000`. The NSG allows
+    # nothing but SSH, and this keeps it off the public interface even if that
+    # rule is ever loosened.
+    ports:
+      - "127.0.0.1:8000:8000"
+    # Same as the Dockerfile's CMD minus --proxy-headers/--forwarded-allow-ips.
+    # Those trust X-Forwarded-For from any peer, which is only safe while Caddy
+    # is the sole route in (CLAUDE.md invariant 6). There is no proxy here, so
+    # nothing legitimate ever sets that header.
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000",
+              "--workers", "1", "--limit-concurrency", "64"]
