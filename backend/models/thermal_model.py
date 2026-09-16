@@ -610,7 +610,7 @@ class ThermalModel:
             return
         # Cap at 20 to avoid hammering APIs per retrain cycle.
         candidates = soaring[:20]
-        above_base = dark = on_ground = ambiguous = 0
+        above_base = dark = on_ground = ambiguous = no_terrain = 0
         # Ids already sampled this cycle.  A glider can be both a candidate and
         # a co-occupant of another candidate's grid; sampling it twice would
         # duplicate a row and let the same aircraft sit on both sides of the
@@ -624,7 +624,12 @@ class ThermalModel:
                 if g["id"] in sampled:
                     continue          # already captured inside an earlier grid
                 meteo = await fetch_meteo_features(g["lat"], g["lon"], 0)
-                elev  = await fetch_elevation_grid(g["lat"], g["lon"])
+                # strict: a failed fetch must skip the grid, not train on the
+                # flat-zero stand-in (see fetch_elevation_grid).
+                elev  = await fetch_elevation_grid(g["lat"], g["lon"], strict=True)
+                if elev is None:
+                    no_terrain += 1
+                    continue
                 # Bounds must come from the SNAPPED centre, not the raw glider
                 # position: fetch_elevation_grid builds and caches the array for
                 # the snapped point, so pairing it with unsnapped bounds labels
@@ -700,6 +705,9 @@ class ThermalModel:
         if ambiguous:
             log.info(f"[model] {ambiguous}/{considered} dropped — neither a "
                      f"confirmed climb nor confirmed sink")
+        if no_terrain:
+            log.warning(f"[model] {no_terrain}/{len(candidates)} grids skipped — terrain "
+                        f"unavailable (quota or upstream); not trained on a flat stand-in")
         if above_base:
             log.info(f"[model] {above_base}/{considered} dropped — above thermal base")
         if dark:
@@ -1086,7 +1094,7 @@ class ThermalModel:
         log.info(f"[seed] {len(rows)} beacons → {len(buckets)} meteo buckets")
 
         added = errors = skipped_no_meteo = above_base = dark = on_ground = 0
-        ambiguous = 0
+        ambiguous = no_terrain = 0
         done_buckets = 0
 
         for (lat_b, lon_b, date_str, hour), beacons in buckets.items():
@@ -1118,7 +1126,10 @@ class ThermalModel:
 
             for lat, lon, alt, dt, vario, circling in beacons:
                 try:
-                    elev  = await fetch_elevation_grid(lat, lon)
+                    elev  = await fetch_elevation_grid(lat, lon, strict=True)
+                    if elev is None:
+                        no_terrain += 1
+                        continue
                     # Snapped bounds — see retrain() for why raw coordinates
                     # mislabel every cell in the grid.
                     grid_lat, grid_lon = snap_grid_centre(lat, lon)
@@ -1180,6 +1191,7 @@ class ThermalModel:
             "skipped_dark":         dark,
             "skipped_on_ground":    on_ground,
             "skipped_ambiguous":    ambiguous,
+            "skipped_no_terrain":   no_terrain,
             "buffer_total":     len(self._buffer_X),
         }
         log.info(f"[seed] complete: {result}")

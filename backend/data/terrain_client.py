@@ -283,7 +283,8 @@ def grid_shape(radius: float = GRID_RADIUS) -> tuple[int, int]:
 
 
 async def fetch_elevation_grid(lat: float, lon: float,
-                               radius: float = GRID_RADIUS) -> np.ndarray:
+                               radius: float = GRID_RADIUS,
+                               strict: bool = False) -> np.ndarray | None:
     """
     Fetch coarse SRTM 30m elevation at TERRAIN_RES, then bilinearly upsample to GRID_RES.
 
@@ -302,6 +303,15 @@ async def fetch_elevation_grid(lat: float, lon: float,
     Fine grid:   2*radius/GRID_RES + 1 per axis → 201×201 cells at exactly GRID_RES.
     Points are fetched through fetch_elevation_batch so overlapping grids share
     them via the persistent point cache.  Falls back to flat-zero on any failure.
+
+    Pass strict=True from anything that *trains* on the result.  Flat zero is a
+    tolerable degraded map for a display request, but as a training input it is
+    a fabrication with a real label attached: elevation 0 and slope 0 everywhere,
+    alt_agl equal to the aircraft's full AMSL altitude, so the row clears every
+    filter and lands in the buffer looking normal.  That happens exactly when the
+    1,000/day OpenTopoData quota runs out — which a training node reaches within
+    hours of a cold start — so strict callers get None and skip the sample, the
+    same contract fetch_meteo_historical(strict=True) already has.
     """
     clat, clon = snap_grid_centre(lat, lon)
     key = (clat, clon, radius)
@@ -353,5 +363,8 @@ async def fetch_elevation_grid(lat: float, lon: float,
             log.warning(f"[terrain] could not persist grid {path.name} ({exc})")
         return fine
     except Exception as exc:
+        if strict:
+            log.warning(f"[terrain] elevation fetch failed ({exc}) — strict, no fallback")
+            return None
         log.warning(f"[terrain] elevation fetch failed ({exc}) — using flat-zero fallback")
         return np.zeros(fine_shape)

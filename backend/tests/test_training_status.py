@@ -99,3 +99,66 @@ async def test_status_survives_a_broken_section(monkeypatch):
     assert "rows" in out["buffer"]
     assert "requests" in out["terrain_api"]
     assert isinstance(out["disk_free_gb"], float)
+
+
+# ---------------------------------------------------------------------------
+# Terrain failure must never become training data
+# ---------------------------------------------------------------------------
+
+async def _failing_batch(pts, max_requests=None):
+    raise RuntimeError("429 quota exhausted")
+
+
+async def test_strict_terrain_returns_none_instead_of_flat_zero(tmp_path, monkeypatch):
+    """
+    Flat zero is a tolerable degraded map, but as training input it is a
+    fabrication with a real label on it: elevation 0, slope 0, alt_agl equal to
+    full AMSL altitude, so it passes every filter. The quota runs out within
+    hours on a cold training node, which is exactly when this would happen.
+    """
+    monkeypatch.setattr(terrain_client, "fetch_elevation_batch", _failing_batch)
+    monkeypatch.setattr(terrain_client, "_grid_path", lambda key: tmp_path / "nope.npy")
+    monkeypatch.setattr(terrain_client, "_grid_cache", {})
+
+    assert await terrain_client.fetch_elevation_grid(12.34, 56.78, strict=True) is None
+    # Serving keeps the old degraded behaviour.
+    flat = await terrain_client.fetch_elevation_grid(12.34, 56.78)
+    assert flat is not None and float(np.abs(flat).max()) == 0.0
+
+
+async def test_retrain_skips_grids_without_terrain(monkeypatch, caplog):
+    import data.ogn_client as oc
+    import data.meteo_client as mc
+
+    glider = {"id": "G1", "lat": 46.8, "lon": 11.2, "alt": 2000.0, "vario": 2.5,
+              "circling": True, "ac_type": 1, "is_tow": False, "under_tow": False}
+
+    async def gliders():
+        return [glider]
+
+    async def meteo(lat, lon, h):
+        return {"temp_2m": 20.0, "humidity": 0.5, "wind_speed": 3.0, "wind_dir": 0.0,
+                "cape": 800.0, "cin": 5.0, "solar_ghi": 700.0, "temp_850": 10.0,
+                "temp_500": -12.0, "lapse_rate": 6.3, "cape_base": 3000,
+                "pbl_height": 1500.0, "soil_temp": 22.0}
+
+    async def no_terrain(lat, lon, radius=None, strict=False):
+        assert strict, "training must ask for strict terrain"
+        return None
+
+    async def no_sleep(*_):
+        return None
+
+    monkeypatch.setattr(oc, "fetch_ogn_gliders", gliders)
+    monkeypatch.setattr(oc, "is_thermal_evidence", lambda g: True)
+    monkeypatch.setattr(mc, "fetch_meteo_features", meteo)
+    monkeypatch.setattr(terrain_client, "fetch_elevation_grid", no_terrain)
+    monkeypatch.setattr(tm.asyncio, "sleep", no_sleep)
+
+    m = tm.ThermalModel()
+    monkeypatch.setattr(m, "fit_and_gate", lambda: None)
+    with caplog.at_level("WARNING"):
+        await m.retrain()
+    assert m._buffer_X == [], "a grid with no terrain must not produce a sample"
+    # And it got there by the terrain check, not by bailing out earlier.
+    assert "terrain unavailable" in caplog.text
