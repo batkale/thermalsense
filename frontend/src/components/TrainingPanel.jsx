@@ -79,7 +79,7 @@ export default function TrainingPanel({ onClose }) {
   if (!data) {
     body = <div className="tp-hint">{failed ? t('trainingStatusFailed') : t('loadingStatus')}</div>;
   } else {
-    const { feed, model, buffer, archive, climatology, terrain_api: api, meteo_api: meteo, terrain } = data;
+    const { feed, model, buffer, archive, climatology, terrain_api: api, meteo_api: meteo, terrain, last_seed: seed } = data;
     // An older backend sends no `terrain` block; it only ever used the API.
     const source = terrain?.source ?? 'opentopodata';
     const cop = terrain?.copernicus;
@@ -126,6 +126,11 @@ export default function TrainingPanel({ onClose }) {
         <Section title={t('sectionBuffer')} error={buffer.error}>
           <Row label={t('samples')} value={t('samplesValue', { n: n(buffer.rows), p: n(buffer.positives) })} />
           <Row label={t('distinctDays')} value={n(buffer.days)} />
+          {/* The nightly job is what turns the archive into training data; if it
+              stops, the buffer quietly goes back to the live sampler's trickle. */}
+          <Row label={t('nightlySeed')}
+               value={seed ? `${t('seedAdded', { n: n(seed.added) })} · ${ago(seed.at, t)}` : t('noSeedYet')}
+               tone={seed?.stopped_at_meteo_budget ? 'warn' : undefined} />
           <table className="tp-regions">
             <thead>
               <tr><th>{t('region')}</th><th>{t('samples')}</th><th>{t('positivesShort')}</th></tr>

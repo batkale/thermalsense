@@ -22,7 +22,7 @@ All backend commands run from `backend/`. A Windows venv exists at
 `backend/.venv` with every dependency installed — prefer it.
 
 ```bash
-# Tests — 300 tests, ~5 s
+# Tests — 302 tests, ~5 s
 cd backend && ./.venv/Scripts/python.exe -m pytest tests/ -q
 
 # Single test file
@@ -182,6 +182,16 @@ Breaking any of these has taken the app down or silently corrupted results befor
   which destroys the paired gate; stale trees would have no eviction path; and
   `best_iteration` stops meaning anything. The cure for "no memory" is a buffer
   that spans regimes, not a booster that never forgets.
+- **Nightly seed** (`_nightly_seed_job`, 02:00 UTC): rebuilds training rows from
+  the whole of yesterday via `seed_from_history(days_back=1)`, reading the hot
+  DB while retention still covers the day and the Parquet archive once it does
+  not. This is what makes the archive part of training rather than a backup
+  nobody opens — the live sampler only ever sees the aircraft airborne during
+  its 150 s slice of each five minutes. It stops at `SEED_METEO_BUDGET` (6,000)
+  rather than the 10,000 quota, because the morning's live sampling draws on the
+  same allowance; `meteo_client.live_usage()["total"]` counts both endpoints.
+  Overlap with rows the live sampler already took from the same day is possible
+  and expected to be small; the panel shows the run's `added` count.
 - **Quality gate:** the challenger and the serving model are scored on identical
   rows from a *frozen, group-disjoint* benchmark (`evaluation/holdout.py`), and
   the challenger is rejected unless a paired bootstrap CI (`paired_delta_ci`)

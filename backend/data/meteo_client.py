@@ -93,7 +93,11 @@ def _hour_index(times: list[str], forecast_h: int) -> int:
 _LIVE_SNAP = 0.1
 _live_cache: dict[tuple, dict] = {}
 _live_hour = ""
-_live_usage = {"day": "", "requests": 0, "cache_hits": 0}
+_live_usage = {"day": "", "requests": 0, "cache_hits": 0,
+               "historical_requests": 0, "historical_cache_hits": 0}
+# Open-Meteo's published free-tier ceiling.  Forecast and archive calls come out
+# of the same budget, which is why both are counted here: the nightly seed and
+# the live sampler are spending one allowance between them.
 LIVE_DAILY_QUOTA = 10000
 
 
@@ -103,19 +107,29 @@ def _live_key(lat: float, lon: float, forecast_h: int) -> tuple:
 
 
 def live_usage() -> dict:
-    """Today's Open-Meteo forecast requests against the published daily quota."""
+    """
+    Today's Open-Meteo calls against the published daily quota.
+
+    `total` is what any budget must be checked against: the live sampler and the
+    nightly seed draw on one allowance, so counting only one of them would let
+    the pair overrun it together.
+    """
     today = datetime.now(timezone.utc).date().isoformat()
-    if _live_usage["day"] != today:
-        return {"day": today, "requests": 0, "cache_hits": 0, "quota": LIVE_DAILY_QUOTA}
-    return {**_live_usage, "quota": LIVE_DAILY_QUOTA}
+    base = ({"day": today, "requests": 0, "cache_hits": 0,
+             "historical_requests": 0, "historical_cache_hits": 0}
+            if _live_usage["day"] != today else dict(_live_usage))
+    base["total"] = base["requests"] + base["historical_requests"]
+    base["quota"] = LIVE_DAILY_QUOTA
+    return base
 
 
-def _count_live(hit: bool) -> None:
-    global _live_usage
+def _count_live(hit: bool, historical: bool = False) -> None:
     today = datetime.now(timezone.utc).date().isoformat()
     if _live_usage["day"] != today:
-        _live_usage.update(day=today, requests=0, cache_hits=0)
-    _live_usage["cache_hits" if hit else "requests"] += 1
+        _live_usage.update(day=today, requests=0, cache_hits=0,
+                           historical_requests=0, historical_cache_hits=0)
+    prefix = "historical_" if historical else ""
+    _live_usage[f"{prefix}cache_hits" if hit else f"{prefix}requests"] += 1
 
 
 async def fetch_meteo_features(lat: float, lon: float, forecast_h: int) -> dict:
@@ -288,6 +302,7 @@ async def fetch_meteo_historical(
     ckey = _hist_key(lat, lon, dt)
     hit = _hist_cache_get(ckey)
     if hit is not None:
+        _count_live(hit=True, historical=True)
         return hit
     try:
         r = await _get_client().get(OPEN_METEO_HIST_BASE, params={
@@ -308,6 +323,7 @@ async def fetch_meteo_historical(
         t2m  = _v("temperature_2m",    "temp_2m")
         t850 = _v("temperature_850hPa", "temp_850")
         t500 = _v("temperature_500hPa", "temp_500")
+        _count_live(hit=False, historical=True)
         return _hist_cache_put(ckey, {
             "temp_2m":    t2m,
             "humidity":   _v("relativehumidity_2m",        "humidity_pct") / 100,

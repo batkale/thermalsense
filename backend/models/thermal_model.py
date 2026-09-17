@@ -7,7 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from config import (MODEL_PATH, BUFFER_PATH, GRID_RADIUS, LAT_MIN, LAT_MAX, LON_MIN, LON_MAX,
                     XGB_FIT_THREADS, XGB_PREDICT_THREADS, ENABLE_LANDCOVER,
-                    MAX_SAMPLE_GRIDS, SAMPLE_TIME_BUDGET_S, TERRAIN_SOURCE)
+                    MAX_SAMPLE_GRIDS, SAMPLE_TIME_BUDGET_S, TERRAIN_SOURCE,
+                    SEED_METEO_BUDGET)
 from evaluation.holdout import split as bench_split
 from evaluation.metrics import grouped_auc, paired_delta_ci
 from pipeline.feature_engineering import FEATURE_COUNT
@@ -369,6 +370,7 @@ class ThermalModel:
         # panel, not by tailing a container — and "why has the model not changed
         # in three days" has one answer that should be on screen.
         self.last_fit: dict | None = None
+        self.last_seed: dict | None = None
         self._summary_cache: tuple[int, dict] | None = None
 
     def _note_fit(self, outcome: str, **detail) -> None:
@@ -630,7 +632,9 @@ class ThermalModel:
                     out_of_time = True
                     break
                 usage = meteo_live_usage()
-                if usage["requests"] >= usage["quota"]:
+                # total, not just the forecast count: the nightly seed spends
+                # the same allowance from the archive endpoint.
+                if usage["total"] >= usage["quota"]:
                     out_of_quota = True
                     break
                 meteo = await fetch_meteo_features(g["lat"], g["lon"], 0)
@@ -1116,7 +1120,20 @@ class ThermalModel:
         ambiguous = no_terrain = 0
         done_buckets = 0
 
+        from data.meteo_client import live_usage as _meteo_usage
+        quota_stopped = False
+
         for (lat_b, lon_b, date_str, hour), beacons in buckets.items():
+            # One Open-Meteo allowance covers this job and the live sampler, and
+            # the live one has to keep working tomorrow morning: stop at the
+            # budget rather than at the hard quota.
+            u = _meteo_usage()
+            if u["total"] >= min(SEED_METEO_BUDGET, u["quota"]):
+                quota_stopped = True
+                log.warning(f"[seed] stopping at the meteo budget "
+                            f"({u['total']}/{SEED_METEO_BUDGET}) — "
+                            f"{len(buckets) - done_buckets} buckets left for next time")
+                break
             try:
                 dt_b  = datetime.fromisoformat(f"{date_str}T{hour:02d}:00:00+00:00")
                 # strict: a failed fetch returns None rather than synthetic
@@ -1211,6 +1228,7 @@ class ThermalModel:
             "skipped_on_ground":    on_ground,
             "skipped_ambiguous":    ambiguous,
             "skipped_no_terrain":   no_terrain,
+            "stopped_at_meteo_budget": quota_stopped,
             "buffer_total":     len(self._buffer_X),
         }
         log.info(f"[seed] complete: {result}")

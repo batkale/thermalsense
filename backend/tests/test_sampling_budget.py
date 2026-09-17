@@ -169,3 +169,72 @@ async def test_a_dark_grid_costs_no_terrain(cycle, monkeypatch):
     await m.retrain()
     assert cycle["meteo"] == 5 and cycle["terrain"] == 0
     assert m._buffer_X == []
+
+
+# ---------------------------------------------------------------------------
+# Nightly seed: the job that puts the archive into training
+# ---------------------------------------------------------------------------
+
+def _beacon_db(path, n=200):
+    """Beacons a few hours old, so a days_back=1 window contains them."""
+    import sqlite3
+    from datetime import datetime, timedelta, timezone
+    con = sqlite3.connect(path)
+    con.execute("""CREATE TABLE beacons (ts TEXT, id TEXT, lat REAL, lon REAL,
+                   alt REAL, vario REAL, circling INT, is_tow INT,
+                   ac_type INT, under_tow INT)""")
+    base = datetime.now(timezone.utc) - timedelta(hours=3)
+    for i in range(n):
+        con.execute("INSERT INTO beacons VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    ((base + timedelta(seconds=i * 20)).isoformat(), f"AC{i % 7}",
+                     46.0 + (i % 23) * 0.05, 11.0 + (i % 19) * 0.05, 2000.0,
+                     2.5 if i % 4 == 0 else -1.2, 1 if i % 4 == 0 else 0, 0, 1, 0))
+    con.commit()
+    con.close()
+
+
+async def test_seed_stops_at_the_meteo_budget_and_says_so(tmp_path, monkeypatch):
+    """
+    The seed and the live sampler share one 10,000/day allowance. A nightly run
+    that drained it would leave the next morning's collection with nothing.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    db = tmp_path / "b.db"
+    _beacon_db(db)
+    monkeypatch.setattr("config.DB_PATH", db, raising=False)
+    monkeypatch.setattr("config.ARCHIVE_DIR", tmp_path / "arch", raising=False)
+    monkeypatch.setattr(tm, "BUFFER_PATH", str(tmp_path / "buf.npz"))
+    monkeypatch.setattr(tm, "SEED_METEO_BUDGET", 10)
+    monkeypatch.setattr(mc, "live_usage",
+                        lambda: {"day": "d", "requests": 50, "cache_hits": 0,
+                                 "historical_requests": 0, "historical_cache_hits": 0,
+                                 "total": 50, "quota": 10000})
+
+    spent = []
+
+    async def meteo(lat, lon, dt, strict=False):
+        spent.append(1)
+        return None
+
+    monkeypatch.setattr(mc, "fetch_meteo_historical", meteo)
+
+    m = tm.ThermalModel()
+    result = await m.seed_from_history(days_back=1, limit=500, reset=True)
+    assert result["stopped_at_meteo_budget"] is True
+    assert spent == [], "the budget must be checked before the first call, not after"
+
+
+async def test_nightly_seed_reads_yesterday(tmp_path, monkeypatch):
+    """One day back, appending rather than resetting: the live sampler's rows
+    from the same day are still worth keeping."""
+    import main
+
+    calls = {}
+
+    async def fake_seed_job(days_back, limit, reset=False):
+        calls.update(days_back=days_back, limit=limit, reset=reset)
+
+    monkeypatch.setattr(main, "_seed_job", fake_seed_job)
+    await main._nightly_seed_job()
+    assert calls == {"days_back": 1, "limit": main.NIGHTLY_SEED_LIMIT, "reset": False}

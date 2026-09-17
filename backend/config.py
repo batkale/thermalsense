@@ -183,3 +183,15 @@ ADMIN_TOKEN       = os.getenv("ADMIN_TOKEN", "")
 # Directory holding the built frontend (Vite `dist`). Served at / when present.
 _static_default   = Path(__file__).parent.parent / "frontend" / "dist"
 STATIC_DIR        = Path(os.getenv("STATIC_DIR", _static_default))
+
+# Open-Meteo calls the nightly seed may spend, out of the 10,000/day shared with
+# the live sampler.  Deliberately below the quota: the seed runs at 02:00 UTC and
+# must leave the morning's collection able to work.  Buckets past the budget are
+# simply not fetched — the next run picks them up, and the historical cache means
+# nothing already paid for is paid for twice.
+SEED_METEO_BUDGET = int(os.getenv("SEED_METEO_BUDGET", "6000"))
+
+# What the nightly seed pulls from one day of beacons.  Yields roughly a third
+# as many training rows (measured: 10,000 beacons -> 3,100 rows), the rest being
+# dark hours, ground traffic and the ambiguous vario band.
+NIGHTLY_SEED_LIMIT = int(os.getenv("NIGHTLY_SEED_LIMIT", "20000"))

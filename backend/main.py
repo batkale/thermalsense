@@ -5,6 +5,7 @@ from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
 import secrets
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 import asyncio, json, logging
 import numpy as np
 from datetime import datetime, timezone, timedelta
@@ -18,7 +19,7 @@ from models.thermal_model import ThermalModel, _MIN_SOLAR_GHI
 from config import (UPDATE_INTERVAL, WS_FRAME_INTERVAL, GRID_RES, GRID_RADIUS, CORS_ORIGINS, ADMIN_TOKEN,
                     STATIC_DIR, DATA_DIR, BEACON_RETENTION_DAYS, PREDICT_CONCURRENCY,
                     MIN_FREE_DISK_GB, MIN_RETENTION_DAYS, ENABLE_LANDCOVER,
-                    DB_PATH, ARCHIVE_DIR)
+                    DB_PATH, ARCHIVE_DIR, NIGHTLY_SEED_LIMIT)
 from pathlib import Path
 import shutil
 
@@ -223,6 +224,12 @@ async def lifespan(app: FastAPI):
         misfire_grace_time=1800,
         coalesce=True,
     )
+    # misfire_grace_time is generous because a missed nightly run is worth doing
+    # late: the samples it builds are the day's whole yield, not a slice of it.
+    scheduler.add_job(
+        _nightly_seed_job, CronTrigger(hour=2, minute=0, timezone="UTC"),
+        id="nightly-seed", misfire_grace_time=3600, coalesce=True,
+    )
     scheduler.start()
     yield
     scheduler.shutdown(wait=False)
@@ -327,6 +334,7 @@ async def training_status():
             "retrain_interval_s": UPDATE_INTERVAL,
         },
         "buffer": await section(model.training_summary),
+        "last_seed": model.last_seed,
         "archive": await section(
             lambda: archive.stats(ARCHIVE_DIR) if archive.available()
             else {"error": "pyarrow not installed"}),
@@ -812,6 +820,10 @@ async def _seed_job(days_back: float | None, limit: int, reset: bool = False) ->
             log.error(f"[seed] added no samples — not fitting. result={result}")
             return
         log.info(f"[seed] {result}")
+        # Kept for /training/status: a nightly job nobody can see the result of
+        # is indistinguishable from one that is not running.
+        model.last_seed = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                           **result}
 
         # Seeding only fills the buffer; fit it so /seed leaves a usable model.
         # Call retrain() directly — _retrain_job would deadlock on the lock held here.
@@ -820,6 +832,24 @@ async def _seed_job(days_back: float | None, limit: int, reset: bool = False) ->
             await model.retrain()
         except Exception as exc:
             log.error(f"[seed] post-seed retrain failed: {exc}")
+
+
+async def _nightly_seed_job() -> None:
+    """
+    Build training rows from yesterday, the whole day of it.
+
+    The live sampler only ever sees the aircraft that happen to be airborne in
+    the 150 s it gets every five minutes, which is why collection ran at ~200
+    samples a day.  Yesterday's beacons are all still on disk — in the hot DB
+    while retention covers them, in the Parquet archive once it does not — and
+    seed_from_history reads whichever holds them.  This is the job that makes the
+    archive part of training rather than a backup nobody opens.
+
+    02:00 UTC: after the archive export has written yesterday, and in the hours
+    when no European daylight sampling is competing for the meteo allowance.
+    """
+    log.info("[seed] nightly run starting")
+    await _seed_job(days_back=1, limit=NIGHTLY_SEED_LIMIT, reset=False)
 
 
 @app.post("/seed", dependencies=[Depends(_require_admin)])
