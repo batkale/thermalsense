@@ -78,11 +78,63 @@ def _hour_index(times: list[str], forecast_h: int) -> int:
     return max(0, min(idx, len(times) - 1))
 
 
+# --- live forecast: per-hour cache and a daily call counter -------------------
+#
+# Every candidate grid in a retrain cycle used to be its own request, night
+# included, so the collection rate was pegged to Open-Meteo's 10,000/day long
+# before anything else bound it.  Nothing about that was visible either — there
+# was no counter.
+#
+# The key is a 0.1 degree cell and the forecast hour.  That is not a compromise:
+# build_feature_matrix already spreads one point sample across the whole 11 km
+# grid, so two requests 0.1 degree apart in the same hour were always going to
+# produce the same sixteen columns.  Entries are dropped when the hour rolls
+# over, which is also when the upstream values change.
+_LIVE_SNAP = 0.1
+_live_cache: dict[tuple, dict] = {}
+_live_hour = ""
+_live_usage = {"day": "", "requests": 0, "cache_hits": 0}
+LIVE_DAILY_QUOTA = 10000
+
+
+def _live_key(lat: float, lon: float, forecast_h: int) -> tuple:
+    return (round(lat / _LIVE_SNAP) * _LIVE_SNAP,
+            round(lon / _LIVE_SNAP) * _LIVE_SNAP, forecast_h)
+
+
+def live_usage() -> dict:
+    """Today's Open-Meteo forecast requests against the published daily quota."""
+    today = datetime.now(timezone.utc).date().isoformat()
+    if _live_usage["day"] != today:
+        return {"day": today, "requests": 0, "cache_hits": 0, "quota": LIVE_DAILY_QUOTA}
+    return {**_live_usage, "quota": LIVE_DAILY_QUOTA}
+
+
+def _count_live(hit: bool) -> None:
+    global _live_usage
+    today = datetime.now(timezone.utc).date().isoformat()
+    if _live_usage["day"] != today:
+        _live_usage.update(day=today, requests=0, cache_hits=0)
+    _live_usage["cache_hits" if hit else "requests"] += 1
+
+
 async def fetch_meteo_features(lat: float, lon: float, forecast_h: int) -> dict:
     """
     Open-Meteo: free, no API key needed.
     Returns fallback values if the network is unavailable.
+
+    Cached per 0.1 degree cell for the current hour — see the note above.
     """
+    global _live_hour
+    hour = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H")
+    if hour != _live_hour:
+        _live_cache.clear()
+        _live_hour = hour
+    key = _live_key(lat, lon, forecast_h)
+    hit = _live_cache.get(key)
+    if hit is not None:
+        _count_live(hit=True)
+        return hit
     try:
         r = await _get_client().get(OPEN_METEO_BASE, params={
             "latitude": lat, "longitude": lon,
@@ -103,7 +155,8 @@ async def fetch_meteo_features(lat: float, lon: float, forecast_h: int) -> dict:
         t2m  = _v("temperature_2m",     "temp_2m")
         t850 = _v("temperature_850hPa", "temp_850")
         t500 = _v("temperature_500hPa", "temp_500")
-        return {
+        _count_live(hit=False)
+        out = {
             "temp_2m":    t2m,
             "humidity":   _v("relativehumidity_2m", "humidity_pct") / 100,
             "wind_speed": _v("windspeed_10m",       "wind_speed"),
@@ -118,6 +171,11 @@ async def fetch_meteo_features(lat: float, lon: float, forecast_h: int) -> dict:
             "pbl_height": _v("boundary_layer_height",     "pbl_height"),
             "soil_temp":  _v("soil_temperature_0_to_7cm", "soil_temp"),
         }
+        # Only a real answer is cached: the fallback is synthetic, and pinning it
+        # for an hour would hand the same invented weather to every grid in the
+        # cell — including the ones being written into the training buffer.
+        _live_cache[key] = out
+        return out
     except Exception as exc:
         log.warning(f"[meteo] fetch failed ({exc}) — using fallback values")
         return _FALLBACK.copy()

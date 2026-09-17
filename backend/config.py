@@ -26,6 +26,19 @@ SRTM_BASE         = "https://api.opentopodata.org/v1/srtm30m"
 # Copernicus cannot answer (a tile not published, a read failure) fall back to
 # OpenTopoData, so the two sources are cached separately and never mixed.
 TERRAIN_SOURCE    = os.getenv("TERRAIN_SOURCE", "copernicus").strip().lower()
+
+# Candidate grids one retrain cycle may sample, and how long it may spend doing
+# it.  The old fixed 20 was chosen to spare the terrain API's 1,000/day — which
+# Copernicus removed — and it held collection to ~200 samples a day, weeks away
+# from the 30 mixed-label groups the quality gate needs.
+#
+# A count alone is the wrong control now.  What actually binds is Open-Meteo's
+# 10,000 forecast calls a day and the cycle's own deadline (UPDATE_INTERVAL - 30),
+# so the loop stops on whichever comes first: the count, the time budget, or the
+# meteo quota.  Each grid also builds a 201x201x22 feature matrix (~7 MB), so an
+# unbounded loop is a memory question on a 1 GiB box, not only an API one.
+MAX_SAMPLE_GRIDS  = int(os.getenv("MAX_SAMPLE_GRIDS", "60"))
+SAMPLE_TIME_BUDGET_S = float(os.getenv("SAMPLE_TIME_BUDGET_S", "150"))
 COPERNICUS_DEM_BASE = os.getenv(
     "COPERNICUS_DEM_BASE", "https://copernicus-dem-30m.s3.amazonaws.com")
 # ESA WorldCover 10 m, public S3. Cloud-Optimized GeoTIFFs, so the reader takes

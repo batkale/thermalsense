@@ -22,7 +22,7 @@ All backend commands run from `backend/`. A Windows venv exists at
 `backend/.venv` with every dependency installed — prefer it.
 
 ```bash
-# Tests — 293 tests, ~5 s
+# Tests — 300 tests, ~5 s
 cd backend && ./.venv/Scripts/python.exe -m pytest tests/ -q
 
 # Single test file
@@ -148,8 +148,25 @@ Breaking any of these has taken the app down or silently corrupted results befor
   Revisit once the buffer holds more days. `alt_agl alone` is now a scored
   baseline in `evaluation/evaluate.py` so this class of leak shows up in the
   table instead of hiding in the headline.
-- **Cadence:** APScheduler every `UPDATE_INTERVAL` (300 s), at most 20 candidates
-  per cycle. The fit runs via `asyncio.to_thread`.
+- **Cadence:** APScheduler every `UPDATE_INTERVAL` (300 s). A cycle samples up to
+  `MAX_SAMPLE_GRIDS` (60) candidate grids and stops early on whichever of three
+  bounds arrives first: that count, `SAMPLE_TIME_BUDGET_S` (150 s, against the
+  cycle's own `UPDATE_INTERVAL - 30` deadline), or Open-Meteo's 10,000 forecast
+  calls for the day. The fit runs via `asyncio.to_thread`.
+- **Why the old fixed 20 is gone:** it existed to spare OpenTopoData's
+  1,000/day, which Copernicus removed, and it held collection to ~200 samples a
+  day — weeks from the 30 mixed-label groups the gate needs. The 1.1 s pacing
+  sleep goes with it on the Copernicus path; at 60 candidates it alone would eat
+  two thirds of a cycle.
+- **Live meteo is cached per 0.1° cell and hour** with a daily counter
+  (`meteo_client.live_usage`). Every candidate grid used to be its own request,
+  night included, so Open-Meteo was the real ceiling and nothing reported it.
+  0.1° is not a compromise: `build_feature_matrix` already spreads one point
+  sample across the whole 11 km grid. The synthetic fallback is never cached —
+  pinning invented weather for an hour would feed it straight into the buffer.
+- **The solar floor is checked before the feature matrix is built.** At night
+  every candidate is dropped there, and building first spent ~7 MB and a terrain
+  read to discard the result.
 - **Buffer eviction is day-stratified, not chronological** (`_evict_to_cap`).
   The `_MAX_BUFFER = 200_000` cap stays — it is a RAM limit on an 896 MB box —
   but keeping the *newest* N meant a full buffer held one stretch of weather, so

@@ -6,7 +6,8 @@ import numpy as np
 from datetime import datetime, timezone
 from pathlib import Path
 from config import (MODEL_PATH, BUFFER_PATH, GRID_RADIUS, LAT_MIN, LAT_MAX, LON_MIN, LON_MAX,
-                    XGB_FIT_THREADS, XGB_PREDICT_THREADS, ENABLE_LANDCOVER)
+                    XGB_FIT_THREADS, XGB_PREDICT_THREADS, ENABLE_LANDCOVER,
+                    MAX_SAMPLE_GRIDS, SAMPLE_TIME_BUDGET_S, TERRAIN_SOURCE)
 from evaluation.holdout import split as bench_split
 from evaluation.metrics import grouped_auc, paired_delta_ci
 from pipeline.feature_engineering import FEATURE_COUNT
@@ -586,7 +587,7 @@ class ThermalModel:
         samples are collected.
         """
         from data.ogn_client import fetch_ogn_gliders, is_thermal_evidence
-        from data.meteo_client import fetch_meteo_features
+        from data.meteo_client import fetch_meteo_features, live_usage as meteo_live_usage
         from data.terrain_client import fetch_elevation_grid, snap_grid_centre
         from pipeline.feature_engineering import build_feature_matrix
 
@@ -608,8 +609,10 @@ class ThermalModel:
         if not soaring:
             log.info("[model] no soaring aircraft in view — skipping")
             return
-        # Cap at 20 to avoid hammering APIs per retrain cycle.
-        candidates = soaring[:20]
+        candidates = soaring[:MAX_SAMPLE_GRIDS]
+        # Stop on whichever bound arrives first — see MAX_SAMPLE_GRIDS.
+        deadline = time.monotonic() + SAMPLE_TIME_BUDGET_S
+        out_of_time = out_of_quota = False
         above_base = dark = on_ground = ambiguous = no_terrain = 0
         # Ids already sampled this cycle.  A glider can be both a candidate and
         # a co-occupant of another candidate's grid; sampling it twice would
@@ -623,7 +626,20 @@ class ThermalModel:
             try:
                 if g["id"] in sampled:
                     continue          # already captured inside an earlier grid
+                if time.monotonic() > deadline:
+                    out_of_time = True
+                    break
+                usage = meteo_live_usage()
+                if usage["requests"] >= usage["quota"]:
+                    out_of_quota = True
+                    break
                 meteo = await fetch_meteo_features(g["lat"], g["lon"], 0)
+                # Checked before the 7 MB feature matrix is built, not after:
+                # at night every candidate is dropped here, and building first
+                # spent the memory and the CPU to throw the result away.
+                if meteo["solar_ghi"] < _MIN_SOLAR_GHI:
+                    dark += 1
+                    continue
                 # strict: a failed fetch must skip the grid, not train on the
                 # flat-zero stand-in (see fetch_elevation_grid).
                 elev  = await fetch_elevation_grid(g["lat"], g["lon"], strict=True)
@@ -646,11 +662,6 @@ class ThermalModel:
                     alt_amsl=g["alt"],
                     land_use_props=await _land_props(g["lat"], g["lon"], elev.shape),
                 )
-                if meteo["solar_ghi"] < _MIN_SOLAR_GHI:
-                    dark += 1
-                    await asyncio.sleep(1.1)
-                    continue
-
                 # Every soaring aircraft inside this grid, not just the one it is
                 # centred on.  They share the grid's weather and terrain, so they
                 # cost no extra API calls, and they land on *different cells* —
@@ -695,10 +706,18 @@ class ThermalModel:
                     sampled.add(o["id"])
                     if o["id"] != g["id"]:
                         offset_samples += 1
-                await asyncio.sleep(1.1)  # terrain API: 1 req/s hard limit
+                # Pacing for OpenTopoData's 1 req/s.  Copernicus is range reads
+                # against object storage with no such limit, and at 60 candidates
+                # the sleep alone would eat two thirds of the cycle's budget.
+                if TERRAIN_SOURCE != "copernicus":
+                    await asyncio.sleep(1.1)
             except Exception as exc:
                 log.warning(f"[model] sample skipped: {exc}")
 
+        if out_of_time or out_of_quota:
+            log.info(f"[model] cycle stopped early — "
+                     f"{'time budget' if out_of_time else 'Open-Meteo quota'} reached "
+                     f"after {considered} aircraft")
         if on_ground:
             log.info(f"[model] {on_ground}/{considered} dropped — below "
                      f"{_MIN_SAMPLE_AGL:.0f} m AGL")

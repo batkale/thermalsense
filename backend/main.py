@@ -332,6 +332,9 @@ async def training_status():
             else {"error": "pyarrow not installed"}),
         "climatology": await section(_prior_stats),
         "terrain_api": terrain_client.api_usage(),
+        # Open-Meteo's 10,000 forecast calls a day are what now bounds how many
+        # grids a cycle may sample, so the counter belongs next to the terrain one.
+        "meteo_api": meteo_client.live_usage(),
         # Which source is carrying terrain and today's work on each.  With
         # Copernicus primary, the API figure above is only the fallback traffic.
         "terrain": terrain_client.source_usage(),

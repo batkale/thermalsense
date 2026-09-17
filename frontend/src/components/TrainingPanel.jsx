@@ -79,7 +79,7 @@ export default function TrainingPanel({ onClose }) {
   if (!data) {
     body = <div className="tp-hint">{failed ? t('trainingStatusFailed') : t('loadingStatus')}</div>;
   } else {
-    const { feed, model, buffer, archive, climatology, terrain_api: api, terrain } = data;
+    const { feed, model, buffer, archive, climatology, terrain_api: api, meteo_api: meteo, terrain } = data;
     // An older backend sends no `terrain` block; it only ever used the API.
     const source = terrain?.source ?? 'opentopodata';
     const cop = terrain?.copernicus;
@@ -166,6 +166,16 @@ export default function TrainingPanel({ onClose }) {
           <Bar value={api.requests} max={api.quota} warnAt={0.8} />
           {api.rate_limited > 0 && <div className="tp-hint">{t('rateLimited', { n: n(api.rate_limited) })}</div>}
         </Section>
+
+        {meteo && (
+          <Section title={t('sectionMeteoApi')}>
+            <Row label={t('requestsToday')} value={`${n(meteo.requests)} / ${n(meteo.quota)}`}
+                 tone={meteo.requests >= meteo.quota ? 'bad'
+                       : meteo.requests >= 0.8 * meteo.quota ? 'warn' : undefined} />
+            <Bar value={meteo.requests} max={meteo.quota} warnAt={0.8} />
+            <Row label={t('cacheHits')} value={n(meteo.cache_hits)} />
+          </Section>
+        )}
       </>
     );
   }
