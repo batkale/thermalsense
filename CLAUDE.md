@@ -182,6 +182,24 @@ Breaking any of these has taken the app down or silently corrupted results befor
   which destroys the paired gate; stale trees would have no eviction path; and
   `best_iteration` stops meaning anything. The cure for "no memory" is a buffer
   that spans regimes, not a booster that never forgets.
+- **The nightly seed is bounded by the clock, not only by quota.** It stopped
+  only at `SEED_METEO_BUDGET`, and on 18 Sep 2026 a run of 1,430 buckets never
+  came near 6,000 calls, so nothing stopped it: it built one 201x201x22 feature
+  matrix (~7 MB) per beacon to keep a single row, 20,000 of them, against the
+  live sampler's 60 grids per cycle. The 3-minute full scan of the 2.1 GB DB
+  that preceded it took the page cache, the host's daemons went to swap on the
+  OS disk and did not come back, and the box was unreachable for 36 h — sshd
+  accepted TCP but never sent a banner, the Azure guest agent went Not Ready,
+  and only an Azure-side restart recovered it. Azure's hypervisor metrics show
+  it exactly: OS disk queue depth 0.01 at 01:00, 35.7 at 02:00, climbing to 91
+  by the time it was restarted, while data disk queue depth sat at 0 — no
+  progress, pure swap churn. The container never died, because `mem_limit` kept
+  its reservation while everything around it starved. Hence `SEED_TIME_BUDGET_S`
+  (1800), `NIGHTLY_SEED_LIMIT` at 2,000 rather than 20,000, one elevation grid
+  per snapped centre per bucket instead of per beacon, and `mem_limit` 700m →
+  600m so an overrun becomes an OOM kill that restarts rather than a host-wide
+  thrash. **A budget on what a job costs an upstream API is not a budget on what
+  it costs the machine.**
 - **Nightly seed** (`_nightly_seed_job`, 02:00 UTC): rebuilds training rows from
   the whole of yesterday via `seed_from_history(days_back=1)`, reading the hot
   DB while retention still covers the day and the Parquet archive once it does
@@ -298,9 +316,13 @@ The deployment target is 2 vCPU / 896 MB, and most odd-looking choices come from
   smaller again (~2.6 GB/year) and so outlives retention entirely — the
   climatology is no longer bounded by `BEACON_RETENTION_DAYS`.
 - **The beacon DB grows ~7.7M rows / ~1.4 GB per day** on the worldwide feed.
-  `BEACON_RETENTION_DAYS` defaults to **2**, lowered from 7 after the 17 Aug 2026
-  outage: the binding constraint is RAM, not disk. A 4.26 GB DB against ~165 MB
-  of page cache put the host at 96.6% iowait with uvicorn wedged in D state.
+  `BEACON_RETENTION_DAYS` defaults to **1**, lowered from 7 after the 17 Aug 2026
+  outage and from 2 after the 18 Sep 2026 one: the binding constraint is RAM, not
+  disk. A 4.26 GB DB against ~165 MB of page cache put the host at 96.6% iowait
+  with uvicorn wedged in D state; a 2.1 GB one was still enough for a single full
+  scan to evict every host daemon to swap. Day two is not lost — it is in the
+  Parquet archive, which the nightly seed reads. `MIN_RETENTION_DAYS` went to 0.5
+  with it, or the disk guard would have had no room to shorten anything.
 - `_disk_guard()` shortens retention below `MIN_FREE_DISK_GB=3`, capped at 2
   rounds — a DB created before `auto_vacuum=INCREMENTAL` never returns freed
   pages to the OS, so waiting for free space to recover would spin forever.

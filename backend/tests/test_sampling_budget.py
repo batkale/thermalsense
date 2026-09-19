@@ -225,6 +225,92 @@ async def test_seed_stops_at_the_meteo_budget_and_says_so(tmp_path, monkeypatch)
     assert spent == [], "the budget must be checked before the first call, not after"
 
 
+async def test_seed_stops_at_the_time_budget(tmp_path, monkeypatch):
+    """
+    The budget that was missing on 18 Sep 2026.  The meteo allowance bounds what
+    a run costs Open-Meteo; only the clock bounds what it costs the machine, and
+    1,430 buckets never came near 6,000 calls, so nothing ever stopped the run.
+    """
+    db = tmp_path / "b.db"
+    _beacon_db(db)
+    monkeypatch.setattr("config.DB_PATH", db, raising=False)
+    monkeypatch.setattr("config.ARCHIVE_DIR", tmp_path / "arch", raising=False)
+    monkeypatch.setattr(tm, "BUFFER_PATH", str(tmp_path / "buf.npz"))
+    # Negative, not 0: the clock has ~15 ms granularity on Windows, so a zero
+    # budget lets a few buckets through before it ticks.
+    monkeypatch.setattr(tm, "SEED_TIME_BUDGET_S", -1.0)
+    monkeypatch.setattr(mc, "live_usage",
+                        lambda: {"day": "d", "requests": 0, "cache_hits": 0,
+                                 "historical_requests": 0, "historical_cache_hits": 0,
+                                 "total": 0, "quota": 10000})
+
+    spent = []
+
+    async def meteo(lat, lon, dt, strict=False):
+        spent.append(1)
+        return None
+
+    monkeypatch.setattr(mc, "fetch_meteo_historical", meteo)
+
+    m = tm.ThermalModel()
+    result = await m.seed_from_history(days_back=1, limit=500, reset=True)
+    assert result["stopped_at_time_budget"] is True
+    assert result["stopped_at_meteo_budget"] is False
+    assert spent == [], "the deadline must be checked before spending a call"
+
+
+async def test_beacons_in_one_bucket_share_an_elevation_grid(tmp_path, monkeypatch):
+    """
+    The seed builds a 201x201 grid per beacon to keep one row of it.  Beacons in
+    a 0.5 deg square within one hour mostly snap to the same centre, so the grid
+    is the same array fetched over and over.
+    """
+    import sqlite3
+    from datetime import datetime, timedelta, timezone
+
+    db = tmp_path / "b.db"
+    con = sqlite3.connect(db)
+    con.execute("""CREATE TABLE beacons (ts TEXT, id TEXT, lat REAL, lon REAL,
+                   alt REAL, vario REAL, circling INT, is_tow INT,
+                   ac_type INT, under_tow INT)""")
+    base = datetime.now(timezone.utc) - timedelta(hours=3)
+    # 12 beacons within metres of each other: one bucket, one snapped centre.
+    for i in range(12):
+        con.execute("INSERT INTO beacons VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    ((base + timedelta(seconds=i)).isoformat(), f"AC{i}",
+                     46.0 + i * 1e-5, 11.0 + i * 1e-5, 2000.0,
+                     2.5 if i % 2 == 0 else -1.2, 1 if i % 2 == 0 else 0, 0, 1, 0))
+    con.commit()
+    con.close()
+
+    monkeypatch.setattr("config.DB_PATH", db, raising=False)
+    monkeypatch.setattr("config.ARCHIVE_DIR", tmp_path / "arch", raising=False)
+    monkeypatch.setattr(tm, "BUFFER_PATH", str(tmp_path / "buf.npz"))
+    monkeypatch.setattr(mc, "live_usage",
+                        lambda: {"day": "d", "requests": 0, "cache_hits": 0,
+                                 "historical_requests": 0, "historical_cache_hits": 0,
+                                 "total": 0, "quota": 10000})
+
+    async def meteo(lat, lon, dt, strict=False):
+        return {"temp_2m": 20.0, "humidity": 0.5, "wind_speed": 3.0, "wind_dir": 0.0,
+                "cape": 800.0, "cin": 5.0, "solar_ghi": 700.0, "temp_850": 10.0,
+                "temp_500": -12.0, "lapse_rate": 6.3, "cape_base": 3000,
+                "pbl_height": 1500.0, "soil_temp": 22.0}
+
+    fetched = []
+
+    async def terrain(lat, lon, radius=None, strict=False):
+        fetched.append((lat, lon))
+        return np.full(tc.grid_shape(), 800.0)
+
+    monkeypatch.setattr(mc, "fetch_meteo_historical", meteo)
+    monkeypatch.setattr(tc, "fetch_elevation_grid", terrain)
+
+    m = tm.ThermalModel()
+    await m.seed_from_history(days_back=1, limit=500, reset=True)
+    assert len(fetched) == 1, f"one grid for 12 co-located beacons, got {len(fetched)}"
+
+
 async def test_nightly_seed_reads_yesterday(tmp_path, monkeypatch):
     """One day back, appending rather than resetting: the live sampler's rows
     from the same day are still worth keeping."""

@@ -17,8 +17,15 @@ services:
       ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN in .env}
       THERMALSENSE_DATA_DIR: /data
       # Same RAM constraint as the public box (1 GiB), and older days are in the
-      # archive anyway, so the hot window stays at two days.
-      BEACON_RETENTION_DAYS: ${BEACON_RETENTION_DAYS:-2}
+      # archive anyway, so the hot window is one day — see config.py, and the
+      # 18 Sep 2026 outage it was lowered after.
+      BEACON_RETENTION_DAYS: ${BEACON_RETENTION_DAYS:-1}
+      # The nightly seed's two ceilings.  Both are here rather than left to
+      # config defaults because this is the box where the cost is felt, and
+      # because the run that wedged it on 18 Sep 2026 had neither: it built one
+      # ~7 MB feature matrix per beacon, 20,000 of them, with no deadline.
+      NIGHTLY_SEED_LIMIT: ${NIGHTLY_SEED_LIMIT:-2000}
+      SEED_TIME_BUDGET_S: ${SEED_TIME_BUDGET_S:-1800}
       # No /predict traffic competes for cores here, so the fit can take both.
       # On the public box this is 1 so a retrain cannot stall serving.
       XGB_FIT_THREADS: ${XGB_FIT_THREADS:-2}
@@ -39,8 +46,19 @@ services:
       # live under /var/lib/docker on the OS disk, which dies with the VM; the
       # data disk is created with deleteOption=Detach precisely so it does not.
       - ${DATA_ROOT:-/data/thermalsense}:/data
-    mem_limit: 700m
-    memswap_limit: 700m
+    # 700m on an 892 MB host left ~190 MB for the OS, Docker, sshd, resolved and
+    # the Azure guest agent.  That held until the nightly seed scanned a 2.1 GB
+    # SQLite file: the page cache took what was left, every host daemon went to
+    # swap on the OS disk and did not come back.  The container itself was fine
+    # throughout — it had its reservation — so nothing restarted, and the box was
+    # unreachable for 36 h until an Azure-side restart.
+    #
+    # 600m keeps ~290 MB for the host.  Steady state is 135-190 MB, so the
+    # headroom is real, and memswap_limit pinned to it means an overrun is an
+    # OOM kill and a container restart: a failure that recovers itself, rather
+    # than one that takes SSH down with it.
+    mem_limit: 600m
+    memswap_limit: 600m
     # Loopback only. Reach it with `ssh -L 8000:localhost:8000`. The NSG allows
     # nothing but SSH, and this keeps it off the public interface even if that
     # rule is ever loosened.

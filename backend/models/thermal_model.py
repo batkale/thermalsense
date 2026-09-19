@@ -8,7 +8,7 @@ from pathlib import Path
 from config import (MODEL_PATH, BUFFER_PATH, GRID_RADIUS, LAT_MIN, LAT_MAX, LON_MIN, LON_MAX,
                     XGB_FIT_THREADS, XGB_PREDICT_THREADS, ENABLE_LANDCOVER,
                     MAX_SAMPLE_GRIDS, SAMPLE_TIME_BUDGET_S, TERRAIN_SOURCE,
-                    SEED_METEO_BUDGET)
+                    SEED_METEO_BUDGET, SEED_TIME_BUDGET_S)
 from evaluation.holdout import split as bench_split
 from evaluation.metrics import grouped_auc, paired_delta_ci
 from pipeline.feature_engineering import FEATURE_COUNT
@@ -233,6 +233,12 @@ _MC_SAMPLES  = 50
 # and keeps the buffer in the tens of MB.  It also bounds how stale the oldest
 # training data can get, which the chronological growth otherwise leaves open.
 _MAX_BUFFER  = 200_000
+
+# Distinct grid centres the seed keeps elevation for while working one bucket.
+# A bucket is 0.5 deg square, the grids snap to a 0.01 deg lattice, so a handful
+# covers nearly every beacon in it; 16 grids is ~5 MB, which the 700 MB
+# container can hold and a dict with no ceiling eventually cannot.
+_SEED_ELEV_CACHE = 16
 
 
 # Columns holding the cyclic day-of-year encoding.  Every row collected on one
@@ -1122,8 +1128,21 @@ class ThermalModel:
 
         from data.meteo_client import live_usage as _meteo_usage
         quota_stopped = False
+        time_stopped = False
+
+        # Two ceilings, and the wall clock is the one that matters on a small
+        # box.  The meteo budget bounds what this job costs Open-Meteo; it does
+        # not bound what it costs the machine, and on 18 Sep 2026 that was the
+        # difference between a long night and 36 h of thrash — 1,430 buckets
+        # never came near 6,000 calls, so nothing ever stopped the run.
+        deadline = time.monotonic() + SEED_TIME_BUDGET_S
 
         for (lat_b, lon_b, date_str, hour), beacons in buckets.items():
+            if time.monotonic() >= deadline:
+                time_stopped = True
+                log.warning(f"[seed] stopping at the {SEED_TIME_BUDGET_S:.0f}s time budget — "
+                            f"{len(buckets) - done_buckets} buckets left for next time")
+                break
             # One Open-Meteo allowance covers this job and the live sampler, and
             # the live one has to keep working tomorrow morning: stop at the
             # budget rather than at the hard quota.
@@ -1152,6 +1171,10 @@ class ThermalModel:
                 dark += len(beacons)
                 continue
 
+            # One bucket's worth, discarded with the bucket: beacons in the
+            # next 0.5 deg square share nothing with this one.
+            elev_cache: dict = {}
+
             done_buckets += 1
             if done_buckets % 50 == 0:
                 log.info(
@@ -1162,13 +1185,25 @@ class ThermalModel:
 
             for lat, lon, alt, dt, vario, circling in beacons:
                 try:
-                    elev  = await fetch_elevation_grid(lat, lon, strict=True)
-                    if elev is None:
-                        no_terrain += 1
-                        continue
                     # Snapped bounds — see retrain() for why raw coordinates
                     # mislabel every cell in the grid.
                     grid_lat, grid_lon = snap_grid_centre(lat, lon)
+                    # Beacons cluster: one bucket is a 0.5 deg square in a single
+                    # hour, so most of them snap to a handful of grid centres and
+                    # re-read the same 201x201 elevation grid.  fetch_elevation_grid
+                    # caches to disk, but rebuilding the array per beacon is still
+                    # ~320 KB of allocation apiece for a value already in hand.
+                    # Bounded on purpose — an unbounded cache is the kind of slow
+                    # growth that only shows up on the box, at night.
+                    elev = elev_cache.get((grid_lat, grid_lon))
+                    if elev is None:
+                        elev = await fetch_elevation_grid(lat, lon, strict=True)
+                        if elev is None:
+                            no_terrain += 1
+                            continue
+                        if len(elev_cache) >= _SEED_ELEV_CACHE:
+                            elev_cache.clear()
+                        elev_cache[(grid_lat, grid_lon)] = elev
                     lat_bounds = (grid_lat - GRID_RADIUS, grid_lat + GRID_RADIUS)
                     lon_bounds = (grid_lon - GRID_RADIUS, grid_lon + GRID_RADIUS)
                     feat  = build_feature_matrix(
@@ -1229,6 +1264,7 @@ class ThermalModel:
             "skipped_ambiguous":    ambiguous,
             "skipped_no_terrain":   no_terrain,
             "stopped_at_meteo_budget": quota_stopped,
+            "stopped_at_time_budget":  time_stopped,
             "buffer_total":     len(self._buffer_X),
         }
         log.info(f"[seed] complete: {result}")

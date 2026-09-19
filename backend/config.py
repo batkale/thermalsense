@@ -143,7 +143,17 @@ ARCHIVE_DIR       = Path(os.getenv("THERMALSENSE_ARCHIVE_DIR",
 # than failing — the worst way to break.  Its default now derives from this
 # value and it clamps + warns instead of silently seeding nothing, so the two
 # can no longer drift apart.  Raise this only with the RAM to match.
-BEACON_RETENTION_DAYS = float(os.getenv("BEACON_RETENTION_DAYS", "2"))
+#
+# Lowered from 2 to 1 after the 18 Sep 2026 outage.  The binding constraint has
+# never been disk, it is that anything scanning this file pulls it through a
+# page cache the box does not have: the nightly seed's full scan of a 2.1 GB DB
+# evicted sshd, systemd-resolved and the Azure guest agent to swap, and the host
+# thrashed for 36 h with the container still holding its 700 MB reservation.
+# Halving the file halves that scan.  Nothing is lost by it — _archive_job
+# writes each completed day to Parquet before _purge_job may delete it, and
+# _nightly_seed_job reads the archive, so day two now lives in the archive
+# rather than in the hot file.
+BEACON_RETENTION_DAYS = float(os.getenv("BEACON_RETENTION_DAYS", "1"))
 
 # Free-space floor for the emergency purge (see _disk_guard in main.py).  Losing
 # beacon history is recoverable; filling the disk takes the whole service down
@@ -151,9 +161,17 @@ BEACON_RETENTION_DAYS = float(os.getenv("BEACON_RETENTION_DAYS", "2"))
 # needs a human on SSH to rescue it.  History is the cheapest thing here to give
 # up, so it is what gets given up.
 MIN_FREE_DISK_GB   = float(os.getenv("MIN_FREE_DISK_GB", "3"))
-# However tight the disk gets, never purge below this: past it the DB holds
-# nothing worth training on and is being churned for no gain.
-MIN_RETENTION_DAYS = float(os.getenv("MIN_RETENTION_DAYS", "1"))
+# However tight the disk gets, never purge below this.
+#
+# It used to be one day, on the reasoning that a shorter window leaves nothing
+# worth training on.  The archive changed what the hot DB is for: completed days
+# live in Parquet forever and _nightly_seed_job trains from them, so this file
+# is now a buffer for the day in progress, not the record.  With
+# BEACON_RETENTION_DAYS itself at 1 a floor of 1 also left the disk guard no
+# room to move at all — it would log that it had shortened retention and delete
+# nothing.  Half a day still covers the live loop's own window several times
+# over, and this is the emergency path regardless.
+MIN_RETENTION_DAYS = float(os.getenv("MIN_RETENTION_DAYS", "0.5"))
 
 # --- CPU budget ---------------------------------------------------------------
 # Sized for the 2-vCPU deployment target.  predict() and the retrain fit both run
@@ -194,4 +212,22 @@ SEED_METEO_BUDGET = int(os.getenv("SEED_METEO_BUDGET", "6000"))
 # What the nightly seed pulls from one day of beacons.  Yields roughly a third
 # as many training rows (measured: 10,000 beacons -> 3,100 rows), the rest being
 # dark hours, ground traffic and the ambiguous vario band.
-NIGHTLY_SEED_LIMIT = int(os.getenv("NIGHTLY_SEED_LIMIT", "20000"))
+#
+# Lowered from 20,000 after the 18 Sep 2026 outage.  The number was chosen for
+# how many rows were wanted, with no thought for what producing them costs: the
+# seed builds one 201x201x22 feature matrix (~7 MB) per beacon to keep a single
+# row of it, so 20,000 beacons meant 20,000 such matrices back to back, against
+# the live sampler's MAX_SAMPLE_GRIDS = 60 per cycle.  2,000 is the same order
+# as a day of live sampling rather than three orders above it.
+NIGHTLY_SEED_LIMIT = int(os.getenv("NIGHTLY_SEED_LIMIT", "2000"))
+
+# Wall-clock ceiling for one seed run.  The live sampler has had
+# SAMPLE_TIME_BUDGET_S since the quota work; the seed had no deadline at all,
+# which is the asymmetry that took the box down on 18 Sep 2026 — it stopped only
+# at SEED_METEO_BUDGET, and 1,430 buckets never came near 6,000 calls.  A run
+# that runs out of time is not a failure: buckets it did not reach are picked up
+# by the next run, and the historical meteo cache is permanent, so nothing
+# already paid for is paid for twice.
+#
+# 30 min at 02:00 UTC leaves the morning's live sampling untouched.
+SEED_TIME_BUDGET_S = float(os.getenv("SEED_TIME_BUDGET_S", "1800"))
