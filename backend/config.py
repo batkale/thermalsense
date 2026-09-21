@@ -231,3 +231,14 @@ NIGHTLY_SEED_LIMIT = int(os.getenv("NIGHTLY_SEED_LIMIT", "2000"))
 #
 # 30 min at 02:00 UTC leaves the morning's live sampling untouched.
 SEED_TIME_BUDGET_S = float(os.getenv("SEED_TIME_BUDGET_S", "1800"))
+
+# Whether the 02:00 UTC seed runs at all.
+#
+# On by default: on a box with the RAM for it this is what makes the archive
+# part of training rather than a backup nobody opens.  It exists as a switch
+# because the job took the training node down twice (18 and 21 Sep 2026) and a
+# box recovering from that needs a way to collect live for a few days without an
+# edit to the scheduler.  Live sampling alone is not a poor substitute: measured
+# on 19 Sep 2026 it put 165 positives and 12 benchmark groups into the buffer in
+# two hours of daylight.  The seed is an accelerator, not the engine.
+ENABLE_NIGHTLY_SEED = os.getenv("ENABLE_NIGHTLY_SEED", "1").lower() not in {"0", "false", "no"}

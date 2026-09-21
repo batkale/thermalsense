@@ -19,7 +19,8 @@ from models.thermal_model import ThermalModel, _MIN_SOLAR_GHI
 from config import (UPDATE_INTERVAL, WS_FRAME_INTERVAL, GRID_RES, GRID_RADIUS, CORS_ORIGINS, ADMIN_TOKEN,
                     STATIC_DIR, DATA_DIR, BEACON_RETENTION_DAYS, PREDICT_CONCURRENCY,
                     MIN_FREE_DISK_GB, MIN_RETENTION_DAYS, ENABLE_LANDCOVER,
-                    DB_PATH, ARCHIVE_DIR, NIGHTLY_SEED_LIMIT)
+                    DB_PATH, ARCHIVE_DIR, NIGHTLY_SEED_LIMIT,
+                    ENABLE_NIGHTLY_SEED)
 from pathlib import Path
 import shutil
 
@@ -229,6 +230,8 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(
         _nightly_seed_job, CronTrigger(hour=2, minute=0, timezone="UTC"),
         id="nightly-seed", misfire_grace_time=3600, coalesce=True,
+    ) if ENABLE_NIGHTLY_SEED else log.warning(
+        "[seed] nightly seed disabled (ENABLE_NIGHTLY_SEED=0) — collecting live only"
     )
     scheduler.start()
     yield

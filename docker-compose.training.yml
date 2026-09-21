@@ -26,6 +26,11 @@ services:
       # ~7 MB feature matrix per beacon, 20,000 of them, with no deadline.
       NIGHTLY_SEED_LIMIT: ${NIGHTLY_SEED_LIMIT:-2000}
       SEED_TIME_BUDGET_S: ${SEED_TIME_BUDGET_S:-1800}
+      # Off on this box until a watched manual run proves the per-grid rewrite
+      # holds. Live sampling put 165 positives and 12 benchmark groups into the
+      # buffer in two hours of daylight on 19 Sep 2026, so nothing is waiting on
+      # the seed; the gate is.
+      ENABLE_NIGHTLY_SEED: ${ENABLE_NIGHTLY_SEED:-0}
       # No /predict traffic competes for cores here, so the fit can take both.
       # On the public box this is 1 so a retrain cannot stall serving.
       XGB_FIT_THREADS: ${XGB_FIT_THREADS:-2}
@@ -53,12 +58,18 @@ services:
     # throughout — it had its reservation — so nothing restarted, and the box was
     # unreachable for 36 h until an Azure-side restart.
     #
-    # 600m keeps ~290 MB for the host.  Steady state is 135-190 MB, so the
+    # 600m was still too close: on 21 Sep 2026 the seed walked the container from
+    # 390 MB to 530 MB in two minutes and the host was down to 71 MB available
+    # before anything hit the cap, so sshd and the guest agent starved again --
+    # with the DB at 0.12 GB, which is what ruled the scan out as the cause and
+    # pointed at the per-beacon feature matrix instead.
+    #
+    # 500m keeps ~390 MB for the host.  Steady state is 135-190 MB, so the
     # headroom is real, and memswap_limit pinned to it means an overrun is an
     # OOM kill and a container restart: a failure that recovers itself, rather
     # than one that takes SSH down with it.
-    mem_limit: 600m
-    memswap_limit: 600m
+    mem_limit: 500m
+    memswap_limit: 500m
     # Loopback only. Reach it with `ssh -L 8000:localhost:8000`. The NSG allows
     # nothing but SSH, and this keeps it off the public interface even if that
     # rule is ever loosened.

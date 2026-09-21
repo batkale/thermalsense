@@ -234,11 +234,13 @@ _MC_SAMPLES  = 50
 # training data can get, which the chronological growth otherwise leaves open.
 _MAX_BUFFER  = 200_000
 
-# Distinct grid centres the seed keeps elevation for while working one bucket.
-# A bucket is 0.5 deg square, the grids snap to a 0.01 deg lattice, so a handful
-# covers nearly every beacon in it; 16 grids is ~5 MB, which the 700 MB
-# container can hold and a dict with no ceiling eventually cannot.
-_SEED_ELEV_CACHE = 16
+# Distinct grid centres the seed keeps a built feature matrix for while working
+# one bucket.  A bucket is 0.5 deg square and the grids snap to a 0.01 deg
+# lattice, so a handful covers nearly every beacon in it.  Each entry is an
+# elevation grid (~320 KB) plus its matrix (~7 MB), so this is the largest thing
+# the seed holds: 4 is ~29 MB, which the container has, and a dict with no
+# ceiling is what it does not.
+_SEED_GRID_CACHE = 4
 
 
 # Columns holding the cyclic day-of-year encoding.  Every row collected on one
@@ -978,7 +980,9 @@ class ThermalModel:
         from data.meteo_client import fetch_meteo_historical
         from data.terrain_client import fetch_elevation_grid, snap_grid_centre
         from data.ogn_client import SOARING_AC_TYPES
-        from pipeline.feature_engineering import build_feature_matrix
+        from pipeline.feature_engineering import (build_feature_matrix, cyclic,
+                                                  COL_ALT_AGL, COL_HOUR_SIN,
+                                                  COL_HOUR_COS)
 
         from config import DB_PATH as db_path, BEACON_RETENTION_DAYS
         if not db_path.exists():
@@ -1172,8 +1176,8 @@ class ThermalModel:
                 continue
 
             # One bucket's worth, discarded with the bucket: beacons in the
-            # next 0.5 deg square share nothing with this one.
-            elev_cache: dict = {}
+            # next 0.5 deg square share neither its terrain nor its weather.
+            grid_cache: dict = {}
 
             done_buckets += 1
             if done_buckets % 50 == 0:
@@ -1195,44 +1199,72 @@ class ThermalModel:
                     # ~320 KB of allocation apiece for a value already in hand.
                     # Bounded on purpose — an unbounded cache is the kind of slow
                     # growth that only shows up on the box, at night.
-                    elev = elev_cache.get((grid_lat, grid_lon))
-                    if elev is None:
+                    lat_bounds = (grid_lat - GRID_RADIUS, grid_lat + GRID_RADIUS)
+                    lon_bounds = (grid_lon - GRID_RADIUS, grid_lon + GRID_RADIUS)
+                    # One matrix per grid centre per bucket, not one per beacon.
+                    #
+                    # A 201x201x22 matrix is ~7 MB and the seed keeps a single
+                    # row of it.  Beacons in a bucket are one 0.5 deg square in
+                    # one hour, so they share a handful of centres; the live
+                    # sampler has always built one matrix per grid and read every
+                    # aircraft inside it, and this is the same move.  Doing it
+                    # per beacon is what drove the container to its cap and the
+                    # host into swap on 18 and 21 Sep 2026 -- the DB was 0.12 GB
+                    # by the second time, so the 2 GB scan was never the whole
+                    # story.
+                    #
+                    # The matrix is built with alt_amsl=None, which is the grid's
+                    # own features with COL_ALT_AGL zeroed; the three columns that
+                    # belong to the beacon rather than to the grid are corrected
+                    # on its row below.  test_seed_row_matches_a_full_build pins
+                    # that the result is identical to the per-beacon build.
+                    cached = grid_cache.get((grid_lat, grid_lon))
+                    if cached is None:
                         elev = await fetch_elevation_grid(lat, lon, strict=True)
                         if elev is None:
                             no_terrain += 1
                             continue
-                        if len(elev_cache) >= _SEED_ELEV_CACHE:
-                            elev_cache.clear()
-                        elev_cache[(grid_lat, grid_lon)] = elev
-                    lat_bounds = (grid_lat - GRID_RADIUS, grid_lat + GRID_RADIUS)
-                    lon_bounds = (grid_lon - GRID_RADIUS, grid_lon + GRID_RADIUS)
-                    feat  = build_feature_matrix(
-                        meteo, elev, dt=dt,
-                        lat_bounds=lat_bounds,
-                        lon_bounds=lon_bounds,
-                        alt_amsl=alt,
-                        land_use_props=await _land_props(lat, lon, elev.shape),
-                    )
+                        base = build_feature_matrix(
+                            meteo, elev, dt=dt,
+                            lat_bounds=lat_bounds,
+                            lon_bounds=lon_bounds,
+                            alt_amsl=None,
+                            land_use_props=await _land_props(lat, lon, elev.shape),
+                        )
+                        if len(grid_cache) >= _SEED_GRID_CACHE:
+                            grid_cache.clear()
+                        cached = (elev, base)
+                        grid_cache[(grid_lat, grid_lon)] = cached
+                    elev, base = cached
                     # The beacon's own cell, not the grid centre: snapping moves
                     # the centre off the aircraft by up to half a coarse cell.
                     idx = _grid_index(lat, lon, lat_bounds, lon_bounds, elev.shape)
                     if idx is None:
                         continue
+                    row = base[idx].copy()
+                    # Height above the ground under *this* cell, clipped at 0 for
+                    # the same reason build_feature_matrix clips it.
+                    row[COL_ALT_AGL] = max(float(alt) - float(elev.ravel()[idx]), 0.0)
+                    # The bucket is one hour; its beacons are spread across the
+                    # minutes, and the encoding has minute resolution.
+                    row[COL_HOUR_SIN], row[COL_HOUR_COS] = cyclic(
+                        dt.hour + dt.minute / 60, 24)
                     # Same ground floor the live path applies — see
                     # _MIN_SAMPLE_AGL.  A backfill that skipped it would refill
                     # the buffer with exactly the rows the live path now drops.
-                    if feat[idx, 21] < _MIN_SAMPLE_AGL:
+                    if row[COL_ALT_AGL] < _MIN_SAMPLE_AGL:
                         on_ground += 1
                         continue
-                    if _above_thermal_base(alt, feat[idx, 2], meteo["cape_base"]):
+                    if _above_thermal_base(alt, row[2], meteo["cape_base"]):
                         above_base += 1
                         continue
                     label = _label_for(bool(circling), float(vario))
                     if label is None:
                         ambiguous += 1
                         continue
-                    # .copy() — see retrain(); a view here retains the whole matrix
-                    self._buffer_X.append(feat[idx].copy())
+                    # Already a copy of one row — never a view, which would
+                    # retain the whole cached matrix.  See retrain().
+                    self._buffer_X.append(row)
                     self._buffer_y.append(label)
                     added += 1
                 except Exception as exc:

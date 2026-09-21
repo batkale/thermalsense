@@ -311,6 +311,158 @@ async def test_beacons_in_one_bucket_share_an_elevation_grid(tmp_path, monkeypat
     assert len(fetched) == 1, f"one grid for 12 co-located beacons, got {len(fetched)}"
 
 
+# ---------------------------------------------------------------------------
+# One feature matrix per grid, not per beacon
+# ---------------------------------------------------------------------------
+
+def test_only_three_columns_belong_to_the_observation():
+    """
+    The seed builds a grid's matrix once and corrects the columns that belong to
+    the beacon rather than to the ground.  That is only sound while those really
+    are the only columns an observation moves, so pin it against the matrix
+    builder itself rather than against a written list.
+    """
+    from datetime import datetime, timezone
+    from pipeline import feature_engineering as fe
+
+    meteo = {"temp_2m": 20.0, "humidity": 0.5, "wind_speed": 3.0, "wind_dir": 0.0,
+             "cape": 800.0, "cin": 5.0, "solar_ghi": 700.0, "temp_850": 10.0,
+             "temp_500": -12.0, "lapse_rate": 6.3, "cape_base": 3000,
+             "pbl_height": 1500.0, "soil_temp": 22.0}
+    elev = np.linspace(500.0, 900.0, 9 * 9).reshape(9, 9)
+    bounds = ((46.0, 46.2), (11.0, 11.2))
+
+    base = fe.build_feature_matrix(meteo, elev, dt=datetime(2026, 9, 17, 13, 0,
+                                   tzinfo=timezone.utc),
+                                   lat_bounds=bounds[0], lon_bounds=bounds[1],
+                                   alt_amsl=None)
+    moved = fe.build_feature_matrix(meteo, elev, dt=datetime(2026, 9, 17, 13, 37,
+                                    tzinfo=timezone.utc),
+                                    lat_bounds=bounds[0], lon_bounds=bounds[1],
+                                    alt_amsl=2400.0)
+
+    differing = {c for c in range(fe.FEATURE_COUNT)
+                 if not np.allclose(base[:, c], moved[:, c])}
+    assert differing == {fe.COL_HOUR_SIN, fe.COL_HOUR_COS, fe.COL_ALT_AGL}, (
+        f"columns {sorted(differing)} move with the observation; the seed only "
+        f"corrects {sorted({fe.COL_HOUR_SIN, fe.COL_HOUR_COS, fe.COL_ALT_AGL})}"
+    )
+
+
+def test_seed_row_matches_a_full_build():
+    """
+    The reused-grid row must equal the row a per-beacon build would have
+    produced, exactly.  If it does not, the seed is quietly training on
+    different features from the ones the live sampler collects.
+    """
+    from datetime import datetime, timezone
+    from pipeline import feature_engineering as fe
+
+    meteo = {"temp_2m": 18.0, "humidity": 0.45, "wind_speed": 5.0, "wind_dir": 210.0,
+             "cape": 640.0, "cin": 12.0, "solar_ghi": 810.0, "temp_850": 9.0,
+             "temp_500": -14.0, "lapse_rate": 6.1, "cape_base": 2600,
+             "pbl_height": 1720.0, "soil_temp": 24.0}
+    elev = np.linspace(400.0, 1200.0, 11 * 11).reshape(11, 11)
+    lat_bounds, lon_bounds = (46.0, 46.2), (11.0, 11.2)
+    dt = datetime(2026, 9, 17, 14, 23, tzinfo=timezone.utc)
+    alt = 2150.0
+    idx = 57
+
+    # What the seed now does: grid matrix once, then correct the row.
+    base = fe.build_feature_matrix(meteo, elev, dt=dt, lat_bounds=lat_bounds,
+                                   lon_bounds=lon_bounds, alt_amsl=None)
+    row = base[idx].copy()
+    row[fe.COL_ALT_AGL] = max(alt - float(elev.ravel()[idx]), 0.0)
+    row[fe.COL_HOUR_SIN], row[fe.COL_HOUR_COS] = fe.cyclic(dt.hour + dt.minute / 60, 24)
+
+    # What it used to do: a whole matrix for this one beacon.
+    full = fe.build_feature_matrix(meteo, elev, dt=dt, lat_bounds=lat_bounds,
+                                   lon_bounds=lon_bounds, alt_amsl=alt)
+
+    assert np.array_equal(row, full[idx]), (
+        f"reused row differs at columns "
+        f"{[c for c in range(fe.FEATURE_COUNT) if row[c] != full[idx][c]]}"
+    )
+
+
+def test_a_row_does_not_retain_its_grid(tmp_path, monkeypatch):
+    """A view into the cached matrix would keep all ~7 MB of it alive for every
+    sample in the buffer — the leak the per-grid cache exists to avoid."""
+    from datetime import datetime, timezone
+    from pipeline import feature_engineering as fe
+
+    meteo = {"temp_2m": 20.0, "humidity": 0.5, "wind_speed": 3.0, "wind_dir": 0.0,
+             "cape": 800.0, "cin": 5.0, "solar_ghi": 700.0, "temp_850": 10.0,
+             "temp_500": -12.0, "lapse_rate": 6.3, "cape_base": 3000,
+             "pbl_height": 1500.0, "soil_temp": 22.0}
+    elev = np.full((9, 9), 700.0)
+    base = fe.build_feature_matrix(meteo, elev, dt=datetime(2026, 9, 17, 13, 0,
+                                   tzinfo=timezone.utc),
+                                   lat_bounds=(46.0, 46.2), lon_bounds=(11.0, 11.2),
+                                   alt_amsl=None)
+    row = base[5].copy()
+    assert row.base is None, "the buffered row must own its memory"
+
+
+async def test_one_matrix_per_grid_not_per_beacon(tmp_path, monkeypatch):
+    """
+    The 18 and 21 Sep 2026 outages in one assertion: many beacons at one place
+    must cost one feature matrix, not one apiece.
+    """
+    import sqlite3
+    from datetime import datetime, timedelta, timezone
+    from pipeline import feature_engineering as fe
+
+    db = tmp_path / "b.db"
+    con = sqlite3.connect(db)
+    con.execute("""CREATE TABLE beacons (ts TEXT, id TEXT, lat REAL, lon REAL,
+                   alt REAL, vario REAL, circling INT, is_tow INT,
+                   ac_type INT, under_tow INT)""")
+    base_t = datetime.now(timezone.utc) - timedelta(hours=3)
+    for i in range(30):
+        con.execute("INSERT INTO beacons VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    ((base_t + timedelta(seconds=i * 3)).isoformat(), f"AC{i}",
+                     46.0 + i * 1e-5, 11.0 + i * 1e-5, 2000.0,
+                     2.5 if i % 2 == 0 else -1.2, 1 if i % 2 == 0 else 0, 0, 1, 0))
+    con.commit()
+    con.close()
+
+    monkeypatch.setattr("config.DB_PATH", db, raising=False)
+    monkeypatch.setattr("config.ARCHIVE_DIR", tmp_path / "arch", raising=False)
+    monkeypatch.setattr(tm, "BUFFER_PATH", str(tmp_path / "buf.npz"))
+    monkeypatch.setattr(mc, "live_usage",
+                        lambda: {"day": "d", "requests": 0, "cache_hits": 0,
+                                 "historical_requests": 0, "historical_cache_hits": 0,
+                                 "total": 0, "quota": 10000})
+
+    async def meteo_f(lat, lon, dt, strict=False):
+        return {"temp_2m": 20.0, "humidity": 0.5, "wind_speed": 3.0, "wind_dir": 0.0,
+                "cape": 800.0, "cin": 5.0, "solar_ghi": 700.0, "temp_850": 10.0,
+                "temp_500": -12.0, "lapse_rate": 6.3, "cape_base": 3000,
+                "pbl_height": 1500.0, "soil_temp": 22.0}
+
+    async def terrain(lat, lon, radius=None, strict=False):
+        return np.full(tc.grid_shape(), 800.0)
+
+    builds = []
+    real_build = fe.build_feature_matrix
+
+    def counting_build(*a, **kw):
+        builds.append(kw.get("alt_amsl"))
+        return real_build(*a, **kw)
+
+    monkeypatch.setattr(mc, "fetch_meteo_historical", meteo_f)
+    monkeypatch.setattr(tc, "fetch_elevation_grid", terrain)
+    monkeypatch.setattr(tm, "build_feature_matrix", counting_build, raising=False)
+    monkeypatch.setattr(fe, "build_feature_matrix", counting_build)
+
+    m = tm.ThermalModel()
+    result = await m.seed_from_history(days_back=1, limit=500, reset=True)
+    assert result["added"] > 0, "the fixture must produce labelable rows"
+    assert len(builds) == 1, f"30 co-located beacons built {len(builds)} matrices"
+    assert builds == [None], "the grid matrix must be built without a beacon altitude"
+
+
 async def test_nightly_seed_reads_yesterday(tmp_path, monkeypatch):
     """One day back, appending rather than resetting: the live sampler's rows
     from the same day are still worth keeping."""

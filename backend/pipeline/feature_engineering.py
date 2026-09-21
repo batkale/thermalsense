@@ -9,6 +9,17 @@ _CELL_SIZE_M = GRID_RES * 111_320  # metres per degree (latitude direction, ~55 
 # against this rather than a literal that would silently drift.
 FEATURE_COUNT = 22
 
+# The three columns that depend on the individual observation rather than on the
+# grid it sits in: everything else in a row is a property of the patch of ground
+# and the hour's weather.  Naming them lets a caller build one matrix for a grid
+# and correct these per observation, instead of rebuilding 201x201x22 (~7 MB) to
+# keep a single row — which is what the nightly seed did per beacon until the
+# 18-21 Sep 2026 outages.  Keep them beside the np.column_stack block below;
+# test_feature_engineering pins that they are the only columns that move.
+COL_HOUR_SIN = 15
+COL_HOUR_COS = 16
+COL_ALT_AGL  = 21
+
 # Land-use heat/albedo lookup by CORINE-style class (placeholder values)
 _LAND_USE = {
     "urban":      (1.0, 0.15),
@@ -49,6 +60,12 @@ def _wind_components(speed: float, direction_deg: float):
     u = -speed * np.sin(rad)
     v = -speed * np.cos(rad)
     return u, v
+
+def cyclic(value: float, period: float):
+    """Public: callers correcting COL_HOUR_* per observation need the
+    identical encoding, not a re-derivation of it."""
+    return _cyclic(value, period)
+
 
 def _cyclic(value: float, period: float):
     angle = 2 * np.pi * value / period
