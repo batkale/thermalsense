@@ -150,6 +150,74 @@ def test_a_gap_blocks_the_purge_at_the_gap(tmp_path):
     assert archive.safe_purge_cutoff(root, want) == datetime(2026, 8, 2, tzinfo=timezone.utc)
 
 
+def test_a_gap_before_the_db_starts_does_not_freeze_the_purge(tmp_path):
+    """
+    The 27 Sep 2026 bug, in one assertion.
+
+    08-02 was never archived — it is the day the container was dead — but the
+    hot DB now begins at 08-03, so no surviving row depends on that export.
+    Anchoring the unbroken run at the archive's own start put the ceiling at
+    08-02, behind the first row that existed; every hourly purge then deleted
+    nothing and the DB grew to 5.9 GB under a one-day retention setting.
+    """
+    root = tmp_path / "arch"
+    for d in (date(2026, 8, 1), date(2026, 8, 3), date(2026, 8, 4)):
+        p = archive.day_path(root, d)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x")
+
+    want = datetime(2026, 8, 5, tzinfo=timezone.utc)
+
+    # Anchored at the archive: the old behaviour, and still right when the
+    # caller cannot say what the DB holds.
+    assert archive.safe_purge_cutoff(root, want) == datetime(2026, 8, 2, tzinfo=timezone.utc)
+
+    # Anchored at the DB's oldest day: 08-03 and 08-04 are both archived, so the
+    # ceiling moves to 08-05 and the purge is free again.
+    assert archive.safe_purge_cutoff(
+        root, want, date(2026, 8, 3)) == datetime(2026, 8, 5, tzinfo=timezone.utc)
+
+
+def test_an_unarchived_oldest_day_still_blocks_everything(tmp_path):
+    """The interlock's whole point survives the change: when the oldest day the
+    DB holds is itself single-copy, nothing may be deleted."""
+    root = tmp_path / "arch"
+    for d in (date(2026, 8, 1), date(2026, 8, 4)):
+        p = archive.day_path(root, d)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x")
+    want = datetime(2026, 8, 5, tzinfo=timezone.utc)
+    # DB starts at 08-03, which is not archived.
+    assert archive.safe_purge_cutoff(root, want, date(2026, 8, 3)) < want
+    assert archive.safe_purge_cutoff(root, want, date(2026, 8, 3)).year == 1
+
+
+def test_a_gap_after_the_db_start_still_blocks_at_the_gap(tmp_path):
+    """Moving the anchor must not let a hole be stepped over: 08-04 is missing
+    and the DB starts at 08-03, so the ceiling is 08-04, not 08-06."""
+    root = tmp_path / "arch"
+    for d in (date(2026, 8, 3), date(2026, 8, 5)):
+        p = archive.day_path(root, d)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"x")
+    want = datetime(2026, 8, 6, tzinfo=timezone.utc)
+    assert archive.safe_purge_cutoff(
+        root, want, date(2026, 8, 3)) == datetime(2026, 8, 4, tzinfo=timezone.utc)
+
+
+def test_the_export_batch_stays_small_enough_for_the_container():
+    """
+    200,000 rows of 10-column tuples is 100-140 MB of CPython objects, live at
+    the same time as the Arrow table built from them, which is what OOM-killed
+    the app every hour between 24 and 27 Sep 2026.  This is a memory budget, so
+    it is pinned rather than left to whoever next tunes throughput.
+    """
+    assert archive._BATCH <= 50_000, (
+        f"_BATCH={archive._BATCH:,} — at ~600 B/row that is "
+        f"{archive._BATCH * 600 / 1e6:.0f} MB per batch against a 500 MB container"
+    )
+
+
 def test_seed_skips_archive_days_the_hot_db_still_holds(tmp_path, monkeypatch):
     """
     The boundary is what SQLite still holds, not BEACON_RETENTION_DAYS.  They

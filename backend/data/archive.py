@@ -53,7 +53,14 @@ _COMPRESSION_LEVEL = 9
 # worldwide feed is ~7.7M rows and the deployment target has 896 MB of RAM, so
 # materialising a day at once is exactly the kind of thing that took the box
 # down before.
-_BATCH = 200_000
+# Rows pulled out of SQLite per Parquet write.  The export was always streamed
+# — ParquetWriter appends batch by batch — but the batch itself was the problem:
+# 200,000 rows of 10-column tuples is 100-140 MB of CPython objects, held while
+# the Arrow table built from them is also live, so one cycle peaked near 200 MB
+# against a 500 MB container.  That is what OOM-killed the app hourly between
+# 24 and 27 Sep 2026, each kill leaving another .part behind.  20,000 rows is
+# ~12 MB and costs only a few more writes per day.
+_BATCH = 20_000
 
 _SCHEMA_FIELDS = [
     ("ts", "timestamp"), ("id", "string"), ("lat", "float32"),
@@ -117,6 +124,13 @@ def _rows_for_day(con: sqlite3.Connection, day: date):
     lo = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc).isoformat()
     hi = (datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
           + timedelta(days=1)).isoformat()
+    # ORDER BY id, ts is what makes the delta and dictionary encodings pay (see
+    # export_day), but with no index on the sort key SQLite must materialise the
+    # whole day before yielding a row.  Let it use a disk sorter with a small
+    # page cache: there are tens of GB of disk and ~300 MB of RAM to spare, so
+    # the scarce resource is the one to spend last.
+    con.execute("PRAGMA temp_store=FILE")
+    con.execute("PRAGMA cache_size=-8000")        # 8 MB, not the 2 GB default share
     cur = con.execute(
         "SELECT ts, id, lat, lon, alt, vario, circling, is_tow, ac_type, under_tow "
         "FROM beacons WHERE ts >= ? AND ts < ? ORDER BY id, ts",
@@ -230,15 +244,29 @@ def export_completed_days(db_path: Path, root: Path, today: date | None = None) 
     return out
 
 
-def safe_purge_cutoff(root: Path, requested_cutoff: datetime) -> datetime:
+def safe_purge_cutoff(root: Path, requested_cutoff: datetime,
+                      db_first_day: date | None = None) -> datetime:
     """
     Pull a purge cutoff back to the start of the oldest unarchived day.
 
     Without this the purge and the export are two independent jobs racing over
     the same rows: one failed export followed by a successful purge deletes a
     day that exists nowhere else, permanently and silently.  Archiving is the
-    whole reason retention is allowed to stay at two days, so the delete has to
-    be subordinate to it.
+    whole reason retention is allowed to be as short as it is, so the delete has
+    to be subordinate to it.
+
+    `db_first_day` is the oldest day the hot DB still holds, and the unbroken run
+    is measured **from there**, not from the oldest day the archive happens to
+    contain.  Anchoring it at the archive's own start was wrong in a way that
+    took six days to show: a gap on 20 Sep 2026 (the day the container was dead)
+    ended the run at 19 Sep, while the DB began at 21 Sep — so the ceiling sat
+    *behind* the first row that existed, every hourly purge deleted nothing, and
+    the DB grew to 5.9 GB under a one-day retention setting.  A day missing from
+    the archive cannot protect rows the DB does not have.
+
+    Passing None keeps the old epoch-anchored behaviour, which is still the
+    right answer when the caller cannot say what the DB holds: it errs towards
+    deleting nothing.
     """
     done = archived_days(root)
     if not done:
@@ -247,11 +275,12 @@ def safe_purge_cutoff(root: Path, requested_cutoff: datetime) -> datetime:
         # both are cases where growing the DB is recoverable and deleting is not.
         return datetime.min.replace(tzinfo=timezone.utc)
 
-    # Delete only within the unbroken archived prefix.  A gap means an export
-    # failed for that day, and everything from the gap onward is still
-    # single-copy.  Walking from the oldest archived day rather than backwards
-    # from the cutoff means a hole cannot be stepped over.
-    day = min(done)
+    # Walk forward from the first day that is actually at risk, so a hole cannot
+    # be stepped over but a hole in days already gone cannot freeze the purge.
+    day = min(done) if db_first_day is None else db_first_day
+    if day not in done:
+        # The oldest day still in the DB is itself unarchived — nothing may go.
+        return datetime.min.replace(tzinfo=timezone.utc)
     while day in done:
         day += timedelta(days=1)
     floor = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)

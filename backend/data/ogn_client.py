@@ -166,7 +166,22 @@ def purge_old_beacons(days: float | None = None, chunk: int = 50_000,
             print("[OGN] emergency purge — archive interlock bypassed, "
                   "unarchived beacons may be lost")
         elif archive.available():
-            safe = archive.safe_purge_cutoff(ARCHIVE_DIR, cutoff_dt)
+            # The oldest day the DB still holds is where the unbroken-archive
+            # requirement starts.  Without it a gap in days the DB no longer has
+            # pins the ceiling behind the first surviving row and the purge
+            # silently stops deleting anything — see safe_purge_cutoff.
+            db_first = None
+            try:
+                with sqlite3.connect(f"file:{_DB_PATH}?mode=ro", uri=True,
+                                     timeout=30) as probe:
+                    row = probe.execute(
+                        "SELECT MIN(substr(ts, 1, 10)) FROM beacons").fetchone()
+                if row and row[0]:
+                    db_first = datetime.fromisoformat(row[0]).date()
+            except Exception as exc:
+                print(f"[OGN] could not read the DB's oldest day ({exc}) — "
+                      f"falling back to the archive-anchored ceiling")
+            safe = archive.safe_purge_cutoff(ARCHIVE_DIR, cutoff_dt, db_first)
             if safe < cutoff_dt:
                 print(f"[OGN] purge held back to {safe.date()} — later days are "
                       f"not archived yet")
