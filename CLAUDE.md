@@ -210,6 +210,43 @@ Breaking any of these has taken the app down or silently corrupted results befor
   same allowance; `meteo_client.live_usage()["total"]` counts both endpoints.
   Overlap with rows the live sampler already took from the same day is possible
   and expected to be small; the panel shows the run's `added` count.
+- **What the score actually is, measured 27 Sep 2026** on the first buffer big
+  enough to measure anything (11,774 rows, 1,714 positives, 2,571 scoring units,
+  77 benchmark groups — the gate is open and fits are being accepted). Scored
+  within (day, cell, hour), which is what one heatmap ranks over:
+
+  | ranker | micro | 95% CI |
+  |---|---|---|
+  | `terrain_multiplier` | 0.519 | [0.484, 0.556] — at chance |
+  | `alt_agl` alone | 0.473 | [0.440, 0.512] — **below** chance |
+  | `cos_incidence` alone | 0.532 | [0.503, 0.562] |
+  | served model (22 cols) | 0.542 | [0.519, 0.567] |
+
+  `alt_agl` alone being below chance is the ground-row leak confirmed gone; it
+  used to score 0.631 and carry almost the whole headline.
+- **Nothing has yet been proven to raise it, and four things have been ruled
+  out.** Paired deltas against the shipped setup, same groups, 1,500 bootstrap
+  resamples: `solar` as a 23rd column −0.019 [−0.051, +0.010]; a pairwise
+  **ranking objective** grouped by the scoring unit −0.013 [−0.046, +0.015];
+  training on only the six columns that vary inside a group +0.010
+  [−0.009, +0.027]; `prior` **+0.014 [−0.002, +0.029]**. All inconclusive.
+  `evaluation/objective.py` holds the ranker experiment — the hypothesis was
+  that 16 constant-within-group columns let a global classifier memorise which
+  hours are thermic while we score where inside an hour the lift sits. It is
+  wrong, and the file exists so nobody re-derives it.
+- **`prior` is the leading candidate and it is clean.** Nearest to significance,
+  covers 99.4% of buffer rows, and `LAG_HOURS = 24` is enforced in the SQL with
+  a test asserting a cell's own beacons cannot move its own prior — so the gain
+  is not the label leaking back. Its index lives only on the training node;
+  measuring it locally means extracting `prior_cells` (103 MB, vs 6.4 GB for the
+  DB around it) and pointing `config.DB_PATH` at the extract with
+  `evaluate._prior_ready = True`.
+- **~0.55 is where terrain and altitude run out.** That is the honest reading of
+  the table: the six columns that vary within a group are position, the terrain
+  derived from it, and the aircraft's height, and none of them measures whether
+  *this* ground is hot right now. The untried lever is a per-cell column that
+  does — satellite land surface temperature, or insolation integrated since
+  sunrise rather than instantaneous `cos_incidence`.
 - **Quality gate:** the challenger and the serving model are scored on identical
   rows from a *frozen, group-disjoint* benchmark (`evaluation/holdout.py`), and
   the challenger is rejected unless a paired bootstrap CI (`paired_delta_ci`)
