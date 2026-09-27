@@ -205,6 +205,60 @@ def test_a_gap_after_the_db_start_still_blocks_at_the_gap(tmp_path):
         root, want, date(2026, 8, 3)) == datetime(2026, 8, 4, tzinfo=timezone.utc)
 
 
+def test_a_locked_chunk_does_not_abandon_the_purge(tmp_path, monkeypatch):
+    """
+    Measured on 27 Sep 2026: a run deleted 2.15M rows over 19 minutes, then hit
+    one "database is locked" from the stream thread and dropped the remaining
+    30M. On a backlog that never clears, giving up is the same outcome as the
+    interlock bug that created the backlog.
+    """
+    import sqlite3 as sq
+    import data.ogn_client as oc
+
+    db = tmp_path / "b.db"
+    con = sq.connect(db)
+    con.execute("""CREATE TABLE beacons (ts TEXT, id TEXT, lat REAL, lon REAL,
+                   alt REAL, vario REAL, circling INT, is_tow INT,
+                   ac_type INT, under_tow INT)""")
+    old = "2020-01-01T00:00:00+00:00"
+    con.executemany("INSERT INTO beacons VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    [(old, f"A{i}", 46.0, 11.0, 1000.0, 0.0, 0, 0, 1, 0)
+                     for i in range(40)])
+    con.commit()
+    con.close()
+
+    monkeypatch.setattr(oc, "_DB_PATH", db)
+    monkeypatch.setattr(oc, "_PURGE_STALL_SLEEP_S", 0.0)
+    monkeypatch.setattr(oc, "_PURGE_CHUNK_SLEEP_S", 0.0)
+
+    real_connect = sq.connect
+    state = {"fired": False}
+
+    class Flaky:
+        """Raises 'database is locked' once, mid-run, then behaves."""
+        def __init__(self, con): self._con = con
+        def __enter__(self): return self
+        def __exit__(self, *a): return self._con.__exit__(*a)
+        def execute(self, sql, *args):
+            if sql.startswith("DELETE") and not state["fired"]:
+                state["fired"] = True
+                raise sq.OperationalError("database is locked")
+            return self._con.execute(sql, *args)
+        def commit(self): return self._con.commit()
+
+    def fake_connect(path, *a, **kw):
+        con = real_connect(path, *a, **kw)
+        return Flaky(con) if str(path) == str(db) else con
+
+    monkeypatch.setattr(oc.sqlite3, "connect", fake_connect)
+    # No archive, so the interlock would normally block everything — this is
+    # about the retry, so take the emergency path that bypasses it.
+    deleted = oc.purge_old_beacons(1, chunk=10, emergency=True)
+
+    assert state["fired"], "the test did not exercise the lock path"
+    assert deleted == 40, f"the retry must finish the backlog, got {deleted}"
+
+
 def test_the_export_batch_stays_small_enough_for_the_container():
     """
     200,000 rows of 10-column tuples is 100-140 MB of CPython objects, live at

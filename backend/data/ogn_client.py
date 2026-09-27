@@ -128,6 +128,15 @@ def flush_beacons() -> None:
         _pending.clear()
 
 
+# How long the purge waits out a locked chunk, and how many times.  The stream
+# thread flushes every few seconds, so a stall is normally over in one sleep;
+# the ceiling exists so an hourly job cannot turn into a permanent one.
+_PURGE_STALL_SLEEP_S = 2.0
+_PURGE_MAX_STALLS = 15
+# Breathing room between chunks, so a large backlog does not starve the feed.
+_PURGE_CHUNK_SLEEP_S = 0.05
+
+
 def purge_old_beacons(days: float | None = None, chunk: int = 50_000,
                       emergency: bool = False) -> int:
     """
@@ -196,22 +205,51 @@ def purge_old_beacons(days: float | None = None, chunk: int = 50_000,
         # serialises writers.  Wait rather than raise "database is locked".
         with sqlite3.connect(_DB_PATH, timeout=30) as con:
             con.execute("PRAGMA synchronous=NORMAL")
+            # A locked chunk is a pause, not a failure.  The stream thread
+            # commits a batch every few seconds and WAL still serialises
+            # writers, so on a large backlog the purge and the feed will collide
+            # — measured on 27 Sep 2026, a run deleted 2.15M rows over 19 min
+            # and then abandoned the remaining 30M on one "database is locked".
+            # Giving up there means the backlog never clears, which is the state
+            # the archive-anchored interlock bug had already left the DB in.
+            stalls = 0
             while True:
-                cur = con.execute(
-                    "DELETE FROM beacons WHERE ROWID IN"
-                    " (SELECT ROWID FROM beacons WHERE ts < ? LIMIT ?)",
-                    (cutoff, chunk),
-                )
-                con.commit()
+                try:
+                    cur = con.execute(
+                        "DELETE FROM beacons WHERE ROWID IN"
+                        " (SELECT ROWID FROM beacons WHERE ts < ? LIMIT ?)",
+                        (cutoff, chunk),
+                    )
+                    con.commit()
+                except sqlite3.OperationalError as exc:
+                    if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                        raise
+                    stalls += 1
+                    if stalls > _PURGE_MAX_STALLS:
+                        print(f"[OGN] purge yielding after {stalls} stalls — "
+                              f"{deleted:,} rows deleted, the rest next cycle")
+                        break
+                    time.sleep(_PURGE_STALL_SLEEP_S)
+                    continue
+                stalls = 0
                 deleted += cur.rowcount
                 if cur.rowcount < chunk:
                     break
+                # Yield between chunks so the feed's own writes get a turn; a
+                # purge that starves the stream loses beacons to catch up on
+                # storage, which is the wrong trade.
+                time.sleep(_PURGE_CHUNK_SLEEP_S)
             # Hand the freed pages back to the filesystem.  A no-op unless the
             # DB was created with auto_vacuum=INCREMENTAL, so on the databases
             # that predate that pragma the delete still only caps growth.
             if deleted:
-                con.execute("PRAGMA incremental_vacuum")
-                con.commit()
+                try:
+                    con.execute("PRAGMA incremental_vacuum")
+                    con.commit()
+                except sqlite3.OperationalError as exc:
+                    # Worth a line but not worth failing over: the pages stay
+                    # free inside the file and the next run reclaims them.
+                    print(f"[OGN] incremental_vacuum deferred ({exc})")
     except Exception as exc:
         print(f"[OGN] beacon purge failed: {exc}")
     return deleted
