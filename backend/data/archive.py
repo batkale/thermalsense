@@ -124,11 +124,12 @@ def _rows_for_day(con: sqlite3.Connection, day: date):
     lo = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc).isoformat()
     hi = (datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
           + timedelta(days=1)).isoformat()
-    # ORDER BY id, ts is what makes the delta and dictionary encodings pay (see
-    # export_day), but with no index on the sort key SQLite must materialise the
-    # whole day before yielding a row.  Let it use a disk sorter with a small
-    # page cache: there are tens of GB of disk and ~300 MB of RAM to spare, so
-    # the scarce resource is the one to spend last.
+    # idx_id_ts covers ORDER BY id, ts, so SQLite streams this rather than
+    # materialising the day — that was checked, not assumed.  These two pragmas
+    # are a floor under the case where it cannot: a planner choosing a different
+    # path, or a DB restored without its indexes.  There are tens of GB of disk
+    # and ~300 MB of RAM to spare, so the scarce resource is the one to spend
+    # last, and the cost when the index is used is nil.
     con.execute("PRAGMA temp_store=FILE")
     con.execute("PRAGMA cache_size=-8000")        # 8 MB, not the 2 GB default share
     cur = con.execute(
