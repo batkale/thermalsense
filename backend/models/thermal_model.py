@@ -1,5 +1,7 @@
 import asyncio
+import os
 import logging
+import tempfile
 import time
 import xgboost as xgb
 import numpy as np
@@ -575,20 +577,56 @@ class ThermalModel:
         log.info(f"[model] buffer restored: {len(self._buffer_X)} samples from disk")
 
     def _save_buffer(self) -> None:
-        """Write the sample buffer to disk. Never raises — a failed save must not
-        abort a retrain that has already done the expensive collection work."""
+        """
+        Write the sample buffer to disk, atomically.  Never raises — a failed
+        save must not abort a retrain that has already done the expensive
+        collection work.
+
+        Written under a temporary name in the same directory and renamed into
+        place, so an interrupted write cannot leave a half-file where the buffer
+        was.  That is not hypothetical: on 28 Sep 2026 an OOM kill landed inside
+        np.savez and the next start found "File is not a zip file", set the
+        buffer aside and began again from zero — 12,381 samples and 10 days of
+        weather down to nothing, and the benchmark from 77 groups to 3.
+        np.savez writes a zip, so a truncated one is not partially usable; it is
+        unreadable.
+
+        This box OOM-kills the container by design (mem_limit is a blast radius
+        and the restart is the recovery), so a non-atomic write to the one file
+        that cannot be recollected was a real hazard, not a remote one.
+        os.replace is atomic within a filesystem, and the temp file is created
+        beside the target to guarantee that.
+        """
         if not self._buffer_X:
             return
+        tmp = None
         try:
-            Path(BUFFER_PATH).parent.mkdir(parents=True, exist_ok=True)
-            np.savez(
-                BUFFER_PATH,
-                X=np.array(self._buffer_X),
-                y=np.array(self._buffer_y),
-                label_version=np.array(_LABEL_VERSION),
-            )
+            dest = Path(BUFFER_PATH)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(dir=str(dest.parent), suffix=".npz.part")
+            os.close(fd)
+            tmp = Path(tmp_name)
+            # np.savez appends .npz unless the target is a file object, and the
+            # temp name already ends in one — so hand it the handle.
+            with open(tmp, "wb") as fh:
+                np.savez(
+                    fh,
+                    X=np.array(self._buffer_X),
+                    y=np.array(self._buffer_y),
+                    label_version=np.array(_LABEL_VERSION),
+                )
+                fh.flush()
+                # The rename is atomic but says nothing about the bytes having
+                # reached the platter; a host that loses power between the two
+                # would publish a truncated file under the real name.
+                os.fsync(fh.fileno())
+            os.replace(tmp, dest)
+            tmp = None
         except Exception as exc:
             log.warning(f"[model] could not save buffer ({exc})")
+        finally:
+            if tmp is not None:
+                tmp.unlink(missing_ok=True)
 
     async def retrain(self) -> None:
         """

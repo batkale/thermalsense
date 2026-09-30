@@ -264,3 +264,52 @@ async def test_guard_fires_exactly_at_the_training_floor(monkeypatch):
 
     _patch_predict_deps(monkeypatch, solar_ghi=tm._MIN_SOLAR_GHI)
     assert (await main.predict(lat=47.1, lon=13.1))["no_insolation"] is False
+
+# ---------------------------------------------------------------------------
+# The buffer save must survive being killed mid-write
+# ---------------------------------------------------------------------------
+
+def test_a_killed_save_leaves_the_previous_buffer_intact(tmp_path, monkeypatch):
+    """
+    28 Sep 2026: an OOM kill landed inside np.savez, the next start found
+    "File is not a zip file", set the buffer aside and began from zero — 12,381
+    samples and 10 days of weather gone, the benchmark from 77 groups to 3.
+    This box OOM-kills the container by design, so the one file that cannot be
+    recollected has to survive an interrupted write.
+    """
+    import numpy as np
+    import models.thermal_model as tm
+
+    buf = tmp_path / "training_buffer.npz"
+    monkeypatch.setattr(tm, "BUFFER_PATH", str(buf))
+
+    m = tm.ThermalModel()
+    m._buffer_X = [np.arange(tm.FEATURE_COUNT, dtype=float) for _ in range(20)]
+    m._buffer_y = [i % 2 for i in range(20)]
+    m._save_buffer()
+
+    good = buf.read_bytes()
+    assert len(good) > 0
+    with np.load(buf, allow_pickle=False) as d:
+        assert len(d["y"]) == 20
+
+    # Now a save that dies partway through, the way a cgroup OOM kill does.
+    real_savez = np.savez
+
+    def dying_savez(fh, **kw):
+        fh.write(b"PK\x03\x04truncated")     # a plausible half-written zip
+        raise MemoryError("killed mid-write")
+
+    monkeypatch.setattr(tm.np, "savez", dying_savez)
+    m._buffer_X = [np.arange(tm.FEATURE_COUNT, dtype=float) for _ in range(99)]
+    m._buffer_y = [1] * 99
+    m._save_buffer()                      # must not raise
+    monkeypatch.setattr(tm.np, "savez", real_savez)
+
+    assert buf.read_bytes() == good, "the interrupted write replaced a good buffer"
+    with np.load(buf, allow_pickle=False) as d:
+        assert len(d["y"]) == 20, "the previous buffer must still load"
+
+    # And no debris left behind to be mistaken for a buffer later.
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name != buf.name]
+    assert leftovers == [], f"temp files left behind: {leftovers}"
