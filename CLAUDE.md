@@ -397,8 +397,11 @@ separate x and y pixel sizes.
 
 - `.claude/` is gitignored; `CLAUDE.md` at the repo root is not, so durable
   project knowledge belongs here.
-- `myVm_key.pem` sits in the repo root and is covered by the `*.pem` gitignore
-  rule.
+- **`*.pem`, `*.key` and `.env` are gitignored** (`.env.example` is not).
+  That rule was added on 2 Oct 2026; before it this file claimed the
+  protection existed when it did not. Nothing had leaked — verified across
+  the whole history — but the VM's SSH key and the `ADMIN_TOKEN` env file
+  live in the working tree, so it had been luck.
 - The 22-column feature list goes stale often. Read `FEATURE_COUNT` and the
   `np.column_stack` block in `feature_engineering.py` rather than trusting any
   written list, including the one in `docs/ARCHITECTURE.md`.
