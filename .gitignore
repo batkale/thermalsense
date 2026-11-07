@@ -58,3 +58,10 @@ backend/cache/
 !**/.env.example
 *.key
 *.pem
+
+# Cold beacon archive (data/archive.py). Parquet, one directory per day —
+# gigabytes on a real node, so it lives on disk, never in git.
+backend/archive/
+# Data exports handed over from a training node
+*.zip
+*.tar

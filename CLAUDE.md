@@ -22,7 +22,7 @@ All backend commands run from `backend/`. A Windows venv exists at
 `backend/.venv` with every dependency installed — prefer it.
 
 ```bash
-# Tests — 302 tests, ~5 s
+# Tests — 314 tests, ~8 s (needs pyarrow, or the archive tests skip)
 cd backend && ./.venv/Scripts/python.exe -m pytest tests/ -q
 
 # Single test file
@@ -51,6 +51,11 @@ docker compose up -d --build
 
 There is no lint or typecheck step configured. `pytest.ini` sets
 `asyncio_mode = auto`, so async tests need no decorator.
+
+`tests/conftest.py` points the model, buffer, beacon DB and archive paths at
+each test's `tmp_path` (autouse). Keep it that way: before it, a run replaced
+the real `training_buffer.npz` with 3 stub rows — the buffer committed from
+17 Sep to 30 Sep 2026 was that file — and wrote into a local `ogn_history.db`.
 
 ## Layout
 
