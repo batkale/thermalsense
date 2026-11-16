@@ -105,6 +105,9 @@ const STRINGS = {
     predictFailed:      'Tahmin alınamadı. Bağlantıyı kontrol edip tekrar tıklayın.',
     noInsolationMap:    'Bu saatte güneş ışınımı yok, termal oluşamaz. İleri '
                       + 'saatler için Tahmin sürgüsünü kaydırın.',
+    meteoFallbackMap:   'Hava tahmini şu an alınamadı; bu harita varsayılan '
+                      + 'hava değerleriyle çizildi. Yalnızca arazi sıralamasına '
+                      + 'güvenin, yüzdelere değil.',
 
     // legend
     legendTitle:        'Termal olasılığı',
@@ -299,6 +302,9 @@ const STRINGS = {
                       + 'click again.',
     noInsolationMap:    'No sun at this hour, so no thermals can form. Drag the '
                       + 'Forecast slider to look ahead.',
+    meteoFallbackMap:   'The weather forecast is unavailable right now, so this '
+                      + 'map was drawn on default weather. Trust the terrain '
+                      + 'ranking, not the percentages.',
 
     legendTitle:        'Thermal probability',
     low:                'Low',

@@ -16,12 +16,18 @@ from data.meteo_client    import fetch_meteo_features
 from data.landcover_client import fetch_landcover_fine
 from data.terrain_client  import fetch_elevation_grid, fetch_elevation_point, fetch_elevation_batch, snap_grid_centre, cached_elevation, coarse_lattice
 from pipeline.feature_engineering import build_feature_matrix
-from models.thermal_model import ThermalModel, _MIN_SOLAR_GHI
+from models.thermal_model import (ThermalModel, _MIN_SOLAR_GHI, _label_for,
+                                  _POSITIVE_MIN_VARIO, _NEGATIVE_MAX_VARIO)
+from data import forecast_ledger as ledger
+from data.ogn_client      import SOARING_AC_TYPES
 from config import (UPDATE_INTERVAL, WS_FRAME_INTERVAL, GRID_RES, GRID_RADIUS, CORS_ORIGINS, ADMIN_TOKEN,
                     STATIC_DIR, DATA_DIR, BEACON_RETENTION_DAYS, PREDICT_CONCURRENCY,
                     MIN_FREE_DISK_GB, MIN_RETENTION_DAYS, ENABLE_LANDCOVER,
                     DB_PATH, ARCHIVE_DIR, NIGHTLY_SEED_LIMIT,
-                    ENABLE_NIGHTLY_SEED)
+                    ENABLE_NIGHTLY_SEED, LIVE_FUSION_TAU_MIN, LIVE_FUSION_MAX_MIN,
+                    ENABLE_FORECAST_LEDGER, LEDGER_DB_PATH, LEDGER_ISSUE_EVERY_MIN,
+                    LEDGER_HORIZONS_MIN, LEDGER_FIXED_SITES, LEDGER_DYNAMIC_SITES,
+                    LEDGER_MIN_AIRCRAFT, LEDGER_METEO_CEILING, LEDGER_GRID_KEEP_DAYS)
 from pathlib import Path
 import shutil
 
@@ -207,6 +213,91 @@ async def _purge_job() -> None:
         log.warning(f"[purge] disk guard failed: {exc}")
 
 
+_ledger_lock = asyncio.Lock()
+
+
+async def _ledger_issue_job() -> None:
+    """Issue and record one forecast per site and horizon (see forecast_ledger).
+
+    Night hours are skipped before the model runs: the meteo lookup is the same
+    cached call compute_prediction makes, so asking it first costs nothing, and
+    a map zeroed by the night guard has nothing to score.
+    """
+    if _ledger_lock.locked():
+        log.info("[ledger] previous issue still running, skipping")
+        return
+    async with _ledger_lock:
+        used = meteo_client.live_usage().get("total", 0)
+        if used >= LEDGER_METEO_CEILING:
+            log.info(f"[ledger] meteo calls at {used} >= {LEDGER_METEO_CEILING}, skipping issue")
+            return
+        gliders = await fetch_ogn_gliders()
+        sites = ledger.choose_sites(gliders, LEDGER_FIXED_SITES, LEDGER_DYNAMIC_SITES,
+                                    LEDGER_MIN_AIRCRAFT, is_thermal_evidence)
+        clusters = _cluster_circling(gliders)
+        version = ledger.model_version(model)
+        written = night = failed = 0
+        for name, lat, lon in sites:
+            for h_min in LEDGER_HORIZONS_MIN:
+                fh = round(h_min / 15) / 4
+                try:
+                    m = await fetch_meteo_features(lat, lon, fh)
+                    if m["solar_ghi"] < _MIN_SOLAR_GHI:
+                        night += 1
+                        continue
+                    p = await compute_prediction(lat, lon, None, fh)
+                    r = p["radius"]
+                    thermals = [
+                        {"lat": t["lat"], "lon": t["lon"], "count": t["count"]}
+                        for t in clusters
+                        if abs(t["lat"] - p["grid_lat"]) <= r and abs(t["lon"] - p["grid_lon"]) <= r
+                    ]
+                    terr = getattr(model, "_terrain_multiplier", None)
+                    terr = terr(p["features"]) if terr else None
+
+                    def _write(p=p, terr=terr, thermals=thermals, name=name,
+                               lat=lat, lon=lon, h_min=h_min):
+                        con = ledger.connect(LEDGER_DB_PATH)
+                        try:
+                            return ledger.record_forecast(con, name, lat, lon, h_min, p, terr,
+                                                          version, thermals, GRID_RES)
+                        finally:
+                            con.close()
+                    await asyncio.to_thread(_write)
+                    written += 1
+                except Exception as exc:
+                    failed += 1
+                    log.warning(f"[ledger] {name} +{h_min} min failed: {exc}")
+        log.info(f"[ledger] issued {written} forecasts over {len(sites)} sites "
+                 f"({night} skipped at night, {failed} failed)")
+
+
+async def _ledger_score_job() -> None:
+    try:
+        res = await asyncio.to_thread(
+            ledger.score_due, LEDGER_DB_PATH, DB_PATH, SOARING_AC_TYPES, _label_for,
+            _POSITIVE_MIN_VARIO, _NEGATIVE_MAX_VARIO)
+        if res.get("scored"):
+            log.info(f"[ledger] scored {res}")
+    except Exception as exc:
+        log.warning(f"[ledger] scoring failed: {exc}")
+
+
+async def _ledger_prune_job() -> None:
+    def _prune():
+        con = ledger.connect(LEDGER_DB_PATH)
+        try:
+            return ledger.prune_grids(con, LEDGER_GRID_KEEP_DAYS)
+        finally:
+            con.close()
+    try:
+        n = await asyncio.to_thread(_prune)
+        if n:
+            log.info(f"[ledger] pruned {n} grids older than {LEDGER_GRID_KEEP_DAYS} days")
+    except Exception as exc:
+        log.warning(f"[ledger] prune failed: {exc}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     start_ogn_stream()
@@ -234,6 +325,21 @@ async def lifespan(app: FastAPI):
     ) if ENABLE_NIGHTLY_SEED else log.warning(
         "[seed] nightly seed disabled (ENABLE_NIGHTLY_SEED=0) — collecting live only"
     )
+    if ENABLE_FORECAST_LEDGER:
+        # Issue on the quarter hour; score a few minutes off it so the two never
+        # contend, and so a window that closed at :15 is scored by :22.
+        scheduler.add_job(
+            _ledger_issue_job, CronTrigger(minute=f"*/{LEDGER_ISSUE_EVERY_MIN}", timezone="UTC"),
+            id="ledger-issue", misfire_grace_time=300, coalesce=True,
+        )
+        scheduler.add_job(
+            _ledger_score_job, CronTrigger(minute="7,22,37,52", timezone="UTC"),
+            id="ledger-score", misfire_grace_time=600, coalesce=True,
+        )
+        scheduler.add_job(
+            _ledger_prune_job, CronTrigger(hour=3, minute=30, timezone="UTC"),
+            id="ledger-prune", misfire_grace_time=3600, coalesce=True,
+        )
     scheduler.start()
     yield
     scheduler.shutdown(wait=False)
@@ -362,13 +468,19 @@ def _apply_ogn_fusion(
     gliders: list[dict],
     grid_lat: float, grid_lon: float, radius: float,
     rows: int, cols: int,
+    weight: float = 1.0,
 ) -> list[float]:
     """Blend live confirmed thermals (circling + vario > 1 m/s) into the ML heatmap.
 
     grid_lat/grid_lon are the grid's own centre (see snap_grid_centre), not the
     point the caller asked about — a glider is placed relative to the cells that
     exist, not to where the request happened to land.
+
+    weight scales every blob: 1 for "now", less for a forecast — see
+    live_fusion_weight.  At 0 the heatmap comes back untouched.
     """
+    if weight <= 0:
+        return heatmap
     # Soaring aircraft only, and not on aerotow: anything under power can circle
     # and climb without a thermal underneath it — including a glider on the end
     # of a rope — which would paint lift onto the map that isn't there.
@@ -388,7 +500,7 @@ def _apply_ogn_fusion(
         ci = (g["lon"] - (grid_lon - radius)) / GRID_RES
         if not (0 <= ri < rows and 0 <= ci < cols):
             continue
-        strength = min(g["vario"] / 5.0, 1.0) * 0.50
+        strength = min(g["vario"] / 5.0, 1.0) * 0.50 * weight
         r0, r1 = max(0, int(ri) - window), min(rows, int(ri) + window + 1)
         c0, c1 = max(0, int(ci) - window), min(cols, int(ci) + window + 1)
         ys = np.arange(r0, r1) - ri
@@ -396,6 +508,20 @@ def _apply_ogn_fusion(
         yy, xx = np.meshgrid(ys, xs, indexing="ij")
         arr[r0:r1, c0:c1] += np.exp(-(yy**2 + xx**2) / (2 * sigma**2)) * strength
     return np.clip(arr, 0, 1).ravel().tolist()
+
+
+def live_fusion_weight(forecast_h: float) -> float:
+    """How much of today's live thermals belongs in a map forecast_h hours out.
+
+    A thermal lasts 10-30 minutes, so what gliders are circling in now is the
+    best evidence for the next quarter hour and none at all for the afternoon.
+    It used to be blended in at full strength at every horizon.  See
+    LIVE_FUSION_TAU_MIN in config for where the two constants come from.
+    """
+    minutes = forecast_h * 60.0
+    if minutes >= LIVE_FUSION_MAX_MIN:
+        return 0.0
+    return float(np.exp(-minutes / LIVE_FUSION_TAU_MIN))
 
 
 # Height above ground assumed when the caller doesn't supply an altitude — a
@@ -428,6 +554,88 @@ def _round_probs(values: list[float]) -> list[float]:
 _predict_sem = asyncio.Semaphore(PREDICT_CONCURRENCY)
 
 
+async def compute_prediction(lat: float, lon: float, alt: int | float | None,
+                             forecast_h: float) -> dict:
+    """Everything /predict computes, before it is shaped for the wire.
+
+    Split out so the forecast ledger records exactly the map a user would have
+    been shown — same inputs, same fusion, same night guard — rather than a
+    second copy of this logic that could drift from it.  forecast_h must
+    already be on the quarter hour.
+
+    Returns the served heatmap and, beside it, model_heatmap: the same map
+    before live thermals are blended in.  The ledger scores both, which is how
+    LIVE_FUSION_TAU_MIN gets measured instead of assumed.
+    """
+    issued_at = datetime.now(timezone.utc)
+    grid_lat, grid_lon = snap_grid_centre(lat, lon)
+    meteo, terrain = await asyncio.gather(
+        fetch_meteo_features(lat, lon, forecast_h),
+        fetch_elevation_grid(lat, lon),
+    )
+    # The fallback is invented weather (a summer afternoon in southern England)
+    # that used to reach the map without a word.  Say so on the wire.
+    meteo_fallback = meteo_client.is_synthetic(meteo)
+    radius   = GRID_RADIUS  # matches fetch_elevation_grid default
+    # Kept as a name rather than inlined: it is both the basis for the
+    # default altitude and the reference the response reports height
+    # against, and the two must be the same number.
+    terrain_mean = float(terrain.mean())
+    alt_amsl = (
+        float(alt) if alt is not None
+        else terrain_mean + DEFAULT_WORKING_AGL
+    )
+    land_props = None
+    if ENABLE_LANDCOVER:
+        land_props = await fetch_landcover_fine(lat, lon, terrain.shape, radius)
+    features = build_feature_matrix(
+        meteo, terrain,
+        dt=issued_at + timedelta(hours=forecast_h),
+        lat_bounds=(grid_lat - radius, grid_lat + radius),
+        lon_bounds=(grid_lon - radius, grid_lon + radius),
+        alt_amsl=alt_amsl,
+        land_use_props=land_props,
+    )
+    grid_rows, grid_cols = terrain.shape
+    # to_thread, not inline: predict() runs _MC_SAMPLES synchronous passes
+    # over the whole grid (~2M rows), which pins the event loop for ~0.5 s on
+    # the deployed VM.  The app is pinned to --workers 1, so that stalls the
+    # /ws/live frames, /healthz and every other request behind it.  XGBoost
+    # releases the GIL inside its OpenMP section, so a worker thread really
+    # does run alongside the loop rather than just deferring the block.
+    async with _predict_sem:
+        model_heatmap, heatmap_std = await asyncio.to_thread(model.predict, features)
+    live_gliders = await fetch_ogn_gliders()
+    fusion_weight = live_fusion_weight(forecast_h)
+    heatmap = _apply_ogn_fusion(model_heatmap, live_gliders, grid_lat, grid_lon,
+                                radius, grid_rows, grid_cols, weight=fusion_weight)
+    # Below the training floor the model is answering a question it was
+    # never shown.  _MIN_SOLAR_GHI drops these rows at collection precisely
+    # because no thermal can form without surface heating, so every night
+    # sample is an extrapolation off the end of the training distribution —
+    # and it does not look like one: measured on the live site at 0 W/m2 the
+    # grid still came back with a 54% peak, which reads as a forecast rather
+    # than as the absence of one.  Zero it and say so on the wire.
+    no_insolation = meteo["solar_ghi"] < _MIN_SOLAR_GHI
+    if no_insolation:
+        heatmap = np.zeros_like(heatmap)
+        model_heatmap = np.zeros_like(model_heatmap)
+        heatmap_std = np.zeros_like(heatmap_std)
+    return {
+        "issued_at": issued_at,
+        "target_at": issued_at + timedelta(hours=forecast_h),
+        "forecast_h": forecast_h,
+        "grid_lat": grid_lat, "grid_lon": grid_lon, "radius": radius,
+        "rows": grid_rows, "cols": grid_cols,
+        "terrain": terrain, "terrain_mean": terrain_mean,
+        "alt_amsl": alt_amsl, "alt_source": "observer" if alt is not None else "default",
+        "features": features, "meteo": meteo, "meteo_fallback": meteo_fallback,
+        "heatmap": heatmap, "model_heatmap": model_heatmap, "heatmap_std": heatmap_std,
+        "fusion_weight": fusion_weight, "live_gliders": live_gliders,
+        "no_insolation": bool(no_insolation),
+    }
+
+
 @app.get("/predict")
 async def predict(lat: float, lon: float, alt: int | None = None,
                   forecast_h: Annotated[float, Query(ge=0, le=24)] = 0):
@@ -455,58 +663,17 @@ async def predict(lat: float, lon: float, alt: int | None = None,
     """
     forecast_h = round(forecast_h * 4) / 4
     try:
-        grid_lat, grid_lon = snap_grid_centre(lat, lon)
-        meteo, terrain = await asyncio.gather(
-            fetch_meteo_features(lat, lon, forecast_h),
-            fetch_elevation_grid(lat, lon),
-        )
-        radius   = GRID_RADIUS  # matches fetch_elevation_grid default
-        # Kept as a name rather than inlined: it is both the basis for the
-        # default altitude and the reference the response reports height
-        # against, and the two must be the same number.
-        terrain_mean = float(terrain.mean())
-        alt_amsl = (
-            float(alt) if alt is not None
-            else terrain_mean + DEFAULT_WORKING_AGL
-        )
-        land_props = None
-        if ENABLE_LANDCOVER:
-            land_props = await fetch_landcover_fine(lat, lon, terrain.shape, radius)
-        features = build_feature_matrix(
-            meteo, terrain,
-            dt=datetime.now(timezone.utc) + timedelta(hours=forecast_h),
-            lat_bounds=(grid_lat - radius, grid_lat + radius),
-            lon_bounds=(grid_lon - radius, grid_lon + radius),
-            alt_amsl=alt_amsl,
-            land_use_props=land_props,
-        )
-        grid_rows, grid_cols = terrain.shape
-        raw_elev = coarse_lattice(terrain)
-        # to_thread, not inline: predict() runs _MC_SAMPLES synchronous passes
-        # over the whole grid (~2M rows), which pins the event loop for ~0.5 s on
-        # the deployed VM.  The app is pinned to --workers 1, so that stalls the
-        # /ws/live frames, /healthz and every other request behind it.  XGBoost
-        # releases the GIL inside its OpenMP section, so a worker thread really
-        # does run alongside the loop rather than just deferring the block.
-        async with _predict_sem:
-            heatmap, heatmap_std = await asyncio.to_thread(model.predict, features)
-        live_gliders = await fetch_ogn_gliders()
-        heatmap = _apply_ogn_fusion(heatmap, live_gliders, grid_lat, grid_lon,
-                                    radius, grid_rows, grid_cols)
-        # Below the training floor the model is answering a question it was
-        # never shown.  _MIN_SOLAR_GHI drops these rows at collection precisely
-        # because no thermal can form without surface heating, so every night
-        # sample is an extrapolation off the end of the training distribution —
-        # and it does not look like one: measured on the live site at 0 W/m2 the
-        # grid still came back with a 54% peak, which reads as a forecast rather
-        # than as the absence of one.  Zero it and say so on the wire.
-        no_insolation = meteo["solar_ghi"] < _MIN_SOLAR_GHI
-        if no_insolation:
-            heatmap = np.zeros_like(heatmap)
-            heatmap_std = np.zeros_like(heatmap_std)
+        p = await compute_prediction(lat, lon, alt, forecast_h)
     except Exception as exc:
         log.error(f"[predict] failed for ({lat},{lon}): {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
+    meteo, features = p["meteo"], p["features"]
+    grid_rows, grid_cols = p["rows"], p["cols"]
+    grid_lat, grid_lon = p["grid_lat"], p["grid_lon"]
+    alt_amsl, terrain_mean = p["alt_amsl"], p["terrain_mean"]
+    heatmap, heatmap_std = p["heatmap"], p["heatmap_std"]
+    no_insolation = p["no_insolation"]
+    raw_elev = coarse_lattice(p["terrain"])
     return {
         "heatmap":      _round_probs(heatmap),
         "heatmap_std":  _round_probs(heatmap_std),
@@ -529,6 +696,17 @@ async def predict(lat: float, lon: float, alt: int | None = None,
         # prediction of none.  An older bundle that ignores the flag still gets
         # a dark map, which is the right answer, just unexplained.
         "no_insolation": bool(no_insolation),
+        # True when Open-Meteo failed and the weather above is the module's
+        # synthetic fallback rather than a forecast for this place and hour.
+        # The heatmap is still drawn — terrain still ranks cells — but nobody
+        # should read its absolute numbers, and the map says so.
+        "meteo_fallback": bool(p["meteo_fallback"]),
+        # How much of the live thermals made it into this map: 1 now, decaying
+        # with forecast_h, 0 from LIVE_FUSION_MAX_MIN on.
+        "live_fusion_weight": round(p["fusion_weight"], 3),
+        # The moment the map answers for, so a client never has to redo the
+        # quarter-hour rounding to label it.
+        "target_at": p["target_at"].isoformat(timespec="seconds"),
         # What this heatmap was built from, for the map's raw-data / product
         # comparison: the elevation samples that were actually fetched (the
         # rest of the terrain grid is interpolated between them) and the width
@@ -731,6 +909,30 @@ def _cluster_circling(gliders: list[dict], radius: float = 0.012) -> list[dict]:
             "est_alt_m": round(sum(m["alt"]   for m in members) / n),
         })
     return clusters
+
+
+@app.get("/verification/summary")
+async def verification_summary(days: Annotated[float, Query(gt=0, le=365)] = 30):
+    """Per-horizon scorecard of recorded forecasts against what gliders did."""
+    return await asyncio.to_thread(ledger.horizon_summary, LEDGER_DB_PATH, days)
+
+
+@app.get("/verification/examples")
+async def verification_examples(status: str = "supported", horizon_min: int | None = None,
+                                limit: Annotated[int, Query(ge=1, le=100)] = 20):
+    """Recent forecasts with one status — always with the counts they came from."""
+    if status not in ("supported", "contradicted", "unverifiable", "excluded"):
+        raise HTTPException(status_code=400, detail="unknown status")
+    return await asyncio.to_thread(ledger.examples, LEDGER_DB_PATH, status, horizon_min, limit)
+
+
+@app.get("/verification/forecast/{forecast_id}")
+async def verification_forecast(forecast_id: int):
+    """One recorded forecast, its outcome and its stored grid, for replay."""
+    d = await asyncio.to_thread(ledger.forecast_detail, LEDGER_DB_PATH, forecast_id)
+    if d is None:
+        raise HTTPException(status_code=404, detail="no such forecast")
+    return d
 
 
 @app.get("/thermals/active")

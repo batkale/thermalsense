@@ -326,6 +326,9 @@ Breaking any of these has taken the app down or silently corrupted results befor
 | `GET /healthz` | `{status, model_loaded}` |
 | `POST /train` | Admin. Background retrain |
 | `POST /seed?days_back=&limit=&reset=` | Admin. Rebuild the buffer from beacon history |
+| `GET /verification/summary?days=` | Forecast ledger scorecard per horizon: statuses, within-forecast score for served / model / terrain / persistence with bootstrap CIs, hotspot hit rate vs chance, pooled score, Brier |
+| `GET /verification/examples?status=&horizon_min=&limit=` | Recent forecasts with one status, always with the issued/scored counts they were picked from |
+| `GET /verification/forecast/{id}` | One recorded forecast, its outcome and its pooled grid, for replay |
 | `WS /ws/live` | Frames every `WS_FRAME_INTERVAL` (1 s). Client sends `{"bounds":{lat_min,lat_max,lon_min,lon_max}}` on connect and on every map move |
 
 Admin endpoints require an `X-Admin-Token` header when `ADMIN_TOKEN` is set.
@@ -473,6 +476,46 @@ links keep working; the landing page links to both.
 - **The hero is a simulation and its caption says so.** No real beacon is
   drawn there. The one live number on the page is the count from
   `/thermals/active`, and the line is simply absent when that request fails.
+
+## Forecast ledger (`data/forecast_ledger.py`)
+
+The offline benchmark scores the model **given the weather that happened**.
+Meteo is constant across a grid, so a wrong weather forecast barely moves the
+within-grid ranking while making the map wrong about whether there is lift at
+all. That score therefore cannot say how skill falls with the horizon. The
+ledger does, by recording forecasts before their time and checking them after.
+
+- **Issue** (`_ledger_issue_job`, every `LEDGER_ISSUE_EVERY_MIN`): for each site
+  (`LEDGER_FIXED_SITES` + the `LEDGER_DYNAMIC_SITES` busiest 0.1° cells at issue
+  time) and each horizon in `LEDGER_HORIZONS_MIN`, run `compute_prediction` —
+  the same function `/predict` uses — and store the served map, the model-only
+  map, terrain alone and elevation, pooled 4×4 (~200 m, ~2.6 KB per forecast),
+  plus model hash, meteo, the fallback flag, fusion weight and the circling
+  clusters at issue time (the persistence baseline). Night targets are skipped
+  before the model runs. Skips entirely past `LEDGER_METEO_CEILING` calls.
+- **Score** (`_ledger_score_job`, :07/:22/:37/:52): beacons within
+  ±`MATCH_WINDOW_MIN` of the target, soaring, untowed, labelled by `_label_for`,
+  200–3000 m AGL, collapsed to one unit per (aircraft, pooled cell). Status:
+  `supported` (≥ half the climbs in the top 20% of cells), `contradicted`
+  (climbs mostly outside, or only sink and ≥2 sink units inside), `unverifiable`
+  (no usable traffic — never counted as wrong), `excluded` (synthetic meteo,
+  feed outage, or the window is no longer in the hot DB). Rules live in the
+  module and are versioned by `RULES_VERSION`; change one, bump it.
+- **Integrity:** SQLite triggers refuse UPDATE and DELETE on `forecasts`.
+  Outcomes are a separate table. Only grids are pruned (`LEDGER_GRID_KEEP_DAYS`),
+  never those of `supported` forecasts — they are the gallery.
+- **Read a single `supported` with care:** one climb lands in the top 20% by
+  chance one time in five. The claim is the per-horizon summary, not examples.
+- **Known gap:** scoring reads the hot DB only. If the app is down past
+  `BEACON_RETENTION_DAYS`, those forecasts score `no_observation_data`; reading
+  the Parquet archive instead is the obvious next step.
+
+`/predict` changed with it: live thermals are blended in with weight
+`exp(-minutes / LIVE_FUSION_TAU_MIN)`, zero from `LIVE_FUSION_MAX_MIN` (they were
+added at full strength at every horizon), and the response carries
+`meteo_fallback`, `live_fusion_weight` and `target_at`. The ledger scores served
+and model-only maps side by side, which is how the fusion constants should be
+tuned.
 
 ## Resource budget
 

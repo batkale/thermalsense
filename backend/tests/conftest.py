@@ -75,3 +75,14 @@ def _beacon_store_in_tmp(tmp_path, monkeypatch):
     if main is not None:
         monkeypatch.setattr(main, "DB_PATH", db, raising=False)
         monkeypatch.setattr(main, "ARCHIVE_DIR", arch, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _ledger_in_tmp(tmp_path, monkeypatch):
+    """And the forecast ledger, so no test writes into a real one."""
+    import config
+    path = tmp_path / "forecast_ledger.db"
+    monkeypatch.setattr(config, "LEDGER_DB_PATH", path)
+    main = sys.modules.get("main")
+    if main is not None:
+        monkeypatch.setattr(main, "LEDGER_DB_PATH", path, raising=False)

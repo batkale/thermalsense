@@ -80,6 +80,9 @@ export function useBackend(pinnedId = null) {
   // heatmap is a stated absence rather than a prediction. Defaults to false so
   // a backend too old to send the flag behaves exactly as before.
   const [noInsolation, setNoInsolation] = useState(false);
+  // Open-Meteo failed and the backend filled in its synthetic fallback weather.
+  // The map still ranks terrain, but its numbers are not a forecast for here.
+  const [meteoFallback, setMeteoFallback] = useState(false);
   // What the current heatmap was built from — the fetched elevation samples and
   // the feature width — for the raw-data comparison. Null for a backend too old
   // to report it, which just leaves those rows out of the comparison.
@@ -187,6 +190,7 @@ export function useBackend(pinnedId = null) {
           : null
       );
       setNoInsolation(Boolean(data.no_insolation));
+      setMeteoFallback(Boolean(data.meteo_fallback));
       // Set in the same batch as the grid it belongs to: the samples are placed
       // with gridMeta's centre and radius, so one without the other would draw
       // this prediction's terrain on the previous prediction's ground.
@@ -310,6 +314,6 @@ export function useBackend(pinnedId = null) {
   const activeThermals = useMemo(() => clusterCirclingGliders(gliders), [gliders]);
 
   return { heatmap, gridMeta, gliders, activeThermals, weather, predictAlt,
-           noInsolation, rawInputs, loading, error, pinnedGlider, pendingScan,
+           noInsolation, meteoFallback, rawInputs, loading, error, pinnedGlider, pendingScan,
            predict, setViewport, seedTrack, gliderPathsRef };
 }

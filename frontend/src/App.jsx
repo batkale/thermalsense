@@ -46,7 +46,7 @@ export default function App() {
 
   const {
     heatmap, gridMeta, gliders, activeThermals,
-    weather, predictAlt, noInsolation, rawInputs, loading, error, pinnedGlider: livePinned,
+    weather, predictAlt, noInsolation, meteoFallback, rawInputs, loading, error, pinnedGlider: livePinned,
     pendingScan, predict, setViewport, seedTrack, gliderPathsRef,
   } = useBackend(pinnedId);
 
@@ -105,6 +105,7 @@ export default function App() {
   const mapNoteKey = loading ? 'fetchingPrediction'
     : error                  ? error
     : (heatmap && noInsolation) ? 'noInsolationMap'
+    : (heatmap && meteoFallback) ? 'meteoFallbackMap'
     : null;
 
   // livePinned comes from the socket when it carries the aircraft and from the

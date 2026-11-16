@@ -261,6 +261,17 @@ async def fetch_meteo_features(lat: float, lon: float, forecast_h: float,
         return None if strict else _FALLBACK.copy()
 
 
+def is_synthetic(meteo: dict) -> bool:
+    """True when a dict from fetch_meteo_features is _FALLBACK, not a forecast.
+
+    The fallback is returned as a plain copy, and a real answer never carries
+    the humidity_pct key _FALLBACK has, so equality cannot mistake one for the
+    other.  A marker key would be tidier, but callers and tests compare the
+    fallback to _FALLBACK directly and it would break every one of them.
+    """
+    return meteo == _FALLBACK
+
+
 # The feature columns _FALLBACK lands in, with the value each one takes.  A real
 # hour matching all seven at once does not happen: across the 47,419 genuine rows
 # of that buffer the best single column matched 2.8% of the time and no row

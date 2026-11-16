@@ -272,3 +272,51 @@ SEED_TIME_BUDGET_S = float(os.getenv("SEED_TIME_BUDGET_S", "1800"))
 # on 19 Sep 2026 it put 165 positives and 12 benchmark groups into the buffer in
 # two hours of daylight.  The seed is an accelerator, not the engine.
 ENABLE_NIGHTLY_SEED = os.getenv("ENABLE_NIGHTLY_SEED", "1").lower() not in {"0", "false", "no"}
+
+# --- Live thermals in a forecast ----------------------------------------------
+# /predict blends the thermals gliders are circling in *right now* into the
+# heatmap (_apply_ogn_fusion).  That is the strongest signal there is for the
+# next few minutes and worthless hours out: a thermal lives 10-30 min, so the
+# one under a glider at noon says little about 15:00.  It used to be added at
+# full strength whatever forecast_h was, so a +6 h map still carried today's
+# live spots.  The weight now decays as exp(-minutes / TAU) and is cut to zero
+# past MAX, so +15 min keeps about half of it and +1 h none.  Both numbers are
+# a starting point, not a measurement: the forecast ledger scores the served
+# map and the model-only map side by side at every horizon, which is what
+# should replace them.
+LIVE_FUSION_TAU_MIN = float(os.getenv("LIVE_FUSION_TAU_MIN", "20"))
+LIVE_FUSION_MAX_MIN = float(os.getenv("LIVE_FUSION_MAX_MIN", "60"))
+
+# --- Forecast ledger ----------------------------------------------------------
+# The offline benchmark scores the model given the weather that actually
+# happened.  It never asks whether a forecast issued N minutes ahead came true,
+# so it cannot say how skill falls with the horizon.  The ledger does: every
+# LEDGER_ISSUE_EVERY_MIN it issues a forecast per site and horizon, writes it
+# down before the target time, and once the target time has passed scores it
+# against the gliders that were actually there (see data/forecast_ledger.py).
+ENABLE_FORECAST_LEDGER = os.getenv("ENABLE_FORECAST_LEDGER", "1").lower() not in {"0", "false", "no"}
+LEDGER_DB_PATH         = DATA_DIR / "data" / "forecast_ledger.db"
+LEDGER_ISSUE_EVERY_MIN = int(os.getenv("LEDGER_ISSUE_EVERY_MIN", "15"))
+# The mentor's example horizons.  Any list works; the scoring does not care.
+LEDGER_HORIZONS_MIN = [int(h) for h in
+                       os.getenv("LEDGER_HORIZONS_MIN", "15,30,60,120,180").split(",") if h.strip()]
+# Sites forecast every issue regardless of traffic: "name:lat:lon;...".
+# Inonu is approximate, and the point of listing it is the Turkiye record even
+# while its traffic is thin — an unverifiable forecast is still an honest one.
+LEDGER_FIXED_SITES = [
+    (n, float(a), float(o)) for n, a, o in
+    (s.split(":") for s in
+     os.getenv("LEDGER_FIXED_SITES", "Inonu:39.81:30.14").split(";") if s.strip())
+]
+# Plus the busiest places right now: 0.1-degree cells ranked by distinct soaring
+# aircraft airborne at issue time.  Chosen from what is known at issue time only,
+# so it cannot peek at the outcome; it simply forecasts where someone will be
+# around to check.
+LEDGER_DYNAMIC_SITES  = int(os.getenv("LEDGER_DYNAMIC_SITES", "6"))
+LEDGER_MIN_AIRCRAFT   = int(os.getenv("LEDGER_MIN_AIRCRAFT", "2"))
+# Skip an issue once the day's Open-Meteo calls pass this — the live sampler
+# trains the model on the same 10,000/day and must not be starved by bookkeeping.
+LEDGER_METEO_CEILING  = int(os.getenv("LEDGER_METEO_CEILING", "8000"))
+# Grids are kept this long, except those of forecasts that came true, which are
+# the gallery.  The forecast record and its outcome are kept forever (~1 KB).
+LEDGER_GRID_KEEP_DAYS = int(os.getenv("LEDGER_GRID_KEEP_DAYS", "30"))
