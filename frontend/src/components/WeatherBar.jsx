@@ -3,6 +3,7 @@ import { useLang } from '../i18n/LanguageContext.jsx';
 import { useTheme } from '../theme/ThemeContext.jsx';
 import { LANG_LABEL } from '../i18n/strings.js';
 import { FORECAST_STEPS } from '../config.js';
+import { BrandMark, SunIcon, MoonIcon, AlertIcon } from './Icons.jsx';
 
 export default function WeatherBar({ weather, forecastH = 0, onForecastChange, loading, error }) {
   const { t, lang, toggleLang, windDir } = useLang();
@@ -16,13 +17,17 @@ export default function WeatherBar({ weather, forecastH = 0, onForecastChange, l
   return (
     <div className="top-bar">
       <span className="top-bar-title">
-        ThermalSense
+        <BrandMark className="brand-mark" size={20} />
+        <span className="brand-word">ThermalSense</span>
         {/* A real navigation, not a panel: the landing page is a second page of
             the same build (frontend/about.html). It sits on the left because
             .top-bar clips whatever runs past its right edge on a narrow window. */}
         <a className="top-bar-about" href="/about" title={t('aboutTitle')}>{t('about')}</a>
       </span>
 
+      {/* One strip for both readouts, so a phone can scroll them sideways as a
+          row instead of clipping everything past the first two. */}
+      <div className="wx-strip">
       <div className="wx-section">
         <span className="wx-section-label">{t('weather')}</span>
         <div className="wx-chips">
@@ -36,7 +41,7 @@ export default function WeatherBar({ weather, forecastH = 0, onForecastChange, l
             </>
           ) : (
             <span className="wx-hint">
-              {loading ? t('loading') : error ? `⚠ ${t(error)}` : t('clickMapToLoad')}
+              {loading ? t('loading') : error ? <><AlertIcon /> {t(error)}</> : t('clickMapToLoad')}
             </span>
           )}
         </div>
@@ -59,7 +64,7 @@ export default function WeatherBar({ weather, forecastH = 0, onForecastChange, l
         </div>
       </div>
 
-      <div className="wx-divider" />
+      </div>
 
       <div className="forecast-ctrl">
         <span className="forecast-ctrl-label">{t('forecast')}</span>
@@ -92,7 +97,7 @@ export default function WeatherBar({ weather, forecastH = 0, onForecastChange, l
         title={themeLabel}
         aria-label={themeLabel}
       >
-        {theme === 'dark' ? '☀' : '☾'}
+        {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
       </button>
     </div>
   );
@@ -114,7 +119,10 @@ function WindValue({ speed, dir, label }) {
   return (
     <>
       {speed.toFixed(0)} km/h{' '}
-      <span style={{ display: 'inline-block', transform: `rotate(${dir}deg)`, fontSize: '9px', lineHeight: 1 }}>▲</span>
+      <svg className="wind-arrow" viewBox="0 0 10 10" width="9" height="9" aria-hidden="true"
+           style={{ transform: `rotate(${dir}deg)` }}>
+        <path d="M5 0.5 9 9.5 5 7.4 1 9.5Z" fill="currentColor" />
+      </svg>
       {' '}{label}
     </>
   );

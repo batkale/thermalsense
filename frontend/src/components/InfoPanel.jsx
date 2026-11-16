@@ -1,4 +1,5 @@
 import { useLang } from '../i18n/LanguageContext.jsx';
+import { GliderIcon } from './Icons.jsx';
 
 /**
  * One labelled figure in the prediction block.
@@ -110,15 +111,15 @@ export default function InfoPanel({
 
       {/* Glider counts */}
       <div className="glider-row">
-        <span>✈ {gliderLabel}</span>
+        <span className="glider-total"><GliderIcon /> {gliderLabel}</span>
         {circling > 0 && (
-          <span className="circling">↻ {t('circlingCount', { n: circling })}</span>
+          <span className="circling"><span className="dot yellow" aria-hidden="true" />{t('circlingCount', { n: circling })}</span>
         )}
       </div>
 
       {tow > 0 && (
         <div className="glider-row">
-          <span className="tow-count">⊕ {t('towPlaneCount', { n: tow })}</span>
+          <span className="tow-count"><span className="dot orange" aria-hidden="true" />{t('towPlaneCount', { n: tow })}</span>
         </div>
       )}
 

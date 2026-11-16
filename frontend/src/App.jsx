@@ -6,6 +6,7 @@ import ExportButton      from './components/ExportButton.jsx';
 import SearchBar         from './components/SearchBar.jsx';
 import PinnedGliderCard  from './components/PinnedGliderCard.jsx';
 import TrainingPanel     from './components/TrainingPanel.jsx';
+import { AlertIcon }     from './components/Icons.jsx';
 import { useBackend }    from './hooks/useBackend.js';
 import { triggerRetrain } from './services/api.js';
 import { useLang }        from './i18n/LanguageContext.jsx';
@@ -201,7 +202,7 @@ export default function App() {
           />
 
           {loading && <div className="status loading">{t('fetchingPrediction')}</div>}
-          {error   && <div className="status error">⚠ {t(error)}</div>}
+          {error   && <div className="status error"><AlertIcon /> {t(error)}</div>}
           {!loading && !error && !heatmap && <div className="status hint">{t('clickMapToPredict')}</div>}
 
           <div className="legend">

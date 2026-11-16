@@ -14,108 +14,128 @@
    the legend swatches that key those markers stay with them. See .dot below.
    --------------------------------------------------------------------------- */
 :root {
-  --bg-app:            #0f1117;
-  --bg-chrome:         #161b27;
-  --bg-surface:        #1e2535;
-  --bg-surface-hover:  #252d40;
-  --bg-sunken:         #151c2c;
-  --bg-elevated:       #1a2035;
-  --bg-active:         #2a3450;
+  /* Night cockpit. The same navy-ink family as the landing page (landing.css),
+     so the two pages read as one product: chrome close to the map's own dark,
+     hairline rules instead of filled pills, colour kept for meaning. */
+  --bg-app:            #08121b;
+  --bg-chrome:         #0c1924;
+  --bg-surface:        #112231;
+  --bg-surface-hover:  #17293a;
+  --bg-sunken:         #0a1620;
+  --bg-elevated:       #0f1e2c;
+  --bg-active:         #1b3247;
 
-  --border:            #2d3748;
-  --border-strong:     #4a5568;
+  --border:            #1f3446;
+  --border-strong:     #345067;
 
-  --text-title:        #ffffff;
-  --text-bright:       #f7fafc;
-  --text-primary:      #e2e8f0;
-  --text-body:         #cbd5e0;
-  --text-secondary:    #a0aec0;
-  --text-muted:        #718096;
-  --text-faint:        #4a5568;
+  --text-title:        #f2f7fb;
+  --text-bright:       #e9f1f8;
+  --text-primary:      #d6e2ec;
+  --text-body:         #b8c8d6;
+  --text-secondary:    #a9bccd;
+  --text-muted:        #8499ad;   /* 5.6:1 on --bg-chrome */
+  --text-faint:        #607890;   /* 3.7:1 — de-emphasised by role, so AA-large is the bar */
 
-  --accent:            #90cdf4;
-  --accent-strong:     #63b3ed;
+  /* Interactive: the landing page's sky blue. Warm (--lift) means lift and is
+     used for nothing else, as on the landing page. */
+  --accent:            #7fc1f5;
+  --accent-strong:     #5aa9e6;
+  --lift:              #ff9a57;
 
-  --ok:                #68d391;
-  --ok-soft:           #9ae6b4;
-  --warn:              #f6ad55;
-  --danger:            #fc8181;
-  --gold-text:         #ffd700;
-  --sky-text:          #87ceeb;
-  --purple:            #b794f4;
+  --ok:                #6fd39a;
+  --ok-soft:           #a7e3bf;
+  --warn:              #f2b25c;
+  --danger:            #ff7f78;
+  --gold-text:         #ffd23f;
+  --sky-text:          #8cc8ff;
+  --place:             #d8c08c;   /* search tag for places: terrain sand */
 
-  --status-loading-bg: #1e3a5f;
-  --status-error-bg:   #3b1a1a;
-  --status-hint-bg:    #1a2a1a;
-  --status-retrain-bg: #1a2a3a;
+  --status-loading-bg: #0f2638;
+  --status-error-bg:   #2c1416;
+  --status-hint-bg:    #0f241b;
+  --status-retrain-bg: #0f2638;
 
-  --tag-glider-bg:     #1a3a5c;
-  --tag-airport-bg:    #1a3a2a;
-  --tag-place-bg:      #2d2a4a;
+  --tag-glider-bg:     #13324a;
+  --tag-airport-bg:    #12301f;
+  --tag-place-bg:      #2e281a;
 
-  --btn-primary-bg:    #3182ce;
-  --btn-primary-fg:    #ffffff;
-  --btn-secondary-bg:  #2d3748;
+  --btn-primary-bg:    #e9f1f8;
+  --btn-primary-fg:    #0b1723;
+  --btn-secondary-bg:  transparent;
 
   --dot-ring:          transparent;
-  --shadow-bubble:     0 4px 14px rgba(0,0,0,0.55);
-  --shadow-dropdown:   0 6px 20px rgba(0,0,0,0.5);
+  --shadow-bubble:     0 6px 18px rgba(0,0,0,0.5);
+  --shadow-dropdown:   0 8px 24px rgba(0,0,0,0.5);
+
+  --radius:            3px;   /* controls */
+  --radius-lg:         5px;   /* panels */
+
+  --sans: 'Archivo Variable', 'Archivo', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  /* Figures only. B612 Mono has no ğ, ş or İ — never put translated text in it. */
+  --mono: 'B612 Mono', ui-monospace, 'Cascadia Mono', 'SF Mono', Menlo, Consolas, monospace;
+
+  color-scheme: dark;
 }
 
 :root[data-theme="light"] {
-  --bg-app:            #eef1f6;
-  --bg-chrome:         #ffffff;
-  --bg-surface:        #f1f4f9;
-  --bg-surface-hover:  #e2e8f2;
-  --bg-sunken:         #e8ecf3;
+  /* Chart paper: the landing page's daytime palette. */
+  --bg-app:            #e4ebf1;
+  --bg-chrome:         #f7f9fb;
+  --bg-surface:        #edf2f6;
+  --bg-surface-hover:  #e1e9f0;
+  --bg-sunken:         #e6edf3;
   --bg-elevated:       #ffffff;
-  --bg-active:         #dbe4f5;
+  --bg-active:         #d5e3ef;
 
-  --border:            #d3dae6;
-  --border-strong:     #a8b4c8;
+  --border:            #cfdae4;
+  --border-strong:     #9fb3c6;
 
-  --text-title:        #0d131c;
-  --text-bright:       #0d131c;
-  --text-primary:      #1f2733;
-  --text-body:         #334155;
-  --text-secondary:    #475569;
-  --text-muted:        #5c6c83;   /* 4.85:1 on --bg-surface; #64748b missed AA at 4.32 */
-  --text-faint:        #78869c;   /* 3.35:1 — de-emphasised by role, so AA-large is the bar */
+  --text-title:        #0d2236;
+  --text-bright:       #0d2236;
+  --text-primary:      #15293d;
+  --text-body:         #2c4256;
+  --text-secondary:    #3b5269;
+  --text-muted:        #536879;   /* 5.4:1 on --bg-surface */
+  --text-faint:        #71849a;   /* 3.6:1 — AA-large, as in dark */
 
-  --accent:            #1d4ed8;
-  --accent-strong:     #2563eb;
+  --accent:            #1b5fa6;
+  --accent-strong:     #1b5fa6;
+  --lift:              #b93d0a;
 
-  --ok:                #15803d;
-  --ok-soft:           #166534;
-  --warn:              #b45309;
-  --danger:            #b91c1c;
-  --gold-text:         #a16207;   /* #ffd700 is unreadable on white */
-  --sky-text:          #0369a1;
-  --purple:            #6d28d9;
+  --ok:                #157347;
+  --ok-soft:           #12613c;
+  --warn:              #9c5208;
+  --danger:            #b42318;
+  --gold-text:         #8a6100;   /* #ffd23f is unreadable on white */
+  --sky-text:          #0b5c94;
+  --place:             #7a5f1f;
 
-  --status-loading-bg: #dbeafe;
-  --status-error-bg:   #fee2e2;
-  --status-hint-bg:    #dcfce7;
-  --status-retrain-bg: #dbeafe;
+  --status-loading-bg: #dfeaf5;
+  --status-error-bg:   #fbe4e1;
+  --status-hint-bg:    #dff0e6;
+  --status-retrain-bg: #dfeaf5;
 
-  --tag-glider-bg:     #dbeafe;
-  --tag-airport-bg:    #dcfce7;
-  --tag-place-bg:      #ede9fe;
+  --tag-glider-bg:     #dfeaf5;
+  --tag-airport-bg:    #dff0e6;
+  --tag-place-bg:      #f1e9d6;
 
-  --btn-primary-bg:    #2563eb;
-  --btn-primary-fg:    #ffffff;
-  --btn-secondary-bg:  #e2e8f2;
+  --btn-primary-bg:    #0d2236;
+  --btn-primary-fg:    #f7f9fb;
+  --btn-secondary-bg:  transparent;
 
-  --dot-ring:          rgba(15,23,42,0.28);
-  --shadow-bubble:     0 4px 14px rgba(15,23,42,0.18);
-  --shadow-dropdown:   0 6px 20px rgba(15,23,42,0.16);
+  --dot-ring:          rgba(13,34,54,0.32);
+  --shadow-bubble:     0 6px 18px rgba(13,34,54,0.16);
+  --shadow-dropdown:   0 8px 24px rgba(13,34,54,0.14);
+
+  color-scheme: light;
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
-  font-family: system-ui, -apple-system, sans-serif;
+  font-family: var(--sans);
   font-size: 13px;
+  -webkit-font-smoothing: antialiased;
   background: var(--bg-app);
   color: var(--text-primary);
   height: 100dvh;
@@ -123,6 +143,19 @@ body {
 }
 
 #root { height: 100dvh; }
+
+button { font-family: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Small uppercase caption: the one label style across the chrome, the same
+   tracking as the landing page's units. */
+.wx-section-label, .wx-chip-label, .legend-title, .pin-metric-label,
+.tp-section h3, .forecast-ctrl-label {
+  font-size: 9.5px;
+  font-weight: 620;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
 
 /* ── Layout ── */
 .app {
@@ -155,8 +188,9 @@ body {
   z-index: 1001;
   max-width: min(460px, calc(100% - 120px));
   padding: 8px 14px;
-  border-radius: 8px;
+  border-radius: var(--radius);
   border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent);
   background: var(--bg-elevated);
   color: var(--text-primary);
   box-shadow: var(--shadow-bubble);
@@ -173,7 +207,7 @@ body {
 
 /* ── Top bar ── */
 .top-bar {
-  height: 50px;
+  height: 52px;
   flex-shrink: 0;
   background: var(--bg-chrome);
   border-bottom: 1px solid var(--border);
@@ -186,10 +220,14 @@ body {
 }
 
 .top-bar-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 15px;
-  font-weight: 700;
+  font-weight: 660;
+  font-stretch: 118%;
   color: var(--text-title);
-  letter-spacing: 0.03em;
+  letter-spacing: 0.005em;
   flex-shrink: 0;
   padding-right: 14px;
   border-right: 1px solid var(--border);
@@ -197,15 +235,30 @@ body {
 }
 
 /* Link to the landing page (/about), tucked beside the title it explains. */
+.brand-mark { color: var(--accent); flex-shrink: 0; }
+
 .top-bar-about {
-  margin-left: 10px;
+  margin-left: 4px;
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 560;
+  font-stretch: 100%;
   letter-spacing: 0;
   color: var(--accent);
   text-decoration: none;
 }
 .top-bar-about:hover { color: var(--text-title); text-decoration: underline; }
+
+/* Both readouts in one strip that scrolls sideways rather than clipping: the
+   top bar still clips, but a chip past the edge is now a swipe away. */
+.wx-strip {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.wx-strip::-webkit-scrollbar { display: none; }
 
 .wx-section {
   display: flex;
@@ -215,12 +268,9 @@ body {
 }
 
 .wx-section-label {
-  font-size: 9px;
-  font-weight: 700;
   color: var(--text-faint);
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
   writing-mode: horizontal-tb;
+  white-space: nowrap;
 }
 
 .wx-divider {
@@ -234,7 +284,7 @@ body {
 .wx-chips {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 0;
 }
 
 .wx-hint {
@@ -243,16 +293,19 @@ body {
   font-style: italic;
 }
 
+/* A readout, not a button: label over figure, cells divided by a hairline the
+   way an instrument panel divides its gauges. */
 .wx-chip {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  background: var(--bg-surface);
-  border-radius: 6px;
-  padding: 3px 9px;
-  min-width: 54px;
+  align-items: flex-start;
+  padding: 2px 12px;
+  min-width: 58px;
+  border-left: 1px solid var(--border);
+  cursor: default;
 }
-.wx-chip:hover { background: var(--bg-surface-hover); }
+.wx-chips .wx-chip:first-child { border-left: 0; }
+.wx-chip:hover .wx-chip-label { color: var(--accent); }
 
 /* position:fixed, not absolute — .top-bar is overflow:hidden and 50px tall, so
    anything positioned against the chip itself is clipped out of existence.
@@ -272,28 +325,30 @@ body {
   letter-spacing: normal;
   white-space: normal;
   padding: 7px 9px;
-  border-radius: 7px;
+  border-radius: var(--radius);
   z-index: 2000;            /* over .top-bar (1100) and .sidebar (1000) */
   box-shadow: var(--shadow-bubble);
   pointer-events: none;
 }
 
 .wx-chip-label {
-  font-size: 9px;
   color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  line-height: 1.2;
+  line-height: 1.3;
   white-space: nowrap;   /* Turkish labels are longer — widen, don't wrap */
 }
 
+/* Figures in tabular Archivo, not --mono: B612 Mono gives the decimal point a
+   full cell, so "7.9" arrives as "7. 9" — the landing page hit the same thing
+   with the Turkish comma. --mono is kept for identifiers (the callsign). */
 .wx-chip-value {
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
   color: var(--text-bright);
-  line-height: 1.4;
+  line-height: 1.45;
   white-space: nowrap;
 }
+.wind-arrow { display: inline-block; vertical-align: -0.5px; color: var(--accent); }
 
 .forecast-ctrl {
   display: flex;
@@ -306,12 +361,11 @@ body {
 }
 
 .forecast-ctrl-label {
-  font-size: 11px;
   color: var(--text-muted);
   white-space: nowrap;
 }
 
-.forecast-slider { width: 90px; accent-color: var(--accent-strong); }
+.forecast-slider { width: 110px; accent-color: var(--accent-strong); cursor: pointer; }
 
 /* Wide enough for the longest stop, "+2 sa 45 dk". .forecast-ctrl is pushed
    right by margin-left:auto, so a label that changed width as the slider moved
@@ -329,15 +383,17 @@ body {
 .lang-toggle {
   flex-shrink: 0;
   margin-left: 14px;
-  padding: 4px 10px;
+  height: 30px;
+  min-width: 36px;
+  padding: 0 9px;
   font-family: inherit;
   font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  color: var(--accent);
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  font-weight: 660;
+  letter-spacing: 0.09em;
+  color: var(--text-primary);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
@@ -348,24 +404,31 @@ body {
 }
 
 .sidebar {
-  width: 220px;
+  width: 256px;
   flex-shrink: 0;
   background: var(--bg-chrome);
   border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px;
+  gap: 12px;
+  padding: 14px;
   overflow-y: auto;
   z-index: 1000;
 }
 
 /* ── Panel ── */
+/* A ruled note, not a filled pill: the colour sits in the edge and the text. */
 .status {
-  padding: 6px 8px;
-  border-radius: 6px;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 7px 9px;
+  border-radius: var(--radius);
+  border-left: 2px solid currentColor;
   font-size: 12px;
+  line-height: 1.4;
 }
+.status svg { flex-shrink: 0; align-self: center; }
 .status.loading  { background: var(--status-loading-bg); color: var(--accent); }
 .status.error    { background: var(--status-error-bg);   color: var(--danger); }
 .status.hint     { background: var(--status-hint-bg);    color: var(--ok-soft); }
@@ -375,24 +438,42 @@ body {
 .panel { display: flex; flex-direction: column; gap: 6px; }
 
 /* ── Metrics ── */
-.metrics { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; }
+/* A ruled readout list. The first row is always the thermal peak — the answer
+   the click asked for — so it is set as the one large figure on the panel. */
+.metrics {
+  display: flex;
+  flex-direction: column;
+  margin: 2px 0 4px;
+  border-top: 1px solid var(--border);
+}
 
 .metric {
   display: flex;
   justify-content: space-between;
-  background: var(--bg-surface);
-  border-radius: 6px;
-  padding: 5px 8px;
+  align-items: baseline;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+  padding: 7px 2px;
   position: relative;   /* anchors .metric-bubble */
+  cursor: help;
 }
-.metric:hover { background: var(--bg-surface-hover); }
-.metric-label { color: var(--text-muted); }
-.metric-value { font-weight: 600; color: var(--text-bright); text-align: right; }
+.metric:hover { background: var(--bg-surface); }
+.metric-label { color: var(--text-muted); white-space: nowrap; }
+.metric-value {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-bright);
+  text-align: right;
+  white-space: nowrap;
+}
+.metric:first-child { padding: 9px 2px 10px; }
+.metric:first-child .metric-value { font-size: 24px; font-weight: 560; font-stretch: 112%; line-height: 1.05; }
 
 /* Provenance under a metric — says where the number came from, so it has to
    read as a caption rather than compete with the value above it. */
 .metric-sub {
   display: block;
+  white-space: normal;
   font-size: 10px;
   font-weight: 400;
   color: var(--text-muted);
@@ -417,8 +498,9 @@ body {
   line-height: 1.45;
   text-align: left;
   padding: 7px 9px;
-  border-radius: 7px;
+  border-radius: var(--radius);
   white-space: normal;
+  cursor: default;
   z-index: 9999;
   box-shadow: var(--shadow-bubble);
   pointer-events: none;
@@ -430,10 +512,14 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   font-size: 12px;
   color: var(--text-secondary);
 }
+.glider-total, .circling, .tow-count { display: inline-flex; align-items: center; gap: 5px; }
+.glider-total svg { color: var(--accent); }
 .circling { color: var(--gold-text); font-weight: 600; }
+.glider-row .dot { width: 8px; height: 8px; }
 
 /* ── Search ── */
 .search-wrap {
@@ -442,9 +528,9 @@ body {
 .search-box {
   display: flex;
   align-items: center;
-  background: var(--bg-surface);
+  background: var(--bg-sunken);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius);
   padding: 0 8px;
   gap: 4px;
 }
@@ -457,8 +543,9 @@ body {
   border: none;
   outline: none;
   color: var(--text-primary);
+  font-family: inherit;
   font-size: 12px;
-  padding: 7px 0;
+  padding: 8px 0;
 }
 .search-input::placeholder { color: var(--text-faint); }
 .search-clear {
@@ -477,8 +564,8 @@ body {
   top: calc(100% + 4px);
   left: 0; right: 0;
   background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
   list-style: none;
   overflow: hidden;
   z-index: 2000;
@@ -495,9 +582,9 @@ body {
 .search-item.active { background: var(--bg-active); }
 
 .search-tag {
-  font-size: 10px;
-  font-weight: 700;
-  border-radius: 4px;
+  font-size: 9.5px;
+  font-weight: 660;
+  border-radius: 2px;
   padding: 1px 5px;
   flex-shrink: 0;
   margin-top: 2px;
@@ -506,7 +593,7 @@ body {
 }
 .tag-glider  { background: var(--tag-glider-bg);  color: var(--accent); }
 .tag-airport { background: var(--tag-airport-bg); color: var(--ok); }
-.tag-place   { background: var(--tag-place-bg);   color: var(--purple); }
+.tag-place   { background: var(--tag-place-bg);   color: var(--place); }
 
 .search-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .search-label {
@@ -525,10 +612,12 @@ body {
 }
 
 /* ── Pinned glider card ── */
+/* The followed aircraft. Red edge = the red ring it carries on the map. */
 .pin-card {
   background: var(--bg-surface);
-  border: 1px solid var(--danger);
-  border-radius: 8px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius);
   padding: 9px 10px;
   display: flex;
   flex-direction: column;
@@ -543,8 +632,8 @@ body {
   font-size: 13px;
   font-weight: 700;
   color: var(--danger);
-  letter-spacing: 0.05em;
-  font-family: monospace;
+  letter-spacing: 0.04em;
+  font-family: var(--mono);
 }
 .pin-close {
   background: none;
@@ -562,15 +651,16 @@ body {
 }
 .pin-metric {
   flex: 1;
+  min-width: 0;
   background: var(--bg-sunken);
-  border-radius: 5px;
+  border-radius: 2px;
   padding: 4px 7px;
   display: flex;
   flex-direction: column;
   gap: 1px;
 }
-.pin-metric-label { font-size: 10px; color: var(--text-muted); }
-.pin-metric-value { font-size: 12px; font-weight: 600; color: var(--text-bright); }
+.pin-metric-label { color: var(--text-muted); }
+.pin-metric-value { font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text-bright); white-space: nowrap; }
 .vario-up   { color: var(--ok); }
 .vario-down { color: var(--danger); }
 .agl-low    { color: var(--warn); }  /* orange warning when AGL < 200 m */
@@ -580,21 +670,24 @@ body {
 .pin-glider   { color: var(--sky-text); font-weight: 600; margin-right: 6px; }
 .pin-tow      { color: var(--text-title); font-weight: 600; margin-right: 6px; }
 .pin-coords {
-  font-size: 10px;
+  font-size: 10.5px;
   color: var(--text-muted);
-  font-family: monospace;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ── Airborne toggle ── */
+/* Checkbox, label, then the hint on its own line under the label: side by side
+   in a narrow column, the Turkish hints wrapped into a ragged second column. */
 .toggle-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  column-gap: 9px;
   align-items: center;
-  gap: 7px;
-  font-size: 0.82rem;
+  font-size: 12.5px;
   color: var(--text-body);
   cursor: pointer;
   user-select: none;
-  margin: 2px 0;
+  margin: 1px 0;
 }
 .toggle-row input[type="checkbox"] {
   width: 14px;
@@ -604,35 +697,45 @@ body {
   flex-shrink: 0;
 }
 .toggle-hint {
+  grid-column: 2;
   color: var(--text-muted);
-  font-size: 0.76rem;
+  font-size: 11px;
 }
 
 /* ── Buttons ── */
 .btn-primary, .btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
   width: 100%;
-  padding: 7px 0;
-  border: none;
-  border-radius: 7px;
-  font-size: 13px;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  font-size: 12.5px;
   font-weight: 600;
   cursor: pointer;
-  transition: opacity 0.15s;
+  transition: background-color 0.15s, border-color 0.15s, opacity 0.15s;
 }
 .btn-primary  { background: var(--btn-primary-bg); color: var(--btn-primary-fg); }
-.btn-secondary { background: var(--btn-secondary-bg); color: var(--text-secondary); }
-.btn-primary:disabled { opacity: 0.4; cursor: default; }
-.btn-primary:not(:disabled):hover  { opacity: 0.85; }
-.btn-secondary:hover { background: var(--bg-surface-hover); }
+.btn-secondary {
+  background: var(--btn-secondary-bg);
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+.btn-primary:disabled { opacity: 0.35; cursor: default; }
+.btn-primary:not(:disabled):hover  { opacity: 0.88; }
+.btn-secondary:hover { background: var(--bg-surface-hover); border-color: var(--text-muted); }
 
 
 /* ── Legend ── */
-.legend { margin-top: auto; }
-.legend-title { font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
+.legend { margin-top: auto; padding-top: 12px; border-top: 1px solid var(--border); }
+.legend-title { color: var(--text-muted); margin-bottom: 6px; }
 
 .legend-bar {
-  height: 10px;
-  border-radius: 4px;
+  height: 8px;
+  border-radius: 1px;
   background: linear-gradient(to right,
     rgba(20,180,255,0.7),
     rgba(80,255,80,0.7),
@@ -650,17 +753,19 @@ body {
 }
 
 .legend-glyphs {
-  display: flex;
-  gap: 12px;
-  margin-top: 6px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px 12px;
+  margin-top: 10px;
   font-size: 11px;
   color: var(--text-secondary);
 }
+.legend-glyphs > span { display: flex; align-items: center; gap: 6px; }
 .dot {
   display: inline-block;
-  width: 10px; height: 10px;
+  flex-shrink: 0;
+  width: 9px; height: 9px;
   border-radius: 50%;
-  margin-right: 3px;
   vertical-align: middle;
   /* The tow swatch is white to match the map; on a light panel it needs an edge. */
   box-shadow: 0 0 0 1px var(--dot-ring);
@@ -673,7 +778,37 @@ body {
 /* ── Leaflet container fix ── */
 /* Stays dark in both themes: it shows only for the instant before the
    satellite tiles paint, and a white flash under them reads as a bug. */
-.leaflet-container { background: #1a1f2e; }
+.leaflet-container { background: #0b1520; font-family: var(--sans); }
+
+/* Leaflet's controls sit on the imagery, so like everything drawn on it they
+   stay dark in both themes. Square, hairline-edged: the panel look, not
+   Leaflet's default white buttons. */
+.leaflet-bar,
+.leaflet-touch .leaflet-bar {
+  border: 1px solid rgba(255,255,255,0.16);
+  border-radius: 3px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.45);
+  overflow: hidden;
+}
+.leaflet-bar a,
+.leaflet-touch .leaflet-bar a {
+  background: rgba(8,18,27,0.88);
+  color: #e9f1f8;
+  border-bottom-color: rgba(255,255,255,0.14);
+  font-weight: 400;
+}
+.leaflet-bar a:hover { background: #17293a; color: #fff; }
+.leaflet-bar a:first-child,
+.leaflet-bar a:last-child,
+.leaflet-touch .leaflet-bar a:first-child,
+.leaflet-touch .leaflet-bar a:last-child { border-radius: 0; }
+.leaflet-container .leaflet-control-attribution {
+  background: rgba(8,18,27,0.72);
+  color: #a9bccd;
+  font-size: 10px;
+  line-height: 1.45;
+}
+.leaflet-control-attribution a { color: #cfe3f3; }
 
 /* ── Raw data / product comparison ── */
 /* The split is clipping, not drawing. Every map canvas still spans the whole
@@ -724,16 +859,16 @@ body {
   top: 50%; left: 50%;
   transform: translate(-50%, -50%);
   width: 34px; height: 34px;
-  border-radius: 50%;
-  background: #fff;
-  color: #1a202c;
+  border-radius: 3px;
+  background: #e9f1f8;
+  color: #0b1723;
   display: flex;
   align-items: center;
   justify-content: center;
   box-shadow: 0 1px 6px rgba(0,0,0,0.55);
 }
 .cmp-grab:focus-visible .cmp-knob {
-  box-shadow: 0 0 0 3px #63b3ed, 0 1px 6px rgba(0,0,0,0.55);
+  box-shadow: 0 0 0 3px #7fc1f5, 0 1px 6px rgba(0,0,0,0.55);
 }
 
 .cmp-card {
@@ -741,10 +876,10 @@ body {
   top: 12px;
   width: max-content;
   max-width: min(236px, 40vw);
-  background: rgba(15,17,23,0.88);
-  color: #e2e8f0;
+  background: rgba(8,18,27,0.9);
+  color: #d6e2ec;
   border: 1px solid rgba(255,255,255,0.16);
-  border-radius: 8px;
+  border-radius: 3px;
   padding: 8px 10px;
   font-size: 11px;
   line-height: 1.4;
@@ -764,16 +899,16 @@ body {
   letter-spacing: 0.07em;
   text-transform: uppercase;
   padding: 1px 5px;
-  border-radius: 4px;
+  border-radius: 2px;
   background: rgba(255,255,255,0.16);
-  color: #cbd5e0;
+  color: #d6e2ec;
 }
-.cmp-card.built .cmp-tag { background: #2b6cb0; color: #fff; }
+.cmp-card.built .cmp-tag { background: #7fc1f5; color: #0b1723; }
 .cmp-title { font-size: 12px; font-weight: 700; color: #fff; }
 
 .cmp-rows { list-style: none; display: flex; flex-direction: column; gap: 4px; }
 .cmp-rows li { display: flex; align-items: flex-start; gap: 7px; }
-.cmp-hint { color: #a0aec0; font-style: italic; }
+.cmp-hint { color: #a9bccd; font-style: italic; }
 
 /* Each swatch is the mark its row is drawn with on the map, so the card doubles
    as the key for its half. */
@@ -797,15 +932,17 @@ body {
 /* ---- Theme toggle ---- */
 .theme-toggle {
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   margin-left: 6px;
-  padding: 4px 9px;
-  font-family: inherit;
-  font-size: 12px;
-  line-height: 1.2;
-  color: var(--accent);
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  width: 32px;
+  height: 30px;
+  padding: 0;
+  color: var(--text-primary);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
@@ -817,20 +954,20 @@ body {
   position: fixed; inset: 0; z-index: 2000;
   display: flex; align-items: flex-start; justify-content: center;
   padding: 48px 16px; overflow-y: auto;
-  background: rgba(0, 0, 0, 0.45);
+  background: rgba(4, 10, 16, 0.6);
 }
 .tp-panel {
   width: min(560px, 100%);
   background: var(--bg-elevated);
   color: var(--text-body);
-  border: 1px solid var(--border);
-  border-radius: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
   padding: 16px 18px 18px;
   box-shadow: var(--shadow-bubble);
   font-size: 13px;
 }
 .tp-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
-.tp-header h2 { margin: 0; font-size: 16px; color: var(--text-title); }
+.tp-header h2 { margin: 0; font-size: 16px; font-weight: 640; font-stretch: 112%; color: var(--text-title); }
 .tp-close {
   background: none; border: none; cursor: pointer;
   font-size: 22px; line-height: 1; color: var(--text-muted);
@@ -838,7 +975,7 @@ body {
 .tp-close:hover { color: var(--text-title); }
 
 .tp-verdict {
-  padding: 10px 12px; border-radius: 8px; margin-bottom: 10px;
+  padding: 10px 12px; border-radius: var(--radius); margin-bottom: 10px;
   background: var(--bg-surface); border-left: 3px solid var(--warn);
   color: var(--text-primary); line-height: 1.4;
 }
@@ -846,14 +983,13 @@ body {
 .tp-verdict .tp-bar { margin-top: 8px; }
 
 .tp-callout {
-  padding: 8px 12px; border-radius: 8px; margin-bottom: 10px;
+  padding: 8px 12px; border-radius: var(--radius); margin-bottom: 10px;
   background: var(--bg-sunken); color: var(--text-secondary); line-height: 1.4;
 }
 
 .tp-section { border-top: 1px solid var(--border); padding-top: 10px; margin-top: 10px; }
 .tp-section h3 {
-  margin: 0 0 6px; font-size: 11px; font-weight: 600;
-  text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted);
+  margin: 0 0 6px; color: var(--text-muted);
 }
 .tp-row { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; }
 .tp-label { color: var(--text-secondary); }
@@ -864,7 +1000,7 @@ body {
 .tp-hint, .tp-error { color: var(--text-muted); padding: 4px 0; }
 .tp-error { color: var(--danger); }
 
-.tp-bar { height: 6px; border-radius: 3px; background: var(--bg-sunken); overflow: hidden; }
+.tp-bar { height: 6px; border-radius: 1px; background: var(--bg-sunken); overflow: hidden; }
 .tp-bar-fill { height: 100%; background: var(--accent-strong); transition: width 0.3s; }
 .tp-bar-fill.warn { background: var(--warn); }
 
@@ -877,3 +1013,69 @@ body {
 .tp-regions th + th, .tp-regions td + td { text-align: right; }
 /* The home market, so it is found at a glance even when its row is all zeros. */
 .tp-regions tr.home td { color: var(--text-title); font-weight: 600; background: var(--bg-surface); }
+
+/* ---- Narrow screens ----
+   The desktop layout put a fixed 256 px column beside the map, which on a
+   phone left the map 130 px wide and wrapped the scan note one word per line.
+   Below 720 px the map takes the top of the screen and the panel sits under
+   it as a scrolling sheet; the top bar wraps into brand + toggles, the
+   readout strip (swipe sideways), and the forecast slider across the width. */
+@media (max-width: 720px) {
+  .top-bar {
+    height: auto;
+    flex-wrap: wrap;
+    row-gap: 6px;
+    padding: 8px 12px 8px;
+  }
+  .top-bar-title {
+    margin-right: auto;
+    padding-right: 0;
+    border-right: 0;
+  }
+  .lang-toggle  { order: 1; margin-left: 0; height: 36px; min-width: 44px; }
+  .theme-toggle { order: 1; width: 44px; height: 36px; }
+  .wx-strip {
+    order: 2;
+    flex: 1 0 100%;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+  }
+  .forecast-ctrl {
+    order: 3;
+    flex: 1 0 100%;
+    margin-left: 0;
+    padding-left: 0;
+    border-left: 0;
+    min-height: 32px;
+  }
+  .forecast-slider { flex: 1; width: auto; min-width: 0; }
+
+  .main-row { flex-direction: column; }
+  .map-wrap { flex: 1 1 auto; min-height: 0; }
+  .sidebar {
+    width: 100%;
+    flex: 0 0 auto;
+    max-height: 40dvh;
+    border-left: 0;
+    border-top: 1px solid var(--border-strong);
+    padding: 12px 16px 16px;
+  }
+
+  /* Clear of the zoom control on the left rather than centred over it. */
+  .map-note {
+    left: 56px;
+    right: 12px;
+    transform: none;
+    max-width: none;
+    font-size: 12px;
+  }
+  .map-note.low { bottom: 40px; }
+
+  .leaflet-container .leaflet-control-attribution { font-size: 8.5px; line-height: 1.3; }
+
+  .btn-primary, .btn-secondary { min-height: 44px; }
+  .toggle-row { min-height: 36px; }
+  .search-input { padding: 11px 0; font-size: 16px; }   /* 16 px: iOS zooms the page on focus below it */
+
+  .cmp-card { max-width: min(200px, 44vw); font-size: 10.5px; }
+}

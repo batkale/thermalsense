@@ -7,6 +7,7 @@ import { translateLanding } from './strings.js';
 import ThermalField  from './ThermalField.jsx';
 import Barogram      from './Barogram.jsx';
 import IntervalTable from './IntervalTable.jsx';
+import { BrandMark, SunIcon, MoonIcon } from '../components/Icons.jsx';
 
 // The map app lives at the site root; these are views of it people link to
 // (see the ?compare and ?panel handling in App.jsx).
@@ -77,7 +78,7 @@ export default function Landing() {
 
       <header className="hero">
         <div className="wrap nav">
-          <a className="brand" href="#top" id="top">ThermalSense</a>
+          <a className="brand" href="#top" id="top"><BrandMark className="brand-mark" size={22} />ThermalSense</a>
           <nav className="nav-links" aria-label={t('navLabel')}>
             <a href="#see">{t('navSee')}</a>
             <a href="#learn">{t('navLearn')}</a>
@@ -90,7 +91,7 @@ export default function Landing() {
             </button>
             {/* Shows the mode the click leads to, as the app's own toggle does. */}
             <button type="button" className="tool" onClick={toggleTheme} title={themeLabel} aria-label={themeLabel}>
-              <span aria-hidden="true">{theme === 'dark' ? '☀' : '☾'}</span>
+              {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
             </button>
             <a className="btn primary small" href={MAP_URL}>{t('openMapShort')}</a>
           </div>
