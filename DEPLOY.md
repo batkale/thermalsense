@@ -387,6 +387,26 @@ reconnect lines, which is the fastest way to confirm the OGN feed is alive.
 **Updating.** `git pull && docker compose up -d --build`. The named volumes are
 untouched, so the trained model, training buffer and beacon history survive.
 
+**Automatic deploys.** The production VM deploys `origin/main` by itself:
+cron runs [deploy/auto-deploy.sh](deploy/auto-deploy.sh) every five minutes,
+so a merge is live within about five minutes plus the build. It *pulls* — the
+repo is public, so no deploy key or SSH secret sits on GitHub and port 22 can
+stay closed to the world. It fast-forwards only, builds before restarting,
+rolls back to the previous commit if the new container is not `healthy` within
+5 minutes, does not retry a commit that failed, and stays still from 01:55 to
+02:40 UTC so it never kills the nightly seed. The crontab line runs the copy of
+the script on `origin/main`, so changing it needs no login:
+
+```bash
+*/5 * * * * cd $HOME/thermalsense && git fetch -q origin main && f=$(mktemp) && git show origin/main:deploy/auto-deploy.sh > $f && bash $f; rm -f $f
+```
+
+Read what it did in `~/.thermalsense-deploy/deploy.log` (bounded at 1 MB). A
+commit it gave up on is in `~/.thermalsense-deploy/failed`; delete that file to
+make it try the same commit again. To pause it, `crontab -e` and comment the
+line out. Editing a tracked file on the VM also stops it — it refuses to
+deploy over local changes rather than lose them.
+
 **A Caddyfile change needs `--force-recreate`, not a reload.** The Caddyfile is
 bind-mounted as a *single file*, so the container holds that file's inode. `git
 pull` does not edit files in place — it writes a replacement and renames over

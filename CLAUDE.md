@@ -12,6 +12,9 @@ feed — every circling, climbing glider is a positive label.
 
 Live deployment: `https://thermalsense-tr.polandcentral.cloudapp.azure.com`
 (Azure VM, 2 vCPU / 896 MB usable RAM — see [DEPLOY.md](DEPLOY.md)).
+**Merging to `main` deploys it:** cron on the VM runs
+[deploy/auto-deploy.sh](deploy/auto-deploy.sh) every five minutes, with a
+health-checked rollback. A merged PR is live within minutes.
 
 The UI is **Turkish-first** with a TR/EN toggle. The primary operating area is
 İnönü / Eskişehir; the glider feed itself is worldwide.
