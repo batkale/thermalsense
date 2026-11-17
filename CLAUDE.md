@@ -316,6 +316,33 @@ Breaking any of these has taken the app down or silently corrupted results befor
   `aspectcyc`, `insolation`): −0.003, +0.001, −0.002, all spanning zero.
   **The fold seed alone moves the base score 0.557–0.594**, so a single run of
   this harness is not a measurement; `--seed` exists for that.
+- **Drift-corrected terrain is ruled out, measured 17 Nov 2026** on the 6 Nov
+  buffer (47,419 rows, 2,009 mixed-label units, by hour, seeds 0–2). A glider
+  circling at height sits downwind of the ground that triggered its thermal,
+  so `evaluation/drift_terrain.py` reads the hires columns at a point shifted
+  by wind × AGL / w — for *every* row, positive and negative, with labels left
+  where they were observed. Shifting positives alone would move the goalposts,
+  and with lat/lon among the columns it would teach "upwind edge of the
+  traffic = lift". Against terrain read under the glider, averaged over seeds:
+  upwind at w = 3 / 1.5 / 0.75 m/s (median shift 431 m / 861 m / 1.7 km)
+  −0.005 / −0.014 / −0.020, the last two with every interval below zero;
+  placebos of 861 m downwind −0.017 and crosswind −0.018. `tpi_2500` alone:
+  0.603 under, 0.565 upwind, 0.576 downwind. **Every shift loses, more with
+  distance, and upwind is no better than the wrong direction.** Above 800 m
+  AGL the shortest shift gained +0.012 / +0.003 / +0.009, each interval
+  spanning zero; giving the model both positions, +0.002. Likely why: the
+  median row is 483 m AGL, and the buffer holds only Open-Meteo's 10 m wind
+  (km/h — no unit is requested), weaker than and often veered from the wind
+  aloft. Revisit only with wind at height in the buffer.
+- **The same run reproduced hires terrain** on the 6 Nov buffer: served 0.593
+  / 0.596 / 0.590 against base 0.570 / 0.569 / 0.567, deltas +0.023 to
+  +0.027 with every interval clear of zero. Its days largely overlap the
+  30 Oct export, so this is more rows, not an independent check — the live
+  buffer still is. **A failed DEM fetch does not fail the run:** the first
+  attempt lost DNS halfway, left 52% of rows NaN and showed hires at only
+  +0.005–0.010. `drift_terrain score` refuses above 2% missing, and `compute`
+  retries dropped connections and keeps range reads on disk (`--block-cache`,
+  ~2,900 blocks for this buffer). `hires_terrain.py` has neither guard.
 - **Quality gate:** the challenger and the serving model are scored on identical
   rows from a *frozen, group-disjoint* benchmark (`evaluation/holdout.py`), and
   the challenger is rejected unless a paired bootstrap CI (`paired_delta_ci`)

@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from evaluation import hires_terrain as ht
+from evaluation import drift_terrain as dt
 from evaluation import evaluate as ev
 from evaluation.archive_prior import FastPrior
 from data.circling_prior import ClimbPrior, build_index
@@ -114,3 +115,54 @@ def test_fast_prior_agrees_with_climb_prior(tmp_path):
                 assert math.isnan(b)
             else:
                 assert b == pytest.approx(a, rel=1e-9)
+
+
+def _metres(X, name):
+    """(north_m, east_m) of one SHIFTS entry from the row's own position."""
+    la, lo = dt.shifted(X, name)[0]
+    return ((la - X[0, 0]) * 111_320.0,
+            (lo - X[0, 1]) * 111_320.0 * math.cos(math.radians(X[0, 0])))
+
+
+def _row(wind_kmh, wind_from_deg, agl):
+    from pipeline.feature_engineering import _wind_components
+    X = np.zeros((1, 22))
+    X[0, 0], X[0, 1] = 46.0, 10.0
+    X[0, 7], X[0, 8] = _wind_components(wind_kmh, wind_from_deg)
+    X[0, 21] = agl
+    return X
+
+
+def test_upwind_reads_the_ground_the_wind_comes_from():
+    # 36 km/h = 10 m/s from the west, 600 m up, rising at 3 m/s: 2 km to the west
+    X = _row(36.0, 270.0, 600.0)
+    n, e = _metres(X, "up3")
+    assert e == pytest.approx(-2000.0, abs=1.0) and abs(n) < 1.0
+    n, e = _metres(X, "down1.5")
+    assert e == pytest.approx(4000.0, abs=1.0) and abs(n) < 1.0
+    n, e = _metres(X, "cross1.5")
+    assert math.hypot(n, e) == pytest.approx(4000.0, abs=1.0) and abs(e) < 1.0
+    assert _metres(X, "under") == (0.0, 0.0)
+
+
+def test_drift_is_capped_and_vanishes_without_wind():
+    assert math.hypot(*_metres(_row(80.0, 0.0, 3000.0), "up0.75")) == pytest.approx(dt.MAX_DRIFT_M, abs=1.0)
+    assert math.hypot(*_metres(_row(0.0, 0.0, 3000.0), "up0.75")) < 1e-6
+
+
+async def test_block_cache_answers_a_repeat_read_from_disk(tmp_path):
+    calls = []
+
+    class Inner:
+        async def get(self, url, headers=None):
+            calls.append(url)
+            return dt._DiskCachedClient._Resp(206, b"block-bytes")
+
+        async def aclose(self):
+            pass
+
+    c = dt._DiskCachedClient(Inner(), tmp_path)
+    for _ in range(2):
+        r = await c.get("https://x/tile.tif", headers={"Range": "bytes=0-9"})
+        assert r.content == b"block-bytes"
+    assert calls == ["https://x/tile.tif"]
