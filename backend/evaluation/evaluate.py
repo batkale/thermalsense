@@ -210,13 +210,144 @@ def _with_landcover(X: np.ndarray) -> np.ndarray:
     return out
 
 
+_COL_WIND_U, _COL_WIND_V = 7, 8
+
+
+def wind_aspect_columns(X: np.ndarray) -> np.ndarray:
+    """
+    Which way each cell faces relative to the wind, retrofitted from the buffer.
+
+    Wind and aspect are both already columns, but wind is one value per grid
+    while aspect varies per cell.  A tree can only find their interaction by
+    splitting on both in sequence, and with a few thousand groups it rarely
+    gets the chance.  windward is +1 for a slope facing straight into the wind
+    (it faces the direction the wind comes FROM) and -1 for the lee side.
+
+    wind_u/v follow feature_engineering._wind_components: u = -s*sin(dir),
+    v = -s*cos(dir), so atan2(-u, -v) recovers the meteorological direction.
+    """
+    u, v = X[:, _COL_WIND_U], X[:, _COL_WIND_V]
+    speed = np.hypot(u, v)
+    wind_from = np.degrees(np.arctan2(-u, -v)) % 360.0
+    windward = np.cos(np.radians(X[:, _COL_ASPECT] - wind_from))
+    steep = np.sin(np.radians(X[:, _COL_SLOPE]))
+    return np.column_stack([windward * steep, windward * steep * speed])
+
+
+def aspect_cyclic_columns(X: np.ndarray) -> np.ndarray:
+    """
+    Northness and eastness, weighted by slope.
+
+    Aspect is a raw bearing, so 359 and 1 degree sit at opposite ends of every
+    split, and on flat ground it is noise from a gradient of almost nothing.
+    Multiplying by sin(slope) makes both vanish where there is no slope to face.
+    """
+    a = np.radians(X[:, _COL_ASPECT])
+    steep = np.sin(np.radians(X[:, _COL_SLOPE]))
+    return np.column_stack([np.cos(a) * steep, np.sin(a) * steep])
+
+
+_INSOL_STEP_H = 0.25
+_INSOL_SPAN_H = 14.0
+
+
+def insolation_columns(X: np.ndarray) -> np.ndarray:
+    """
+    Sun each cell has collected since morning, and that as a share of flat ground.
+
+    Instantaneous cos(incidence) was tried and did not help (CLAUDE.md).  Ground
+    does not heat instantly, though: an east face that took the sun all morning
+    can be the warm one at noon even when the sun has moved to the south face.
+    So this integrates cos(incidence) over the preceding _INSOL_SPAN_H hours in
+    _INSOL_STEP_H steps.  The second column divides by the same integral for a
+    horizontal surface, so it says "how much more or less than flat ground"
+    independently of the time of day, which is constant within a group anyway.
+    """
+    hour = _decode_cyclic(X[:, _COL_HOUR_SIN], X[:, _COL_HOUR_COS], 24)
+    doy = _decode_cyclic(X[:, _COL_DOY_SIN], X[:, _COL_DOY_COS], 365)
+    lat, lon = X[:, _COL_LAT], X[:, _COL_LON]
+    slope, aspect = X[:, _COL_SLOPE], X[:, _COL_ASPECT]
+    on_slope = np.zeros(len(X))
+    on_flat = np.zeros(len(X))
+    for k in range(int(_INSOL_SPAN_H / _INSOL_STEP_H) + 1):
+        h = hour - k * _INSOL_STEP_H
+        d = np.where(h < 0, doy - 1, doy)
+        elev, azim = sun_position(lat, lon, d, h % 24)
+        on_slope += cos_incidence(slope, aspect, elev, azim) * _INSOL_STEP_H
+        on_flat += cos_incidence(0.0, 0.0, elev, azim) * _INSOL_STEP_H
+    ratio = np.where(on_flat > 1e-6, on_slope / np.maximum(on_flat, 1e-6), 1.0)
+    return np.column_stack([on_slope, ratio])
+
+
 VARIANTS = {
     "base": lambda X: X,
     "solar": lambda X: np.column_stack([X, solar_column(X)]),
     "landcover": _with_landcover,
     "prior": lambda X: np.column_stack([X, prior_column(X)]),
     "both": lambda X: np.column_stack([_with_landcover(X), prior_column(X)]),
+    "windaspect": lambda X: np.column_stack([X, wind_aspect_columns(X)]),
+    "aspectcyc": lambda X: np.column_stack([X, aspect_cyclic_columns(X)]),
+    "insolation": lambda X: np.column_stack([X, insolation_columns(X)]),
+    "cheap3": lambda X: np.column_stack([X, wind_aspect_columns(X),
+                                         aspect_cyclic_columns(X),
+                                         insolation_columns(X)]),
 }
+
+
+def _register_cached_variants(hires_path: str | None, prior_db: str | None) -> None:
+    """Variants that need a precomputed cache: --hires and --prior-db.
+
+    --prior-db replaces the "prior" variant's source: instead of rebuilding
+    prior_cells from config.DB_PATH and walking it with ClimbPrior (which does
+    not finish on weeks of archive), it reads a table built by
+    evaluation.archive_prior and answers with FastPrior — same semantics.
+    """
+    if hires_path:
+        from evaluation import hires_terrain
+        lut = hires_terrain.load_lookup(hires_path)
+        hires = lambda X: hires_terrain.columns_for(X, lut)
+        VARIANTS["hires"] = lambda X: np.column_stack([X, hires(X)])
+    if prior_db:
+        from evaluation.archive_prior import FastPrior
+        fp = FastPrior(prior_db)
+        print(f"climb prior: {len(fp.hours)} hours {fp.hours[0]} .. {fp.hours[-1]} "
+              f"from {prior_db}", flush=True)
+        prior = lambda X: fp.values(X[:, _COL_LAT], X[:, _COL_LON], row_datetimes(X))
+        VARIANTS["prior"] = lambda X: np.column_stack([X, prior(X)])
+        if hires_path:
+            VARIANTS["hires_prior"] = lambda X: np.column_stack([X, hires(X), prior(X)])
+
+
+def _airfield_breakdown(X, y, ge, served: dict, airports_csv: str, n_boot: int) -> None:
+    """Score each variant again on rows at least N km from any airfield.
+
+    The leak this guards against is the alt_agl one in another form: sinking,
+    straight gliders are often on final glide into a field in a valley, so a
+    terrain column could learn "airfields are low" and score as if it had
+    learned where lift is.  If a gain survives away from every airfield, that
+    is not what it learned.  airports_csv is OurAirports' airports.csv.
+    """
+    import pandas as pd
+    from sklearn.neighbors import BallTree
+    ap = pd.read_csv(airports_csv, usecols=["type", "latitude_deg", "longitude_deg"])
+    ap = ap[ap.type.isin(["small_airport", "medium_airport", "large_airport"])]
+    tree = BallTree(np.radians(ap[["latitude_deg", "longitude_deg"]].values), metric="haversine")
+    km = tree.query(np.radians(X[:, :2].astype(float)), k=1)[0][:, 0] * 6371.0
+    print(f"\nby distance to nearest airfield ({len(ap)} fields; median row "
+          f"{np.median(km):.1f} km, positives {np.median(km[y == 1]):.1f}, "
+          f"negatives {np.median(km[y == 0]):.1f})")
+    names = list(served)
+    for lo in (0, 3, 5, 8):
+        m = km >= lo
+        cells = []
+        for n in names:
+            r = grouped_auc(served[n][m], y[m], ge[m])
+            cells.append(f"{n} {r['micro']:.3f}")
+        line = f"  >= {lo} km  ({grouped_auc(np.zeros(m.sum()), y[m], ge[m])['groups']} groups)  " + "  ".join(cells)
+        if len(names) == 2:
+            d = paired_delta_ci(served[names[0]][m], served[names[1]][m], y[m], ge[m], n_boot=n_boot)
+            line += f"   delta {d['point']:+.3f} [{d['lo']:+.3f}, {d['hi']:+.3f}]"
+        print(line)
 
 
 def _bare_model():
@@ -282,8 +413,10 @@ def _row(name, scores, y, gids, seed=0):
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--buffer", default=BUFFER_PATH)
-    ap.add_argument("--variant", action="append", choices=sorted(VARIANTS),
-                    help="repeatable; defaults to base+solar")
+    ap.add_argument("--variant", action="append",
+                    help="repeatable; defaults to base+solar. One of "
+                         + ", ".join(sorted(VARIANTS)) + ", plus hires / "
+                         "hires_prior when their caches are given")
     ap.add_argument("--mode", choices=("cv", "holdout"), default="cv",
                     help="cv: grouped K-fold over the whole buffer (more power). "
                          "holdout: the frozen benchmark the live gate uses.")
@@ -294,11 +427,24 @@ def main() -> int:
                          "another. cv mode only.")
     ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--boot", type=int, default=2000)
+    ap.add_argument("--hires", help="cache from evaluation.hires_terrain; adds the "
+                                     "'hires' variant (and 'hires_prior' with --prior-db)")
+    ap.add_argument("--prior-db", help="prior_cells table from evaluation.archive_prior; "
+                                       "the 'prior' variant reads it instead of DB_PATH")
+    ap.add_argument("--airports", help="OurAirports airports.csv: also score every variant "
+                                       "on rows >= 3/5/8 km from any airfield")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="fold assignment seed. Re-run with several: CLAUDE.md "
+                         "records a variant whose delta flipped sign with it.")
     ap.add_argument("--no-agl-floor", action="store_true",
                     help="keep rows below _MIN_SAMPLE_AGL, which production "
                          "drops. Useful only to show the leak they cause.")
     args = ap.parse_args()
+    _register_cached_variants(args.hires, args.prior_db)
     variants = args.variant or ["base", "solar"]
+    unknown = [v for v in variants if v not in VARIANTS]
+    if unknown:
+        ap.error(f"unknown variant(s) {unknown}; available: {sorted(VARIANTS)}")
 
     with np.load(args.buffer, allow_pickle=False) as d:
         X, y = d["X"], d["y"].astype(int)
@@ -343,7 +489,8 @@ def main() -> int:
               + (f", scored within {len(np.unique(ge))} (day, cell, hour) units"
                  if args.by_hour else ""))
         scored = {
-            name: oof_scores(X, y, gfold, VARIANTS[name], k=args.folds)
+            name: oof_scores(X, y, gfold, VARIANTS[name], k=args.folds,
+                             seed=args.seed)
             for name in variants
         }
 
@@ -392,6 +539,8 @@ def main() -> int:
         print(f"verdict: {verdict}")
 
     _report_regions(Xe, ye, ge, served, n_boot=args.boot)
+    if args.airports:
+        _airfield_breakdown(Xe, ye, ge, served, args.airports, n_boot=args.boot)
     return 0
 
 

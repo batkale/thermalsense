@@ -276,7 +276,46 @@ Breaking any of these has taken the app down or silently corrupted results befor
   derived from it, and the aircraft's height, and none of them measures whether
   *this* ground is hot right now. The untried lever is a per-cell column that
   does — satellite land surface temperature, or insolation integrated since
-  sunrise rather than instantaneous `cos_incidence`.
+  sunrise rather than instantaneous `cos_incidence`. **Superseded 17 Nov 2026,
+  see the next entry: the terrain had not run out, it was never read.**
+- **Full-resolution terrain is the first lever that clearly moves the score.**
+  `TERRAIN_RES` samples elevation every 0.01° (~1.1 km) and bilinearly fills
+  the 50 m grid, so every slope and aspect the model has seen is a plane between
+  points a kilometre apart. That spacing existed to spare OpenTopoData's
+  1,000/day; Copernicus has no quota. `evaluation/hires_terrain.py` reads the
+  real ~33 m surface around each buffer row and adds slope, northness,
+  eastness, ruggedness and TPI at 150/400/1000/2500 m (centre minus a ring
+  mean: positive on hills and ridges). Measured 17 Nov 2026 on the 30 Oct
+  export (28,090 rows, 1,105 mixed-label units, `--by-hour`):
+
+  | | seed 0 | seed 1 | seed 2 |
+  |---|---|---|---|
+  | base served | 0.575 | 0.559 | 0.594 |
+  | hires served | 0.607 | 0.605 | — |
+  | paired delta, served | **+0.033 [+0.015, +0.050]** | **+0.047 [+0.028, +0.066]** | — |
+  | hires raw − base raw | +0.043 [+0.014, +0.074] | +0.055 [+0.028, +0.083] | +0.030 [+0.000, +0.058] |
+
+  `tpi_2500` *alone* scores 0.613 [0.580, 0.645], above the whole 22-column
+  model. **The airfield leak was checked and is not it.** Sinking, straight
+  gliders on final glide into valley airfields could teach "low ground = no
+  lift" the way `alt_agl` once taught "on the ground = no lift". Against
+  OurAirports (48k fields, `--airports`): TPI is *stronger* ≥3 km from any
+  field (0.627) and null under 3 km; positives sit nearer fields than
+  negatives (4.4 vs 5.1 km median); the served delta holds at ≥5 km
+  (+0.026 [+0.005, +0.049], +0.041 [+0.016, +0.067]). It does fade above
+  ~800 m AGL (297 units, interval spans chance) — fewer units, and thermals
+  drift off their trigger with height. **Not in production:** serving it
+  means reading terrain at full resolution in `fetch_elevation_grid` (or a
+  second fine read), widening the feature matrix, and a reseed. Confirm on a
+  fresh buffer first.
+- **Also measured 17 Nov 2026, same export and seeds:** `prior` from the
+  export's 43-day Parquet archive (`evaluation/archive_prior.py`, `--prior-db`)
+  +0.008 / +0.016 / +0.016 served — consistent sign, one interval clear of
+  zero, and nothing on top of hires terrain. Wind-relative aspect, slope-weighted
+  aspect sin/cos and insolation integrated over 14 h (`windaspect`,
+  `aspectcyc`, `insolation`): −0.003, +0.001, −0.002, all spanning zero.
+  **The fold seed alone moves the base score 0.557–0.594**, so a single run of
+  this harness is not a measurement; `--seed` exists for that.
 - **Quality gate:** the challenger and the serving model are scored on identical
   rows from a *frozen, group-disjoint* benchmark (`evaluation/holdout.py`), and
   the challenger is rejected unless a paired bootstrap CI (`paired_delta_ci`)
