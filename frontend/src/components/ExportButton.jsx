@@ -1,5 +1,6 @@
 import { GRID_RES } from '../config.js';
 import { useLang } from '../i18n/LanguageContext.jsx';
+import { DownloadIcon } from './Icons.jsx';
 
 /**
  * Converts the current heatmap into a GeoJSON FeatureCollection
@@ -56,7 +57,7 @@ export default function ExportButton({ heatmap, gridMeta, thermalBase, cape }) {
 
   return (
     <button className="btn-primary" onClick={handleExport} disabled={disabled}>
-      ↓ {t('exportGeoJSON')}
+      <DownloadIcon /> {t('exportGeoJSON')}
     </button>
   );
 }
