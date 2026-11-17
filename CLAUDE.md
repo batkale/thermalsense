@@ -343,6 +343,49 @@ Breaking any of these has taken the app down or silently corrupted results befor
   +0.005–0.010. `drift_terrain score` refuses above 2% missing, and `compute`
   retries dropped connections and keeps range reads on disk (`--block-cache`,
   ~2,900 blocks for this buffer). `hires_terrain.py` has neither guard.
+- **A per-cell surface energy budget adds nothing, measured 17 Nov 2026**
+  (same buffer, units and seeds; `evaluation/energy_budget.py`). Per row:
+  sunlight on the 30 m slope (direct × cos incidence, unless terrain within
+  4 km is above the sun; plus diffuse sky and ground reflection), then
+  albedo, ground storage and evaporative fraction by WorldCover class at
+  ~40 m (literature-typical constants in `_SURFACE`, not site measurements),
+  giving the sensible heat handed to the air — now and weighted over the
+  previous 3 h, and its excess over flat-ground rings at 400 m and 1 km.
+  Alone: `h_3h` 0.555, `h_now` 0.552, excess over 1 km 0.553 — the same as
+  `cos_incidence` alone (0.551). Land cover alone 0.490, terrain shadow
+  0.499. On top of hires terrain: +0.004 / −0.002 / +0.001. **All of its
+  skill is the sun angle on the slope.** Land cover barely varies under the
+  aircraft (median and p90 of the heat factor both 0.40), and shadow is rare
+  at the hours gliders fly. The budget says how hot the ground should be;
+  what is still missing is a measurement of how hot it is (satellite LST).
+- **Wind at height does not rescue drift either, measured 17 Nov 2026.**
+  `energy_budget aloft` fetches 925/850/700 hPa wind plus direct and diffuse
+  radiation for every row from the historical forecast API: 3,170 requests
+  for this buffer (one per 0.25° cell per ≤14-day window), none failed,
+  cached on disk. `layer_wind` averages the profile from the ground to the
+  glider, and `drift_terrain compute --aloft` drives the shifts with it at a
+  true rise rate w. Averaged over seeds, against terrain under the glider:
+  upwind at w = 3 / 2 / 1.2 m/s (median 487 m / 731 m / 1.2 km) 0.000 /
+  −0.011 / −0.017; placebos at 731 m downwind −0.019, crosswind −0.014.
+  Still no shift beats reading under the glider, but upwind now loses less
+  than downwind in all three seeds, where with 10 m wind they tied — the
+  direction is right, the effect is below the label noise. The layer and
+  850 hPa wind as model columns, with slope-weighted windwardness:
+  +0.006 / −0.004 / +0.011, one interval clear of zero — unproven.
+- **What a thermal-resolving simulation would cost (for the pitch).** A
+  site at 50 m, 11 × 11 km × 3 km, is 2.9M cells; a 12 h flying day at a
+  1–2 s step is 21,600–43,200 steps. Scaled from the DALES GPU port
+  (arXiv:2502.20412, whole timestep, per node per million cells: 192-core
+  Genoa 9,712 µs, 4×A100 2,444 µs, 4×H100 846 µs): one H100 4–7 min,
+  $0.15–0.47; one A100 10–20 min, $0.22–0.85; CPU 32–65 core-hours. A
+  100 × 100 km region: $0.76–2.44 a day at 100 m, $12–39 at 50 m (H100).
+  Prices are 2026 specialist-cloud on-demand (H100 $2.50–4, A100
+  $1.30–2.50 per GPU-hour; hyperscalers 2–4× more). Caveats that go with
+  the number: the benchmark ran ~46M cells per GPU, so a 2.9M-cell site
+  underuses one (budget up to 3×); its case carries clouds, rain and
+  radiation, so a dry run is cheaper per cell; chaos needs an ensemble of
+  ~10 (×10); it needs boundary conditions from a regional forecast.
+  Whiffle has run LES forecasts operationally on GPUs since 2016 at ~100 m.
 - **Quality gate:** the challenger and the serving model are scored on identical
   rows from a *frozen, group-disjoint* benchmark (`evaluation/holdout.py`), and
   the challenger is rejected unless a paired bootstrap CI (`paired_delta_ci`)

@@ -56,20 +56,49 @@ SHIFTS = {
     "cross1.5": ("x", 1.5),
 }
 
+# The same test driven by the mean wind between the ground and the glider
+# (energy_budget.layer_wind, m/s from Open-Meteo pressure levels).  With the
+# wind at height in hand, w is the bubble's actual rise rate: ~2 m/s is a
+# typical updraft (a glider's 1.5 m/s climb plus its own ~0.7 m/s sink).
+ALOFT_SHIFTS = {
+    "a_up3":    (-1, 3.0),
+    "a_up2":    (-1, 2.0),
+    "a_up1.2":  (-1, 1.2),
+    "a_down2":  (+1, 2.0),
+    "a_cross2": ("x", 2.0),
+}
 
-def drift_m(X: np.ndarray, w_eff: float) -> np.ndarray:
-    speed_ms = np.hypot(X[:, _COL_U], X[:, _COL_V]) / 3.6
+
+def _spec(name: str):
+    return SHIFTS.get(name) or ALOFT_SHIFTS[name]
+
+
+def _wind_ms(X: np.ndarray, name: str, wind_ms: np.ndarray | None) -> np.ndarray:
+    if name in ALOFT_SHIFTS:
+        if wind_ms is None:
+            raise ValueError(f"{name} needs the layer wind (--aloft)")
+        return wind_ms
+    return np.column_stack([X[:, _COL_U], X[:, _COL_V]]).astype(float) / 3.6
+
+
+def drift_m(X: np.ndarray, w_eff: float, wind_ms: np.ndarray | None = None) -> np.ndarray:
+    """Shift distance; wind_ms (n x 2, m/s) replaces the 10 m wind when given."""
+    if wind_ms is None:
+        speed_ms = np.hypot(X[:, _COL_U], X[:, _COL_V]) / 3.6
+    else:
+        speed_ms = np.hypot(wind_ms[:, 0], wind_ms[:, 1])
     return np.minimum(speed_ms * X[:, _COL_AGL] / w_eff, MAX_DRIFT_M)
 
 
-def shifted(X: np.ndarray, name: str) -> np.ndarray:
-    """(lat, lon) per row for one entry of SHIFTS."""
+def shifted(X: np.ndarray, name: str, wind_ms: np.ndarray | None = None) -> np.ndarray:
+    """(lat, lon) per row for one entry of SHIFTS or ALOFT_SHIFTS."""
     lat = X[:, _COL_LAT].astype(float)
     lon = X[:, _COL_LON].astype(float)
-    direction, w = SHIFTS[name]
+    direction, w = _spec(name)
     if w is None:
         return np.column_stack([lat, lon])
-    u, v = X[:, _COL_U].astype(float), X[:, _COL_V].astype(float)
+    wv = _wind_ms(X, name, wind_ms)
+    u, v = wv[:, 0], wv[:, 1]
     s = np.hypot(u, v)
     ue = np.where(s > 1e-9, u / np.maximum(s, 1e-9), 0.0)   # unit vector the air moves toward
     ve = np.where(s > 1e-9, v / np.maximum(s, 1e-9), 0.0)
@@ -78,7 +107,7 @@ def shifted(X: np.ndarray, name: str) -> np.ndarray:
         sign = 1.0
     else:
         sign = float(direction)
-    d = drift_m(X, w) * sign
+    d = drift_m(X, w, wv if name in ALOFT_SHIFTS else None) * sign
     mlat = 111_320.0
     mlon = 111_320.0 * np.maximum(np.cos(np.radians(lat)), 1e-3)
     return np.column_stack([lat + ve * d / mlat, lon + ue * d / mlon])
@@ -138,14 +167,15 @@ class _DiskCachedClient:
 
 
 async def compute(X: np.ndarray, names: list[str], block_cache: str | None,
-                  batch: int = 150, log_every: int = 20) -> dict[str, np.ndarray]:
+                  batch: int = 150, log_every: int = 20,
+                  wind_ms: np.ndarray | None = None) -> dict[str, np.ndarray]:
     from data import dem_client
     dem_client._BLOCK_CACHE_SIZE = max(dem_client._BLOCK_CACHE_SIZE, 96)
     if block_cache:
         wrapped = _DiskCachedClient(dem_client._get_client(), Path(block_cache))
         dem_client._get_client = lambda: wrapped
 
-    pos = {n: shifted(X, n) for n in names}
+    pos = {n: shifted(X, n, wind_ms) for n in names}
     out = {n: np.full((len(X), len(ht.COLUMNS)), np.nan) for n in names}
     order = np.lexsort((np.floor(X[:, _COL_LON] * 4), np.floor(X[:, _COL_LAT] * 4)))
     t0 = time.time()
@@ -181,11 +211,19 @@ def _load_buffer(path: str):
         return d["X"], d["y"].astype(int)
 
 
+def _layer_wind(X: np.ndarray, aloft_path: str | None) -> np.ndarray | None:
+    if not aloft_path:
+        return None
+    from evaluation.energy_budget import layer_wind, load_aloft
+    return layer_wind(X, load_aloft(aloft_path, X)["wind"])
+
+
 def cmd_compute(args) -> int:
     X, _ = _load_buffer(args.buffer)
-    names = args.shift or list(SHIFTS)
+    wind_ms = _layer_wind(X, args.aloft)
+    names = args.shift or (["under", *ALOFT_SHIFTS] if wind_ms is not None else list(SHIFTS))
     print(f"{len(X)} rows x {len(names)} shifts: {', '.join(names)}", flush=True)
-    feats = asyncio.run(compute(X, names, args.block_cache))
+    feats = asyncio.run(compute(X, names, args.block_cache, wind_ms=wind_ms))
     np.savez(args.out, names=np.array(names), fingerprint=np.array(_fingerprint(X)),
              columns=np.array(ht.COLUMNS), **{f"f_{n}": feats[n] for n in names})
     for n in names:
@@ -209,8 +247,10 @@ def cmd_score(args) -> int:
         F = {str(n): c[f"f_{n}"] for n in c["names"]}
 
     # What load() and fit_and_gate train on: no invented weather, nothing on the field.
+    wind_ms = _layer_wind(X, args.aloft)
     keep = ~is_fallback_row(X) & (X[:, _COL_AGL] >= _MIN_SAMPLE_AGL)
     X, y = X[keep], y[keep]
+    wind_ms = None if wind_ms is None else wind_ms[keep]
     F = {n: f[keep] for n, f in F.items()}
     gfold, ge = group_ids(X), decision_ids(X)
     tm = _terrain_multiplier(X)
@@ -220,9 +260,10 @@ def cmd_score(args) -> int:
           f"{grouped_auc(np.zeros(len(y)), y, ge)['groups']}")
     for n in F:
         miss = np.isnan(F[n][:, 0]).mean()
-        shift = "" if n == "under" else (
-            f"shift median {np.median(drift_m(X, SHIFTS[n][1])):.0f} m, "
-            f"p90 {np.percentile(drift_m(X, SHIFTS[n][1]), 90):.0f} m, ")
+        d = None if n == "under" else drift_m(
+            X, _spec(n)[1], wind_ms if n in ALOFT_SHIFTS else None)
+        shift = "" if d is None else (
+            f"shift median {np.median(d):.0f} m, p90 {np.percentile(d, 90):.0f} m, ")
         print(f"  {n:<9} {shift}missing {miss:.2%}")
     if np.isnan(F["under"][:, 0]).mean() > 0.02:
         print("more than 2% of rows have no terrain - a failed fetch, not ocean; "
@@ -243,8 +284,10 @@ def cmd_score(args) -> int:
     variants = {"base": lambda Z, idx: Z}
     for n in F:
         variants[f"hires_{n}"] = (lambda n: lambda Z, idx: np.column_stack([Z, F[n][idx]]))(n)
-    if "up1.5" in F:
-        variants["hires_under+up1.5"] = lambda Z, idx: np.column_stack([Z, F["under"][idx], F["up1.5"][idx]])
+    for best in ("up1.5", "a_up2"):
+        if best in F:
+            variants[f"hires_under+{best}"] = (lambda b: lambda Z, idx: np.column_stack(
+                [Z, F["under"][idx], F[b][idx]]))(best)
 
     # oof_scores hands the transform rows, not indices, so carry the row index
     # in a trailing column and strip it before the model sees it.
@@ -277,11 +320,14 @@ def main() -> int:
     c = sub.add_parser("compute")
     c.add_argument("--buffer", required=True)
     c.add_argument("--out", required=True)
-    c.add_argument("--shift", action="append", choices=list(SHIFTS))
+    c.add_argument("--shift", action="append", choices=[*SHIFTS, *ALOFT_SHIFTS])
     c.add_argument("--block-cache", help="directory to keep COG range reads in")
+    c.add_argument("--aloft", help="energy_budget aloft cache: drive the shifts with "
+                                   "the layer wind instead of the 10 m wind")
     s = sub.add_parser("score")
     s.add_argument("--buffer", required=True)
     s.add_argument("--cache", required=True)
+    s.add_argument("--aloft", help="the aloft cache the shifts were computed with")
     s.add_argument("--seed", type=int, action="append")
     s.add_argument("--boot", type=int, default=1000)
     args = ap.parse_args()
