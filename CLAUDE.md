@@ -323,6 +323,7 @@ Breaking any of these has taken the app down or silently corrupted results befor
 | `GET /ogn/glider/{id}` | One aircraft by **exact** id, ignoring the viewport. `{"glider": null}` when it is gone — not a 404 |
 | `GET /thermals/active` | Clusters of circling gliders |
 | `GET /elevation?lat=&lon=` | Single SRTM point |
+| `GET /weather?lat=&lon=&forecast_h=` | Sky and local clock at one point, no model run — for the pinned glider card. Same cached meteo call as `/predict` |
 | `GET /healthz` | `{status, model_loaded}` |
 | `POST /train` | Admin. Background retrain |
 | `POST /seed?days_back=&limit=&reset=` | Admin. Rebuild the buffer from beacon history |
@@ -509,6 +510,16 @@ ledger does, by recording forecasts before their time and checking them after.
 - **Known gap:** scoring reads the hot DB only. If the app is down past
   `BEACON_RETENTION_DAYS`, those forecasts score `no_observation_data`; reading
   the Parquet archive instead is the obvious next step.
+
+**Sky and local clock** (`weather.condition`, `is_day`, `utc_offset_s`,
+`timezone` in `/predict`, and `/weather`): `weathercode` and `is_day` ride in
+the live forecast request that is made anyway (`meteo_client.DISPLAY_VARS`),
+never in the feature matrix. The request says `timezone=auto` to learn the
+point's IANA zone and `timeformat=unixtime` so the time axis stays absolute —
+the slot lookup reads the same UTC hour it read under `timezone=UTC`. The code
+takes the nearer hour (a category does not interpolate); the offset is for the
+target moment via `zoneinfo`, so a slider across a DST change reads the right
+clock. The fallback carries none of these, and the map then shows neither.
 
 `/predict` changed with it: live thermals are blended in with weight
 `exp(-minutes / LIVE_FUSION_TAU_MIN)`, zero from `LIVE_FUSION_MAX_MIN` (they were

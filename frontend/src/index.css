@@ -340,6 +340,10 @@ button { font-family: inherit; }
 /* Figures in tabular Archivo, not --mono: B612 Mono gives the decimal point a
    full cell, so "7.9" arrives as "7. 9" — the landing page hit the same thing
    with the Turkish comma. --mono is kept for identifiers (the callsign). */
+/* Condition chip: icon in line with the word, sized to the figure beside it. */
+.cond-value { display: inline-flex; align-items: center; gap: 5px; }
+.cond-icon  { flex: none; color: var(--accent); }
+
 .wx-chip-value {
   font-size: 12.5px;
   font-weight: 600;
@@ -669,6 +673,22 @@ button { font-family: inherit; }
 .pin-straight { color: var(--text-secondary); }
 .pin-glider   { color: var(--sky-text); font-weight: 600; margin-right: 6px; }
 .pin-tow      { color: var(--text-title); font-weight: 600; margin-right: 6px; }
+/* Sky and local clock where the aircraft is. One line: icon and condition
+   on the left, the clock on the right. */
+.pin-sky {
+  display: flex;
+  flex-wrap: wrap;          /* a long Turkish condition pushes the clock down, not out */
+  justify-content: space-between;
+  align-items: center;
+  gap: 2px 8px;
+  font-size: 11.5px;
+  color: var(--text-body);
+  font-variant-numeric: tabular-nums;
+}
+.pin-sky-cond { display: inline-flex; align-items: center; gap: 5px; color: var(--text-bright); font-weight: 600; white-space: nowrap; }
+.pin-sky-cond .cond-icon { color: var(--accent); }
+.pin-sky-time { white-space: nowrap; }
+.pin-sky-offset { margin-left: 5px; color: var(--text-muted); font-size: 10.5px; }
 .pin-coords {
   font-size: 10.5px;
   color: var(--text-muted);

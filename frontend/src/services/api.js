@@ -21,6 +21,18 @@ export async function fetchElevation(lat, lon) {
   return res.json(); // { elevation: int | null }
 }
 
+/**
+ * The sky and the local clock at one point, without running the model — for
+ * the pinned glider card, which follows an aircraft rather than the last scan.
+ * { condition, is_day, utc_offset_s, timezone, target_at, temp_2m, meteo_fallback }
+ */
+export async function fetchWeather(lat, lon, forecastH = 0) {
+  const params = new URLSearchParams({ lat, lon, forecast_h: forecastH });
+  const res = await fetch(`${API_BASE}/weather?${params}`);
+  if (!res.ok) throw new Error(`Weather failed: ${res.statusText}`);
+  return res.json();
+}
+
 export async function fetchGliderTrack(gliderId) {
   const res = await fetch(`${API_BASE}/ogn/track/${encodeURIComponent(gliderId)}`);
   if (!res.ok) return [];

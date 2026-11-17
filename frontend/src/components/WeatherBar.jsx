@@ -4,6 +4,7 @@ import { useTheme } from '../theme/ThemeContext.jsx';
 import { LANG_LABEL } from '../i18n/strings.js';
 import { FORECAST_STEPS } from '../config.js';
 import { BrandMark, SunIcon, MoonIcon, AlertIcon } from './Icons.jsx';
+import { ConditionIcon, conditionKey, useLocalClock, formatLocalTime, formatOffset } from './SkyClock.jsx';
 
 export default function WeatherBar({ weather, forecastH = 0, onForecastChange, loading, error }) {
   const { t, lang, toggleLang, windDir } = useLang();
@@ -33,7 +34,8 @@ export default function WeatherBar({ weather, forecastH = 0, onForecastChange, l
         <div className="wx-chips">
           {weather ? (
             <>
-              <WxChip label={t('temp')}     tip={t('tempTip')}     value={`${weather.temp_2m.toFixed(1)}°C`} />
+              <SkyChips weather={weather} forecastH={forecastH} />
+              <WxChip label={t('temp')}    tip={t('tempTip')}     value={`${weather.temp_2m.toFixed(1)}°C`} />
               <WxChip label={t('humidity')} tip={t('humidityTip')} value={`${weather.humidity}%`} />
               <WxChip label={t('wind')}     tip={t('windTip')}     value={<WindValue speed={weather.wind_speed} dir={weather.wind_dir} label={windDir(weather.wind_dir)} />} />
               <WxChip label={t('solar')}    tip={t('solarTip')}    value={`${Math.round(weather.solar_ghi)} W/m²`} />
@@ -113,6 +115,33 @@ function formatForecast(t, hours) {
   if (!m) return t('plusHours', { n: h });
   if (!h) return t('plusMinutes', { n: m });
   return t('plusHoursMinutes', { h, m });
+}
+
+// The sky and the local clock at the scanned point, at the moment the slider
+// asks about. Shown at night too: the heatmap is zeroed then, but "clear,
+// 22:40" is exactly the context that explains why. Both chips are left out when
+// the backend has neither (the synthetic fallback, or an older backend).
+function SkyChips({ weather, forecastH }) {
+  const { t, locale } = useLang();
+  const live = !forecastH;
+  const shifted = useLocalClock(weather.utc_offset_s, weather.target_at, live);
+  const condKey = conditionKey(weather.condition, weather.is_day);
+  return (
+    <>
+      {condKey && (
+        <WxChip label={t('sky')} tip={t('skyTip')} value={
+          <span className="cond-value">
+            <ConditionIcon condition={weather.condition} isDay={weather.is_day} size={15} />
+            {t(condKey)}
+          </span>
+        } />
+      )}
+      {shifted != null && (
+        <WxChip label={t('localTime')} tip={t('localTimeTip', { offset: formatOffset(t, weather.utc_offset_s) })}
+                value={formatLocalTime(shifted, locale, !live)} />
+      )}
+    </>
+  );
 }
 
 function WindValue({ speed, dir, label }) {

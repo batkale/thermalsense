@@ -40,6 +40,83 @@ HOURLY_VARS = [
     "boundary_layer_height", "soil_temperature_0_to_7cm",
 ]
 
+# Asked for by the live forecast request only, and shown to the user, never fed
+# to the model: build_feature_matrix reads the meteo dict by name, so these ride
+# along without touching FEATURE_COUNT.  They come in the request that is made
+# anyway — Open-Meteo's 10k/day is shared with the training sampler, so a second
+# call per click for a weather icon would be the worst way to spend it.
+DISPLAY_VARS = ["weathercode", "is_day"]
+
+# WMO weather interpretation codes (the table Open-Meteo documents) to the plain
+# condition the map shows.  The values are translation keys on the frontend
+# (weather_cond_<key>), so they are part of the wire contract — rename one and
+# both dictionaries change with it.
+_CONDITION_BY_CODE: dict[int, str] = {
+    0: "clear",
+    1: "mostly_clear",
+    2: "partly_cloudy",
+    3: "cloudy",
+    45: "fog", 48: "fog",
+    51: "drizzle", 53: "drizzle", 55: "drizzle", 56: "drizzle", 57: "drizzle",
+    61: "rain", 63: "rain", 65: "rain", 66: "rain", 67: "rain",
+    80: "rain", 81: "rain", 82: "rain",
+    71: "snow", 73: "snow", 75: "snow", 77: "snow", 85: "snow", 86: "snow",
+    95: "thunderstorm", 96: "thunderstorm", 99: "thunderstorm",
+}
+
+
+def weather_condition(code) -> str | None:
+    """Condition key for a WMO weather code, or None when there is no code.
+
+    An unknown code is None rather than a guess: a "sunny" icon over a code this
+    table has never seen would be inventing weather, which is the one thing the
+    fallback history of this module says not to do.
+    """
+    if code is None:
+        return None
+    try:
+        return _CONDITION_BY_CODE.get(int(round(float(code))))
+    except (TypeError, ValueError):
+        return None
+
+
+def local_utc_offset_s(tz_name: str | None, fallback_s, at: datetime) -> int | None:
+    """Seconds east of UTC at the place the forecast is for, at the moment `at`.
+
+    Open-Meteo's utc_offset_seconds is the offset *now*; with the slider up to
+    +24 h ahead that is an hour wrong across a DST change.  The IANA name it
+    returns beside it answers for any moment, so that is preferred, and the
+    plain offset is the stand-in when the name is missing or unknown here.
+    """
+    if tz_name:
+        try:
+            from zoneinfo import ZoneInfo
+            off = at.astimezone(ZoneInfo(tz_name)).utcoffset()
+            if off is not None:
+                return int(off.total_seconds())
+        except Exception:
+            pass
+    if fallback_s is None:
+        return None
+    try:
+        return int(fallback_s)
+    except (TypeError, ValueError):
+        return None
+
+
+def _utc_stamps(times: list) -> list[str]:
+    """Hourly stamps as UTC 'YYYY-MM-DDTHH:00', whatever form they arrived in.
+
+    The live request asks for timezone=auto, which is what makes Open-Meteo say
+    where the point's clock is, and timeformat=unixtime, so the time axis stays
+    absolute and every slot lookup below reads exactly the hour it read when the
+    request said timezone=UTC.  ISO strings pass through untouched.
+    """
+    if not times or not isinstance(times[0], (int, float)):
+        return times
+    return [datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:00")
+            for t in times]
+
 # Reasonable mid-summer Southern England defaults used when the API is offline
 _FALLBACK: dict = {
     "temp_2m":      18.0,
@@ -214,15 +291,24 @@ async def fetch_meteo_features(lat: float, lon: float, forecast_h: float,
     try:
         r = await _get_client().get(OPEN_METEO_BASE, params={
             "latitude": lat, "longitude": lon,
-            "hourly": ",".join(HOURLY_VARS),
+            "hourly": ",".join(HOURLY_VARS + DISPLAY_VARS),
             "models": "best_match",
-            # 2 days so a forecast_h late in the day stays in range
-            "forecast_days": 2, "timezone": "UTC",
+            # 2 days so a forecast_h late in the day stays in range.  The days
+            # are local ones under timezone=auto, which changes nothing: the
+            # point's own "now" always lies inside its own first day, so now +
+            # 24 h still lies inside the two — the same argument as for UTC.
+            "forecast_days": 2,
+            "timezone": "auto", "timeformat": "unixtime",
         })
         r.raise_for_status()
         data   = r.json()
         hourly = data["hourly"]
-        i0, i1, w = _hour_slots(hourly["time"], forecast_h)
+        times  = _utc_stamps(hourly["time"])
+        i0, i1, w = _hour_slots(times, forecast_h)
+        # A weather code is a category: halfway between "cloudy" and "rain" is
+        # not a code.  Take the nearer of the two hours instead.
+        i_near = i1 if w >= 0.5 else i0
+        target = datetime.fromisoformat(times[i0]).replace(tzinfo=timezone.utc)             + timedelta(hours=w)
 
         def _v(key, fb_key, circular=False):
             return _interp(hourly[key][i0], hourly[key][i1], w,
@@ -249,6 +335,14 @@ async def fetch_meteo_features(lat: float, lon: float, forecast_h: float,
             "cape_base":  max(0, int(((t2m - 8) / max(1, (t2m - t850) / 1.5)) * 1000)),
             "pbl_height": _v("boundary_layer_height",     "pbl_height"),
             "soil_temp":  _v("soil_temperature_0_to_7cm", "soil_temp"),
+            # Display only — see DISPLAY_VARS.  .get: a slot or a whole
+            # variable can be missing, and then the map shows no condition.
+            "weather_code": _slot(hourly, "weathercode", i_near),
+            "is_day":       _slot(hourly, "is_day", i_near),
+            "timezone":     data.get("timezone"),
+            "utc_offset_s": local_utc_offset_s(data.get("timezone"),
+                                               data.get("utc_offset_seconds"),
+                                               target),
         }
         # Only a real answer is cached: the fallback is synthetic, and pinning it
         # for an hour would hand the same invented weather to every grid in the
@@ -259,6 +353,13 @@ async def fetch_meteo_features(lat: float, lon: float, forecast_h: float,
         log.warning(f"[meteo] fetch failed ({exc}) — "
                     f"{'skipping' if strict else 'using fallback values'}")
         return None if strict else _FALLBACK.copy()
+
+
+def _slot(hourly: dict, key: str, i: int):
+    vals = hourly.get(key)
+    if not vals or i >= len(vals) or vals[i] is None:
+        return None
+    return int(round(float(vals[i])))
 
 
 def is_synthetic(meteo: dict) -> bool:
