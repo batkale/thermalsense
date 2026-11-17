@@ -4,6 +4,7 @@ import { MapContainer, TileLayer, useMap, useMapEvents } from 'react-leaflet';
 
 import { MAP_CENTER, MAP_ZOOM, PREDICT_RADIUS, SOARING_AC_TYPES } from '../config.js';
 import { displayPosition } from '../services/deadReckon.js';
+import { nearLng, unwrapNear } from '../services/worldWrap.js';
 import { RawDataCanvas, CompareControl, LAYER_BUILT } from './CompareLayer.jsx';
 
 // Pre-computed 256-entry RGBA palette: density 0→255 maps blue→cyan→green→yellow→red
@@ -148,7 +149,8 @@ function drawGliderPath(ctx, map, points, isTow) {
 
   // Project to screen coords; cap at 800 points for render budget
   const src = points.length > 800 ? points.slice(-800) : points;
-  const pts = src.map(p => map.latLngToContainerPoint([p.lat, p.lon]));
+  const pts = unwrapNear(src, map.getCenter().lng)
+    .map(p => map.latLngToContainerPoint([p.lat, p.lon]));
 
   ctx.save();
   ctx.lineWidth  = 2.5;
@@ -272,8 +274,9 @@ function ThermalBubbleCanvas({ activeThermals }) {
 
     if (!zoomingRef.current) {
       phaseRef.current += 0.04;   // ~2.4 rad/s → full cycle every ~2.6 s
+      const cLng = map.getCenter().lng;
       for (const t of thermalsRef.current) {
-        const pt = map.latLngToContainerPoint([t.lat, t.lon]);
+        const pt = map.latLngToContainerPoint([t.lat, nearLng(t.lon, cLng)]);
         drawThermalBubble(ctx, pt.x, pt.y, t.avg_vario, t.count, phaseRef.current);
       }
     }
@@ -363,8 +366,9 @@ function OgnHeatmapCanvas({ gliders }) {
     const zoom  = map.getZoom();
     const blobR = Math.min(Math.max(12, 22 * Math.pow(1.5, zoom - 9)), 130);
 
+    const cLng = map.getCenter().lng;
     for (const g of thermals) {
-      const { x, y } = map.latLngToContainerPoint([g.lat, g.lon]);
+      const { x, y } = map.latLngToContainerPoint([g.lat, nearLng(g.lon, cLng)]);
       const alpha = Math.min(0.10 + (g.vario / 6.0) * 0.38, 0.52);
       const grad  = oct.createRadialGradient(x, y, 0, x, y, blobR);
       grad.addColorStop(0,   `rgba(255,255,255,${alpha.toFixed(3)})`);
@@ -437,6 +441,7 @@ function OgnHeatmapCanvas({ gliders }) {
 const SCAN_RING_BELOW_PX = 16;
 
 function drawScanFootprint(ctx, map, lat, lon, half, pending) {
+  lon = nearLng(lon, map.getCenter().lng);
   const sw = map.latLngToContainerPoint([lat - half, lon - half]);
   const ne = map.latLngToContainerPoint([lat + half, lon + half]);
   const x = Math.min(sw.x, ne.x);
@@ -494,7 +499,8 @@ function HeatmapCanvas({ heatmap, gridMeta, pendingScan, pinnedIsTow, pinnedId, 
 
     // ---- heatmap grid ----
     if (heatmap && gridMeta) {
-      const { lat, lon, rows, cols, radius } = gridMeta;
+      const { lat, rows, cols, radius } = gridMeta;
+      const lon = nearLng(gridMeta.lon, map.getCenter().lng);
       // The grid is a lattice of sample points spanning [centre-radius,
       // centre+radius] inclusive, so there are rows-1 gaps between rows — not
       // rows. Dividing by rows stretches the drawing ~0.5% past the data.
@@ -616,10 +622,11 @@ function GliderCanvas({ gliders, pinnedId }) {
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, width, height);
 
-    const now = Date.now();
+    const now  = Date.now();
+    const cLng = map.getCenter().lng;
     for (const g of gliders) {
       const { lat, lon } = displayPosition(g, now);
-      const pt = map.latLngToContainerPoint([lat, lon]);
+      const pt = map.latLngToContainerPoint([lat, nearLng(lon, cLng)]);
       // Cull off-screen work: the backend pads the streamed viewport by 25 %,
       // so a full frame carries icons that land outside the canvas.
       if (pt.x < -40 || pt.y < -40 || pt.x > width + 40 || pt.y > height + 40) continue;
@@ -671,14 +678,16 @@ function MapClickHandler({ onMapClick, gliders, onGliderClick }) {
   const map = useMapEvents({
     click(e) {
       const cp  = e.containerPoint;
-      const now = Date.now();
+      const now  = Date.now();
+      const cLng = map.getCenter().lng;
       let best = null, bestDist = Infinity;
       for (const g of gliders) {
         // Hit-test where the icon is drawn, not where it last reported —
         // otherwise a projected marker has its clickable area left behind at
         // the stale position and clicking the aircraft misses it entirely.
+        // And at the copy it is drawn on, which is the one nearest the centre.
         const { lat, lon } = displayPosition(g, now);
-        const pt = map.latLngToContainerPoint([lat, lon]);
+        const pt = map.latLngToContainerPoint([lat, nearLng(lon, cLng)]);
         const d  = Math.hypot(cp.x - pt.x, cp.y - pt.y);
         if (d < GLIDER_HIT_PX && d < bestDist) { best = g; bestDist = d; }
       }
@@ -737,14 +746,40 @@ function ScanFocusController({ target }) {
   useEffect(() => {
     if (!target) return;
     const r    = PREDICT_RADIUS;
-    const west = map.latLngToContainerPoint([target.lat, target.lon - r]);
-    const east = map.latLngToContainerPoint([target.lat, target.lon + r]);
+    // The click arrives wrapped into ±180; near the date line the copy on
+    // screen may be the other one, and flying to the wrapped one would cross
+    // the whole world to get there.
+    const lon  = nearLng(target.lon, map.getCenter().lng);
+    const west = map.latLngToContainerPoint([target.lat, lon - r]);
+    const east = map.latLngToContainerPoint([target.lat, lon + r]);
     if (Math.abs(east.x - west.x) >= MIN_SCAN_PX) return;
     map.flyToBounds(
-      [[target.lat - r, target.lon - r], [target.lat + r, target.lon + r]],
+      [[target.lat - r, lon - r], [target.lat + r, lon + r]],
       { padding: [48, 48], maxZoom: 13, duration: 0.9 },
     );
   }, [target, map]);
+  return null;
+}
+
+// -----------------------------------------------------------------------------
+// World fit — never zoom out far enough to see the world twice
+//
+// Leaflet repeats the world sideways, and at zoom 2 on a wide screen three
+// copies sat side by side with the aircraft drawn on only one. The floor is
+// the lowest zoom at which one world (256 px at zoom 0, doubling per level) is
+// at least as wide as the map, so the user sees one world that wraps around —
+// worldCopyJump on the map brings a pan across the date line back to the same
+// copy — rather than a row of them. Re-derived on resize: a phone can go
+// lower than a desktop, and rotating it changes the answer.
+// -----------------------------------------------------------------------------
+function WorldFitController() {
+  const map = useMap();
+  const fit = useCallback(() => {
+    const width = map.getSize().x;
+    if (width > 0) map.setMinZoom(Math.max(0, Math.ceil(Math.log2(width / 256))));
+  }, [map]);
+  useEffect(() => { fit(); }, [fit]);
+  useMapEvents({ resize: fit });
   return null;
 }
 
@@ -755,7 +790,8 @@ function FlyToController({ target }) {
   const map = useMap();
   useEffect(() => {
     if (!target) return;
-    map.flyTo([target.lat, target.lon], target.zoom ?? 12, { duration: 1.2 });
+    map.flyTo([target.lat, nearLng(target.lon, map.getCenter().lng)],
+              target.zoom ?? 12, { duration: 1.2 });
   }, [target, map]);
   return null;
 }
@@ -777,6 +813,9 @@ export default function ThermalMap({ heatmap, gridMeta, pendingScan, scanFocus, 
       zoom={MAP_ZOOM}
       style={{ width: '100%', height: '100%' }}
       zoomControl={true}
+      // Panning across the antimeridian jumps back to the same world, so the
+      // aircraft on it are not left behind on the copy you came from.
+      worldCopyJump={true}
     >
       {/* Free OSM satellite-style tiles (ESRI) */}
       <TileLayer
@@ -822,6 +861,7 @@ export default function ThermalMap({ heatmap, gridMeta, pendingScan, scanFocus, 
       )}
       <MapClickHandler onMapClick={onMapClick} gliders={gliders} onGliderClick={onGliderClick} />
       <ViewportReporter onChange={onViewportChange} />
+      <WorldFitController />
       <ScanFocusController target={scanFocus} />
       <FlyToController target={flyTarget} />
     </MapContainer>

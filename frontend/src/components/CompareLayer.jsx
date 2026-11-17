@@ -4,6 +4,7 @@ import L from 'leaflet';
 import { useMap, useMapEvents } from 'react-leaflet';
 
 import { useLang } from '../i18n/LanguageContext.jsx';
+import { nearLng, unwrapNear } from '../services/worldWrap.js';
 
 // -----------------------------------------------------------------------------
 // Raw data / product comparison — a before/after divider across the map
@@ -48,7 +49,8 @@ function elevationColor(t) {
 }
 
 function drawElevationSamples(ctx, map, gridMeta, rawInputs) {
-  const { lat, lon, radius } = gridMeta;
+  const { lat, radius } = gridMeta;
+  const lon = nearLng(gridMeta.lon, map.getCenter().lng);
   const { elevation, elevation_rows: rows, elevation_cols: cols } = rawInputs;
   if (!elevation || rows < 2 || cols < 2 || elevation.length !== rows * cols) return;
 
@@ -108,23 +110,25 @@ function drawElevationSamples(ctx, map, gridMeta, rawInputs) {
 function drawBeacons(ctx, map, gliders, paths, pinnedId, width, height) {
   const withTrail = map.getZoom() >= TRAIL_MIN_ZOOM;
 
+  const cLng = map.getCenter().lng;
   ctx.save();
   ctx.fillStyle = '#fff';
   for (const g of gliders) {
     // The reported position, never displayPosition(): projecting an aircraft
     // forward between beacons is one of the things built on this data, so it
     // belongs to the other side of the divider.
-    const pt = map.latLngToContainerPoint([g.lat, g.lon]);
+    const pt = map.latLngToContainerPoint([g.lat, nearLng(g.lon, cLng)]);
     if (pt.x < -40 || pt.y < -40 || pt.x > width + 40 || pt.y > height + 40) continue;
 
     const reports = withTrail ? paths[g.id] : null;
     if (reports && reports.length) {
       const keep  = g.id === pinnedId ? PINNED_TRAIL_POINTS : TRAIL_POINTS;
-      const start = Math.max(0, reports.length - keep);
-      const n     = reports.length - start;
-      for (let i = start; i < reports.length; i++) {
-        const p = map.latLngToContainerPoint([reports[i].lat, reports[i].lon]);
-        ctx.globalAlpha = 0.25 + 0.6 * ((i - start + 1) / n);
+      // Same copy as the dot: the trail is placed by its newest report.
+      const trail = unwrapNear(reports.slice(-keep), cLng);
+      const n     = trail.length;
+      for (let i = 0; i < n; i++) {
+        const p = map.latLngToContainerPoint([trail[i].lat, trail[i].lon]);
+        ctx.globalAlpha = 0.25 + 0.6 * ((i + 1) / n);
         ctx.fillRect(p.x - 1, p.y - 1, 2, 2);
       }
     }

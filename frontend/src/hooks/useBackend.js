@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { fetchPrediction, fetchGliderTrack, fetchGlider } from '../services/api.js';
+import { normaliseBounds } from '../services/worldWrap.js';
 import { LAT_MIN, LAT_MAX, LON_MIN, LON_MAX, GRID_RES, PREDICT_RADIUS, WS_URL, GLIDER_LAT_MIN, GLIDER_LAT_MAX, GLIDER_LON_MIN, GLIDER_LON_MAX, SOARING_AC_TYPES } from '../config.js';
 
 const GRID_COLS = Math.round((LON_MAX - LON_MIN) / GRID_RES);
@@ -117,7 +118,11 @@ export function useBackend(pinnedId = null) {
    * Held in a ref as well as sent, because a reconnect needs to re-declare the
    * viewport — the server starts each socket unfiltered.
    */
-  const setViewport = useCallback((bounds) => {
+  const setViewport = useCallback((raw) => {
+    // Leaflet reports longitudes past ±180 once the view has crossed the date
+    // line. Brought back into range here so the server never filters every
+    // aircraft away, whichever caller declared the view.
+    const bounds = normaliseBounds(raw);
     boundsRef.current = bounds;
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
