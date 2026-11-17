@@ -10,11 +10,25 @@ import { AlertIcon }     from './components/Icons.jsx';
 import { useBackend }    from './hooks/useBackend.js';
 import { triggerRetrain } from './services/api.js';
 import { useLang }        from './i18n/LanguageContext.jsx';
-import { ADMIN_TOKEN }    from './config.js';
+import { ADMIN_TOKEN, HOME_SCAN, HOME_UTC_OFFSET_H, HOME_DAY_HOURS, FORECAST_STEPS } from './config.js';
 
 // Retrain is an operator action: always available in dev, in production only
 // when an admin token is configured for the bundle.
 const CAN_RETRAIN = import.meta.env.DEV || Boolean(ADMIN_TOKEN);
+
+/**
+ * Hours ahead for the opening scan: 0 by day at HOME_SCAN, otherwise the
+ * slider stop nearest the next local noon. A night scan is zeroed by the night
+ * guard, which would open the demo on an empty map. The slider shows the
+ * offset, so the map never claims to be "now" when it is not.
+ */
+function openingForecastH(now) {
+  const local = (now.getUTCHours() + now.getUTCMinutes() / 60 + HOME_UTC_OFFSET_H) % 24;
+  const [from, to] = HOME_DAY_HOURS;
+  if (local >= from && local <= to) return 0;
+  const ahead = (12 - local + 24) % 24;
+  return FORECAST_STEPS.reduce((best, h) => (Math.abs(h - ahead) < Math.abs(best - ahead) ? h : best), 0);
+}
 
 export default function App() {
   const { t } = useLang();
@@ -59,6 +73,16 @@ export default function App() {
     setScanFocus({ lat, lon });
     predict(lat, lon, forecastH, null);
   }, [predict, forecastH]);
+
+  // The opening scan: İnönü, at once, so the map opens on a filled Turkish
+  // heatmap instead of an empty one waiting for a click. Declared before the
+  // slider effect below on purpose — it seeds locationRef, and that effect then
+  // issues the request (once, debounced), whether or not the hour changes.
+  useEffect(() => {
+    locationRef.current = { lat: HOME_SCAN.lat, lon: HOME_SCAN.lon, alt: null };
+    setScanFocus({ lat: HOME_SCAN.lat, lon: HOME_SCAN.lon });
+    setForecastH(openingForecastH(new Date()));
+  }, []);
 
   // Moving the forecast slider re-runs the scan already on the map. It used to
   // change only what the *next* click would ask for: the label read "+6 h" over

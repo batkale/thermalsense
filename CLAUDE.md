@@ -86,7 +86,7 @@ local `cache/terrain-copernicus/points.json` held 200 entries, all
 | [frontend/src/components/ThermalMap.jsx](frontend/src/components/ThermalMap.jsx) | Leaflet map, heatmap canvas, glider markers and tracks |
 | [frontend/src/components/CompareLayer.jsx](frontend/src/components/CompareLayer.jsx) | Raw data / product comparison: the before/after divider, the raw-inputs canvas and the two caption cards |
 | [frontend/src/i18n/strings.js](frontend/src/i18n/strings.js) | TR/EN dictionaries — must stay in key parity |
-| [frontend/about.html](frontend/about.html), [frontend/src/landing/](frontend/src/landing/) | Landing page at `/about`, written as a scrolling pre-seed pitch to defence partners (LALE-class UAVs): a second page of the same Vite build, not a route in the app. Own stylesheet and own TR/EN dictionary (`landing/strings.js`); language and theme come from the app's two providers, so both are one choice across the two pages |
+| [frontend/about.html](frontend/about.html), [frontend/src/landing/](frontend/src/landing/) | Landing page at `/about`, written as a scrolling pre-seed pitch about low-altitude fixed-wing UAVs (civil / dual-use framing): a second page of the same Vite build, not a route in the app. Own stylesheet and own TR/EN dictionary (`landing/strings.js`); language and theme come from the app's two providers, so both are one choice across the two pages |
 | [DEPLOY.md](DEPLOY.md) | Hosting rationale, sizing, TLS, operating runbook |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Data flow, feature pipeline, training loop, resource budget |
 
@@ -498,12 +498,25 @@ before it, the catch-all served the map app for any path that was not an exact
 file name. The map app stays at `/`, so `?compare=1` and `?panel=training`
 links keep working; the landing page links to both.
 
-- **It is a pre-seed pitch to defence companies**, nine sections that scroll
-  as one page, built around LALE-class UAVs (Low Altitude Long Endurance,
-  below ~10,000 ft — the band thermals form in). It carries two kinds of
-  figure and must keep them apart: published third-party soaring results
-  (NASA Dryden 2005 flight test and Allen's simulation, Penn State AutoSOAR
-  2018), each linked to its source, and our own scores.
+- **It is a pre-seed pitch**, thirteen sections that scroll as one page,
+  about **low-altitude fixed-wing UAVs** (below ~10,000 ft — the band thermals
+  form in). Rewritten 17 Nov 2026 after the TUSAŞ HANGAR BİGG mentor review,
+  whose wording rules sit at the top of `landing/strings.js` and bind every
+  edit: never a bare "İHA"/"UAV" (it reads as a quadcopter), no "long/high
+  endurance" class name (LALE is gone), "termal verisi" not "planör verisi",
+  civil/dual-use rather than "defence is our main target", flight *duration*
+  never range, no diverting from the mission for a thermal, no internet and
+  no extra hardware on the aircraft — maps are made before flight and handed
+  to the GCS. It carries three kinds of figure and must keep them apart:
+  published third-party results (soaring flight tests, the market reports),
+  each linked, with a bibliography as the last section; our own scores; and
+  labelled assumptions (the 1 / (1 − f) calculator, the SOM line).
+- **The horizon table is the ledger, copied.** `HORIZONS` in `Landing.jsx`
+  is `/verification/summary?days=30` from the live node on 17 Nov 2026. It
+  shows what the ledger shows: whether/when-there-is-lift (pooled AUC) holds
+  at 0.67–0.71 out to 3 h, while within-map hotspot hits beat chance only at
+  15 min. The 6 h row reads "being measured" until 360 (added to
+  `LEDGER_HORIZONS_MIN` that day) has results — never fill it with a guess.
 - **No figure on it claims how much ThermalSense extends endurance** — that
   is unmeasured, and the page says so. The calculator is `1 / (1 − f)` on a
   stated assumption; the map's effect on f is presented as the hypothesis the
@@ -511,7 +524,8 @@ links keep working; the landing page links to both.
   the source of every number.
 - **Its numbers are copies.** The scores (16 Nov 2026 run, below) are written
   out in `Landing.jsx` `SCORES` and in `landing/strings.js` (`scoreMeta`,
-  `scoreHonest`). Re-measure one here and change it there. "Better than any
+  `scoreHonest`); the horizon table in `HORIZONS`; market figures and prices
+  in `strings.js` with their sources in its header. Re-measure one here and change it there. "Better than any
   single input" is a point-estimate statement — the sun-angle baseline's
   interval overlaps the model's.
 - **Its copy lives in `landing/strings.js`, not `i18n/strings.js`**, so the
@@ -656,6 +670,20 @@ separate x and y pixel sizes.
 - `frontend/src/config.js` `LAT/LON_MIN/MAX` is the **prediction grid** area
   (İnönü/Eskişehir), not the glider feed. Widening it explodes the grid; live
   glider bounds are the separate `GLIDER_*` constants.
+- **The map opens on Türkiye and scans İnönü by itself** (`MAP_CENTER`,
+  `HOME_SCAN`; the opening effect in `App.jsx`). It used to open on the
+  European soaring belt, where the traffic is — the mentor review asked for a
+  demo that opens on a filled Turkish map. At night (outside 09–16 TRT) the
+  opening scan asks for the next local noon instead of now, because the night
+  guard zeroes a night grid; the forecast slider shows the offset. The map
+  app's aircraft wording is "süzülen hava aracı" / "soaring aircraft", and the
+  compare toggle is labelled "Ham veri ↔ ThermalSense AI".
+- **Every altitude on screen names its reference** (`metresMsl` /
+  `metresAgl`). The prediction altitude is MSL (with its AGL beneath), the
+  thermal base is AGL (`cape_base` is a height above the surface) with its MSL
+  equivalent over the grid's mean terrain. Two bare "m" figures side by side
+  read as comparable and were not — the mentor review asked exactly this.
+  The GeoJSON export's `thermal_base_m` is still AGL and still unlabelled.
 - Map labels come from Esri's `Reference/World_Boundaries_and_Places` layer,
   not CARTO. Requested without a key, CARTO's `voyager_only_labels` tiles now
   return no labels and "API KEY REQUIRED" across each one (seen 15 Nov 2026),

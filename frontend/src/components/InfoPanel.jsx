@@ -86,17 +86,26 @@ export default function InfoPanel({
             <Metric
               label={t('predictionAlt')}
               tip={t('predictionAltTip')}
-              value={`${predictAlt.amsl.toLocaleString(locale)} m`}
+              value={t('metresMsl', { n: predictAlt.amsl.toLocaleString(locale) })}
               sub={predictAlt.source === 'observer'
                 ? t('altFromGlider',  { n: altAglLabel })
                 : t('altFromDefault', { n: altAglLabel })}
             />
           )}
+          {/* The thermal base is above ground; the prediction altitude above it
+              is above sea level. Both are labelled, and the base is also given
+              in MSL over the grid's mean terrain (amsl − agl of the prediction
+              altitude), so the two can be compared directly. */}
           {thermalBase != null && (
             <Metric
               label={t('thermalBase')}
               tip={t('thermalBaseTip')}
-              value={`${thermalBase.toLocaleString(locale)} m`}
+              value={t('metresAgl', { n: thermalBase.toLocaleString(locale) })}
+              sub={predictAlt != null
+                ? t('thermalBaseMsl', {
+                    n: Math.round(thermalBase + predictAlt.amsl - predictAlt.agl).toLocaleString(locale),
+                  })
+                : undefined}
             />
           )}
           {cape != null && (

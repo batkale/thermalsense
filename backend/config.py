@@ -298,8 +298,12 @@ ENABLE_FORECAST_LEDGER = os.getenv("ENABLE_FORECAST_LEDGER", "1").lower() not in
 LEDGER_DB_PATH         = DATA_DIR / "data" / "forecast_ledger.db"
 LEDGER_ISSUE_EVERY_MIN = int(os.getenv("LEDGER_ISSUE_EVERY_MIN", "15"))
 # The mentor's example horizons.  Any list works; the scoring does not care.
+# 360 added 17 Nov 2026: the TUSAŞ HANGAR review asked for skill at 1, 3 and
+# 6 hours, and a horizon the ledger never issued cannot be reported later.
+# One more compute_prediction per site per issue; its meteo hour is cached per
+# 0.1-degree cell like the others, and LEDGER_METEO_CEILING still applies.
 LEDGER_HORIZONS_MIN = [int(h) for h in
-                       os.getenv("LEDGER_HORIZONS_MIN", "15,30,60,120,180").split(",") if h.strip()]
+                       os.getenv("LEDGER_HORIZONS_MIN", "15,30,60,120,180,360").split(",") if h.strip()]
 # Sites forecast every issue regardless of traffic: "name:lat:lon;...".
 # Inonu is approximate, and the point of listing it is the Turkiye record even
 # while its traffic is thin — an unverifiable forecast is still an honest one.
