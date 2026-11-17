@@ -83,7 +83,7 @@ local `cache/terrain-copernicus/points.json` held 200 entries, all
 | [frontend/src/components/ThermalMap.jsx](frontend/src/components/ThermalMap.jsx) | Leaflet map, heatmap canvas, glider markers and tracks |
 | [frontend/src/components/CompareLayer.jsx](frontend/src/components/CompareLayer.jsx) | Raw data / product comparison: the before/after divider, the raw-inputs canvas and the two caption cards |
 | [frontend/src/i18n/strings.js](frontend/src/i18n/strings.js) | TR/EN dictionaries — must stay in key parity |
-| [frontend/about.html](frontend/about.html), [frontend/src/landing/](frontend/src/landing/) | Landing page at `/about`: a second page of the same Vite build, not a route in the app. Own stylesheet and own TR/EN dictionary (`landing/strings.js`); language and theme come from the app's two providers, so both are one choice across the two pages |
+| [frontend/about.html](frontend/about.html), [frontend/src/landing/](frontend/src/landing/) | Landing page at `/about`, written as a scrolling pre-seed pitch to defence partners (LALE-class UAVs): a second page of the same Vite build, not a route in the app. Own stylesheet and own TR/EN dictionary (`landing/strings.js`); language and theme come from the app's two providers, so both are one choice across the two pages |
 | [DEPLOY.md](DEPLOY.md) | Hosting rationale, sizing, TLS, operating runbook |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Data flow, feature pipeline, training loop, resource budget |
 
@@ -495,16 +495,22 @@ before it, the catch-all served the map app for any path that was not an exact
 file name. The map app stays at `/`, so `?compare=1` and `?panel=training`
 links keep working; the landing page links to both.
 
-- **Its numbers are copies.** The score and region tables (16 Nov 2026 run,
-  below), the 27 Sep 0.542 comparison, the label thresholds and the 27%
-  pseudo-absence figure are written out in `landing/strings.js` and
-  `Landing.jsx`. Re-measure one here and change it there — that page is the
-  only place a visitor reads them.
-- **It is written for investors as well as pilots.** Confident register, but
-  no claim past what was measured: "stronger than any single signal" is a
-  point-estimate statement (the sun-angle baseline's interval overlaps the
-  model's), and the 0.542 → 0.570 line is two measurements, not a proven
-  trend — their intervals overlap too.
+- **It is a pre-seed pitch to defence companies**, nine sections that scroll
+  as one page, built around LALE-class UAVs (Low Altitude Long Endurance,
+  below ~10,000 ft — the band thermals form in). It carries two kinds of
+  figure and must keep them apart: published third-party soaring results
+  (NASA Dryden 2005 flight test and Allen's simulation, Penn State AutoSOAR
+  2018), each linked to its source, and our own scores.
+- **No figure on it claims how much ThermalSense extends endurance** — that
+  is unmeasured, and the page says so. The calculator is `1 / (1 − f)` on a
+  stated assumption; the map's effect on f is presented as the hypothesis the
+  pilot project would measure. Keep it that way: a defence buyer will ask for
+  the source of every number.
+- **Its numbers are copies.** The scores (16 Nov 2026 run, below) are written
+  out in `Landing.jsx` `SCORES` and in `landing/strings.js` (`scoreMeta`,
+  `scoreHonest`). Re-measure one here and change it there. "Better than any
+  single input" is a point-estimate statement — the sun-angle baseline's
+  interval overlaps the model's.
 - **Its copy lives in `landing/strings.js`, not `i18n/strings.js`**, so the
   map app's bundle does not carry a page of prose. Invariant 5 still holds: no
   string in a component, every key in both languages. A dev build warns in the
@@ -513,8 +519,8 @@ links keep working; the landing page links to both.
   translated text set in it falls back glyph by glyph. Decimals are set in the
   tabular sans instead, because a monospaced Turkish decimal comma reads as
   "0, 54".
-- **The hero is a simulation and its caption says so.** No real beacon is
-  drawn there. The one live number on the page is the count from
+- **The glider animation is a simulation and its caption says so.** No real
+  beacon is drawn there. The one live number on the page is the count from
   `/thermals/active`, and the line is simply absent when that request fails.
 
 ## Forecast ledger (`data/forecast_ledger.py`)

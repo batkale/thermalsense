@@ -1,50 +1,49 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useLang }  from '../i18n/LanguageContext.jsx';
 import { useTheme } from '../theme/ThemeContext.jsx';
 import { LANG_LABEL } from '../i18n/strings.js';
 import { API_BASE } from '../config.js';
 import { translateLanding } from './strings.js';
-import ThermalField  from './ThermalField.jsx';
-import Barogram      from './Barogram.jsx';
-import IntervalTable from './IntervalTable.jsx';
+import ThermalField from './ThermalField.jsx';
 import { BrandMark, SunIcon, MoonIcon } from '../components/Icons.jsx';
 
-// The map app lives at the site root; these are views of it people link to
-// (see the ?compare and ?panel handling in App.jsx).
-const MAP_URL      = '/';
-const COMPARE_URL  = '/?compare=1';
+const MAP_URL   = '/';
 const TRAINING_URL = '/?panel=training';
 
-// Within-(day, cell, hour) ranking score, micro AUC with 95% bootstrap CI.
+// Published third-party results — see the header of strings.js for the full
+// citations. Nothing here is a ThermalSense measurement.
+const SOURCES = {
+  nasaFlight: 'https://www.nasa.gov/news-release/nasa-experiment-explores-using-thermals-to-extend-uav-endurance/',
+  nasaSim:    'https://ntrs.nasa.gov/citations/20050041655',
+  autosoar:   'https://doi.org/10.1002/rob.21747',
+};
+
+// ThermalSense's own scores, within-(day, cell, hour) micro AUC:
 // `python -m evaluation.evaluate --variant base --by-hour`, run 16 Nov 2026 on
-// the 6 Nov 2026 buffer minus its invented-weather rows (47,419 rows, 6,259
-// positives, 2,009 mixed-label units). "xgb base (served)" is rowModel;
-// physics_fallback is rowPhysics. Ordered worst to best so the model reads as
-// the bottom line. Re-run and replace these together with the copy in
-// strings.js (scoreMeta, scoreRead, regionNote, turkiyeText).
+// the 6 Nov 2026 buffer minus its invented-weather rows (CLAUDE.md). The CIs
+// are quoted in strings.js scoreMeta; change both together.
 const SCORES = [
-  { key: 'rowAlt',     value: 0.501, lo: 0.474, hi: 0.529 },
-  { key: 'rowPhysics', value: 0.502, lo: 0.490, hi: 0.513 },
-  { key: 'rowTerrain', value: 0.525, lo: 0.493, hi: 0.557 },
-  { key: 'rowSun',     value: 0.551, lo: 0.520, hi: 0.580 },
-  { key: 'rowModel',   value: 0.570, lo: 0.539, hi: 0.601, emphasis: true },
+  { key: 'rowTerrain', value: 0.525 },
+  { key: 'rowSun',     value: 0.551 },
+  { key: 'rowModel',   value: 0.570, emphasis: true },
+  { key: 'rowIberia',  value: 0.611, emphasis: true },
+  { key: 'rowAlps',    value: 0.612, emphasis: true },
 ];
 
-// Same run, served model by region (evaluation/regions.py). Türkiye is left out
-// of the table because it is not measurable — 1 mixed-label group of the 30
-// needed — and turkiyeText says so in words instead.
-const REGIONS = [
-  { key: 'regAlps',    value: 0.612, lo: 0.569, hi: 0.653 },
-  { key: 'regIberia',  value: 0.611, lo: 0.530, hi: 0.685 },
-  { key: 'regGermany', value: 0.575, lo: 0.528, hi: 0.628 },
-  { key: 'regOther',   value: 0.523, lo: 0.493, hi: 0.558 },
-];
+// Reference points on the endurance curve, both from the publications above.
+// AutoSOAR: ~3 h climbing of 7.8 h engaged. NASA simulation: 2 h -> 8.6 h is a
+// 4.3x multiplier, which 1/(1-f) reaches at f = 1 - 1/4.3.
+const REF_AUTOSOAR = 3 / 7.8;
+const REF_NASA     = 1 - 2 / 8.6;
+const F_MAX = 0.8;
+
+const SECTIONS = ['problem', 'evidence', 'product', 'lale', 'gain', 'ask'];
+const TOTAL = 9;
 
 /**
  * How many thermals the feed is marking right now — the one live number on the
- * page. null means "do not show the line": the request failed, timed out, or
- * there is no backend behind this build. A landing page that explains the
- * project must never look broken because the API is busy.
+ * page. null means "leave the line out": a page making a case must never look
+ * broken because the API is busy.
  */
 function useActiveThermals() {
   const [count, setCount] = useState(null);
@@ -67,215 +66,210 @@ export default function Landing() {
   const t = useCallback((key, vars) => translateLanding(lang, key, vars), [lang]);
   const live = useActiveThermals();
 
-  useEffect(() => { document.title = t('docTitle'); }, [t]);
+  useEffect(() => {
+    document.title = t('docTitle');
+    document.documentElement.lang = lang;
+  }, [t, lang]);
+
+  const num = useCallback(
+    (v, digits = 1) => v.toLocaleString(locale, { minimumFractionDigits: digits, maximumFractionDigits: digits }),
+    [locale],
+  );
 
   const langLabel  = lang === 'tr' ? tApp('switchToEnglish') : tApp('switchToTurkish');
   const themeLabel = theme === 'dark' ? tApp('switchToLight') : tApp('switchToDark');
+  const navKey = { problem: 'navProblem', evidence: 'navEvidence', product: 'navProduct',
+                   lale: 'navLale', gain: 'navGain', ask: 'navAsk' };
 
   return (
     <>
       <a className="skip" href="#main">{t('skipToContent')}</a>
 
-      <header className="hero">
+      <header className="pitch-top">
         <div className="wrap nav">
-          <a className="brand" href="#top" id="top"><BrandMark className="brand-mark" size={22} />ThermalSense</a>
+          <a className="brand" href="#cover"><BrandMark className="brand-mark" size={22} />ThermalSense</a>
           <nav className="nav-links" aria-label={t('navLabel')}>
-            <a href="#see">{t('navSee')}</a>
-            <a href="#learn">{t('navLearn')}</a>
-            <a href="#score">{t('navScore')}</a>
-            <a href="#data">{t('navData')}</a>
+            {SECTIONS.map(id => <a key={id} href={`#${id}`}>{t(navKey[id])}</a>)}
           </nav>
           <div className="nav-tools">
             <button type="button" className="tool" onClick={toggleLang} title={langLabel} aria-label={langLabel}>
               {LANG_LABEL[lang]}
             </button>
-            {/* Shows the mode the click leads to, as the app's own toggle does. */}
             <button type="button" className="tool" onClick={toggleTheme} title={themeLabel} aria-label={themeLabel}>
               {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
             </button>
             <a className="btn primary small" href={MAP_URL}>{t('openMapShort')}</a>
           </div>
         </div>
-
-        <div className="wrap hero-body">
-          <h1 className="hero-title">
-            <span className="unseen">{t('heroUnseen')}</span>{' '}
-            <span className="seen">{t('heroSeen')}</span>
-          </h1>
-          <p className="lede">{t('heroLede')}</p>
-          <div className="actions">
-            <a className="btn primary" href={MAP_URL}>{t('openMap')}</a>
-            <a className="btn quiet" href="#learn">{t('heroSecondary')}</a>
-          </div>
-        </div>
-
-        <div className="wrap">
-          <figure className="field-figure">
-            <ThermalField t={t} />
-            <figcaption>{t('simCaption')}</figcaption>
-          </figure>
-          {live != null && (
-            <p className="live">
-              <span className={`live-dot${live > 0 ? ' on' : ''}`} aria-hidden="true" />
-              {live > 0 ? t('liveNow', { n: live }) : t('liveNone')}
-            </p>
-          )}
-        </div>
       </header>
 
       <main id="main">
-        <section className="band" id="see" aria-labelledby="see-h">
+        {/* 01 — cover */}
+        <section className="slide cover" id="cover" aria-labelledby="cover-h">
           <div className="wrap">
-            <h2 id="see-h">{t('seeTitle')}</h2>
-            <dl className="facts">
-              <Fact figure="201 × 201" unit={t('seeCellsUnit')}>{t('seeCells')}</Fact>
-              <Fact figure="50" unit={t('seePassesUnit')}>{t('seePasses')}</Fact>
-              <Fact figure={t('seeAheadFig')} unit={t('seeAheadUnit')}>{t('seeAhead')}</Fact>
-              <Fact figure={t('seeLiveFig')} unit={t('seeLiveUnit')}>{t('seeLive')}</Fact>
-            </dl>
-            <div className="notes">
-              <div>
-                <h3>{t('noteAltTitle')}</h3>
-                <p>{t('noteAlt')}</p>
-              </div>
-              <div>
-                <h3>{t('noteNightTitle')}</h3>
-                <p>{t('noteNight')}</p>
-              </div>
-              <div>
-                <h3>{t('noteRawTitle')}</h3>
-                <p>{t('noteRaw')} <a href={COMPARE_URL}>{t('noteRawLink')}</a></p>
-              </div>
+            <Counter n={1} t={t} />
+            <p className="eyebrow">{t('eyebrow')}</p>
+            <h1 id="cover-h" className="cover-title">
+              <span className="thin">{t('coverA')}</span>
+              <span className="bold">{t('coverB')}</span>
+            </h1>
+            <p className="lede">{t('coverLede')}</p>
+            <div className="actions">
+              <a className="btn primary" href="#gain">{t('coverCta')}</a>
+              <a className="btn quiet" href={MAP_URL}>{t('openMap')}</a>
+            </div>
+            <p className="status"><span className="live-dot on" aria-hidden="true" />{t('coverStatus')}</p>
+            {live != null && (
+              <p className="status live-count">{live > 0 ? t('liveNow', { n: live }) : t('liveNone')}</p>
+            )}
+          </div>
+        </section>
+
+        {/* 02 — problem */}
+        <section className="slide" id="problem" aria-labelledby="problem-h">
+          <div className="wrap split">
+            <div>
+              <Counter n={2} t={t} />
+              <h2 id="problem-h">{t('probTitle')}</h2>
+              <p className="intro">{t('probText')}</p>
+              <dl className="definition">
+                <dt>{t('laleDefTerm')}</dt>
+                <dd>{t('laleDef')}</dd>
+              </dl>
+            </div>
+            <div className="points">
+              <h3>{t('probPoints')}</h3>
+              <ol>
+                <li>{t('probP1')}</li>
+                <li>{t('probP2')}</li>
+                <li>{t('probP3')}</li>
+              </ol>
             </div>
           </div>
         </section>
 
-        <section className="band" id="learn" aria-labelledby="learn-h">
+        {/* 03 — evidence */}
+        <section className="slide" id="evidence" aria-labelledby="evidence-h">
           <div className="wrap">
-            <h2 id="learn-h">{t('learnTitle')}</h2>
-            <p className="intro">{t('learnIntro')}</p>
+            <Counter n={3} t={t} />
+            <h2 id="evidence-h">{t('evTitle')}</h2>
+            <p className="intro">{t('evIntro')}</p>
+            <div className="evidence">
+              <Evidence fig={t('ev1Fig')} who={t('ev1Who')} href={SOURCES.nasaFlight} src={t('evSource')}>{t('ev1Text')}</Evidence>
+              <Evidence fig={t('ev2Fig')} who={t('ev2Who')} href={SOURCES.nasaSim} src={t('evSource')}>{t('ev2Text')}</Evidence>
+              <Evidence fig={t('ev3Fig')} who={t('ev3Who')} href={SOURCES.autosoar} src={t('evSource')}>{t('ev3Text')}</Evidence>
+            </div>
+          </div>
+        </section>
 
-            <figure className="baro-figure">
-              <Barogram t={t} />
-              <figcaption>
-                <ul className="labels">
-                  <li>
-                    <span className="swatch pos" aria-hidden="true" />
-                    <strong>{t('labelPos')}</strong>
-                    <span>{t('labelPosRule')}</span>
-                  </li>
-                  <li>
-                    <span className="swatch neg" aria-hidden="true" />
-                    <strong>{t('labelNeg')}</strong>
-                    <span>{t('labelNegRule')}</span>
-                  </li>
-                  <li>
-                    <span className="swatch drop" aria-hidden="true" />
-                    <strong>{t('labelDrop')}</strong>
-                    <span>{t('labelDropRule')}</span>
-                  </li>
-                </ul>
-              </figcaption>
+        {/* 04 — gap */}
+        <section className="slide" aria-labelledby="gap-h">
+          <div className="wrap split">
+            <div>
+              <Counter n={4} t={t} />
+              <h2 id="gap-h">{t('gapTitle')}</h2>
+              <p className="intro">{t('gapText')}</p>
+            </div>
+            <SearchFigure t={t} />
+          </div>
+        </section>
+
+        {/* 05 — product */}
+        <section className="slide" id="product" aria-labelledby="product-h">
+          <div className="wrap">
+            <Counter n={5} t={t} />
+            <h2 id="product-h">{t('prodTitle')}</h2>
+            <p className="intro">{t('prodIntro')}</p>
+            <figure className="field-figure">
+              <ThermalField t={t} />
+              <figcaption>{t('simCaption')}</figcaption>
             </figure>
-
-            <div className="split">
+            <dl className="facts">
+              <Fact figure="201 × 201" unit={t('factCells')}>{t('factCellsText')}</Fact>
+              <Fact figure={t('feedFig')} unit={t('factFeed')}>{t('factFeedText')}</Fact>
+              <Fact figure={t('retrainFig')} unit={t('factRetrain')}>{t('factRetrainText')}</Fact>
+              <Fact figure={t('aheadFig')} unit={t('factAhead')}>{t('factAheadText')}</Fact>
+            </dl>
+            <div className="split score-split">
               <div>
-                <h3>{t('whyDropTitle')}</h3>
-                <p>{t('whyDrop')}</p>
+                <h3>{t('scoreTitle')}</h3>
+                <p>{t('scoreText')}</p>
+                <p className="reading">{t('scoreHonest')}</p>
+                <p className="meta">{t('scoreMeta')}</p>
               </div>
-              <div>
-                <h3>{t('stepsTitle')}</h3>
-                {/* Numbered because it is a pipeline: each step only ever sees
-                    what the one before it let through. */}
-                <ol className="steps">
-                  <li><strong>{t('stepFeed')}</strong><span>{t('stepFeedText')}</span></li>
-                  <li><strong>{t('stepGate')}</strong><span>{t('stepGateText')}</span></li>
-                  <li><strong>{t('stepLabel')}</strong><span>{t('stepLabelText')}</span></li>
-                  <li><strong>{t('stepFit')}</strong><span>{t('stepFitText')}</span></li>
-                  <li><strong>{t('stepQuality')}</strong><span>{t('stepQualityText')}</span></li>
-                </ol>
-              </div>
+              <ScoreBars rows={SCORES} t={t} num={num} />
             </div>
           </div>
         </section>
 
-        <section className="band" id="score" aria-labelledby="score-h">
+        {/* 06 — LALE */}
+        <section className="slide" id="lale" aria-labelledby="lale-h">
           <div className="wrap">
-            <h2 id="score-h">{t('scoreTitle')}</h2>
-            <p className="verdict">{t('scoreLead')}</p>
-            <p className="intro">{t('scoreIntro')}</p>
+            <Counter n={6} t={t} />
+            <h2 id="lale-h">{t('laleTitle')}</h2>
+            <p className="intro">{t('laleIntro')}</p>
+            <ol className="modes">
+              <li><span className="mode-n">A</span><h3>{t('mode1')}</h3><p>{t('mode1Text')}</p></li>
+              <li><span className="mode-n">B</span><h3>{t('mode2')}</h3><p>{t('mode2Text')}</p></li>
+              <li className="later"><span className="mode-n">C</span><h3>{t('mode3')}</h3><p>{t('mode3Text')}</p></li>
+            </ol>
+            <h3 className="sub">{t('usesTitle')}</h3>
+            <div className="notes uses">
+              <div><h3>{t('use1')}</h3><p>{t('use1Text')}</p></div>
+              <div><h3>{t('use2')}</h3><p>{t('use2Text')}</p></div>
+              <div><h3>{t('use3')}</h3><p>{t('use3Text')}</p></div>
+              <div><h3>{t('use4')}</h3><p>{t('use4Text')}</p></div>
+            </div>
+            <p className="meta acoustic">{t('acoustic')}</p>
+          </div>
+        </section>
 
-            <IntervalTable
-              caption={t('scoreCaption')}
-              columns={{ label: t('colRanker'), value: t('colScore'), interval: t('colCi') }}
-              rows={SCORES.map(r => ({ ...r, label: t(r.key) }))}
-              domain={[0.46, 0.70]}
-              reference={0.5}
-              referenceLabel={t('chance')}
-              ticks={[0.5, 0.6, 0.7]}
-              locale={locale}
-            />
-            <p className="meta">{t('scoreMeta')}</p>
-            <p className="reading">{t('scoreRead')}</p>
-
-            {/* Same scale as the table above, so the two read as one chart. */}
-            <h3 className="sub">{t('regionTitle')}</h3>
-            <IntervalTable
-              caption={t('regionCaption')}
-              columns={{ label: t('colRegion'), value: t('colScore'), interval: t('colCi') }}
-              rows={REGIONS.map(r => ({ ...r, label: t(r.key) }))}
-              domain={[0.46, 0.70]}
-              reference={0.5}
-              referenceLabel={t('chance')}
-              ticks={[0.5, 0.6, 0.7]}
-              locale={locale}
-            />
-            <p className="meta">{t('regionNote')}</p>
-
-            <div className="notes three">
-              <div>
-                <h3>{t('nextTitle')}</h3>
-                <p>{t('nextText')}</p>
-              </div>
-              <div>
-                <h3>{t('useTitle')}</h3>
-                <p>{t('useText')}</p>
-              </div>
-              <div>
-                <h3>{t('turkiyeTitle')}</h3>
-                <p>{t('turkiyeText')} <a href={TRAINING_URL}>{t('turkiyeLink')}</a></p>
-              </div>
+        {/* 07 — gain */}
+        <section className="slide" id="gain" aria-labelledby="gain-h">
+          <div className="wrap">
+            <Counter n={7} t={t} />
+            <h2 id="gain-h">{t('gainTitle')}</h2>
+            <p className="intro">{t('gainIntro')}</p>
+            <GainCalculator t={t} num={num} />
+            <div className="honest">
+              <h3>{t('gainHonestTitle')}</h3>
+              <p>{t('gainHonest')}</p>
             </div>
           </div>
         </section>
 
-        <section className="band" id="data" aria-labelledby="data-h">
+        {/* 08 — why us */}
+        <section className="slide" aria-labelledby="why-h">
           <div className="wrap">
-            <h2 id="data-h">{t('dataTitle')}</h2>
-            <div className="split table-first">
-              <table className="sources">
-                <caption className="sr-only">{t('dataCaption')}</caption>
-                <thead>
-                  <tr><th scope="col">{t('colSource')}</th><th scope="col">{t('colUse')}</th></tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <th scope="row"><a href="https://www.glidernet.org/" rel="noopener">Open Glider Network</a></th>
-                    <td>{t('srcOgnUse')}</td>
-                  </tr>
-                  <tr>
-                    <th scope="row"><a href="https://open-meteo.com/" rel="noopener">Open-Meteo</a></th>
-                    <td>{t('srcMeteoUse')}</td>
-                  </tr>
-                  <tr>
-                    <th scope="row"><a href="https://registry.opendata.aws/copernicus-dem/" rel="noopener">Copernicus GLO-30</a></th>
-                    <td>{t('srcDemUse')}</td>
-                  </tr>
-                </tbody>
-              </table>
-              <div>
-                <h3>{t('machineTitle')}</h3>
-                <p>{t('machineText')}</p>
+            <Counter n={8} t={t} />
+            <h2 id="why-h">{t('whyTitle')}</h2>
+            <div className="notes why">
+              <div><h3>{t('why1')}</h3><p>{t('why1Text')}</p></div>
+              <div><h3>{t('why2')}</h3><p>{t('why2Text')}</p></div>
+              <div><h3>{t('why3')}</h3><p>{t('why3Text')}</p></div>
+              <div><h3>{t('why4')}</h3><p>{t('why4Text')}</p></div>
+            </div>
+          </div>
+        </section>
+
+        {/* 09 — roadmap and ask */}
+        <section className="slide ask" id="ask" aria-labelledby="ask-h">
+          <div className="wrap split">
+            <div>
+              <Counter n={9} t={t} />
+              <h2>{t('roadTitle')}</h2>
+              <ol className="road">
+                <li><span className="when">{t('road1When')}</span><span>{t('road1')}</span></li>
+                <li><span className="when">{t('road2When')}</span><span>{t('road2')}</span></li>
+                <li><span className="when">{t('road3When')}</span><span>{t('road3')}</span></li>
+              </ol>
+            </div>
+            <div className="ask-box">
+              <h2 id="ask-h">{t('askTitle')}</h2>
+              <p className="intro">{t('askText')}</p>
+              <div className="actions">
+                <a className="btn primary" href={MAP_URL}>{t('askCta')}</a>
+                <a className="btn quiet" href={TRAINING_URL}>{t('technical')}</a>
               </div>
             </div>
           </div>
@@ -284,15 +278,29 @@ export default function Landing() {
 
       <footer className="close">
         <div className="wrap">
-          <p className="close-title">{t('closeTitle')}</p>
-          <a className="btn primary" href={MAP_URL}>{t('openMap')}</a>
           <p className="disclaimer">{t('disclaimer')}</p>
-          <p className="credits">
-            {t('creditTerrain')} {t('creditWeather')} {t('creditTraffic')}
-          </p>
         </div>
       </footer>
     </>
+  );
+}
+
+function Counter({ n, t }) {
+  return (
+    <p className="counter">
+      {t('slideOf', { n: String(n).padStart(2, '0'), total: String(TOTAL).padStart(2, '0') })}
+    </p>
+  );
+}
+
+function Evidence({ fig, who, href, src, children }) {
+  return (
+    <article className="ev">
+      <p className="ev-fig">{fig}</p>
+      <h3>{who}</h3>
+      <p>{children}</p>
+      <a className="ev-src" href={href} rel="noopener">{src} ↗</a>
+    </article>
   );
 }
 
@@ -304,6 +312,145 @@ function Fact({ figure, unit, children }) {
         <span className="fact-unit">{unit}</span>
       </dt>
       <dd>{children}</dd>
+    </div>
+  );
+}
+
+/** Horizontal bars from the coin-toss line, so the eye reads the gap above 0.5. */
+function ScoreBars({ rows, t, num }) {
+  const lo = 0.5, hi = 0.65;
+  return (
+    <table className="bars">
+      <caption className="sr-only">{t('scoreTitle')}</caption>
+      <tbody>
+        {rows.map(r => {
+          const w = Math.max(0, (r.value - lo) / (hi - lo)) * 100;
+          return (
+            <tr key={r.key} className={r.emphasis ? 'em' : undefined}>
+              <th scope="row">{t(r.key)}</th>
+              <td className="bar-cell"><span className="bar" style={{ width: `${w}%` }} /></td>
+              <td className="bar-val">{num(r.value, 3)}</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+/**
+ * Blind spiral search against a search started from a prior map, drawn on the
+ * same patch of ground. Schematic: the dot is "a thermal", not a measured one.
+ */
+function SearchFigure({ t }) {
+  const spiral = useMemo(() => {
+    const pts = [];
+    for (let a = 0; a <= Math.PI * 7; a += 0.12) {
+      const r = 4 + a * 3.4;
+      pts.push(`${(60 + r * Math.cos(a)).toFixed(1)},${(60 + r * Math.sin(a)).toFixed(1)}`);
+    }
+    return pts.join(' ');
+  }, []);
+  // A 6x6 prior: warmer cells toward the thermal at (88, 34).
+  const cells = useMemo(() => {
+    const out = [];
+    for (let i = 0; i < 6; i++) for (let j = 0; j < 6; j++) {
+      const cx = 10 + i * 20, cy = 10 + j * 20;
+      const d = Math.hypot(cx - 88, cy - 34);
+      out.push({ x: i * 20, y: j * 20, o: Math.max(0.05, 0.75 - d / 90) });
+    }
+    return out;
+  }, []);
+  return (
+    <div className="search-fig">
+      <figure>
+        <svg viewBox="0 0 120 120" role="img" aria-label={t('gapBlindText')}>
+          <rect x="0" y="0" width="120" height="120" className="sf-ground" />
+          <polyline points={spiral} className="sf-path" />
+          <circle cx="88" cy="34" r="7" className="sf-thermal" />
+        </svg>
+        <figcaption><strong>{t('gapBlind')}</strong><span>{t('gapBlindText')}</span></figcaption>
+      </figure>
+      <figure>
+        <svg viewBox="0 0 120 120" role="img" aria-label={t('gapMapText')}>
+          <rect x="0" y="0" width="120" height="120" className="sf-ground" />
+          {cells.map((c, k) => (
+            <rect key={k} x={c.x} y={c.y} width="20" height="20" className="sf-cell" style={{ opacity: c.o }} />
+          ))}
+          <polyline points="12,108 60,70 88,34" className="sf-path direct" />
+          <circle cx="88" cy="34" r="7" className="sf-thermal" />
+        </svg>
+        <figcaption><strong>{t('gapMap')}</strong><span>{t('gapMapText')}</span></figcaption>
+      </figure>
+    </div>
+  );
+}
+
+/** 1 / (1 - f): arithmetic on a stated assumption, not a measurement. */
+function GainCalculator({ t, num }) {
+  const [base, setBase] = useState(4);
+  const [share, setShare] = useState(Math.round(REF_AUTOSOAR * 100));
+  const f = share / 100;
+  const mult = 1 / (1 - f);
+  const hours = base * mult;
+
+  // Chart geometry: f on x (0..F_MAX), multiplier on y (1..5).
+  const W = 320, H = 200, P = { l: 34, r: 10, t: 12, b: 28 };
+  const x = v => P.l + (v / F_MAX) * (W - P.l - P.r);
+  const y = m => H - P.b - ((Math.min(m, 5) - 1) / 4) * (H - P.t - P.b);
+  const curve = useMemo(() => {
+    const pts = [];
+    for (let v = 0; v <= F_MAX + 1e-9; v += 0.01) pts.push(`${x(v).toFixed(1)},${y(1 / (1 - v)).toFixed(1)}`);
+    return pts.join(' ');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <div className="gain">
+      <div className="gain-controls">
+        <label className="gain-field">
+          <span className="gain-label">{t('gainBase')}</span>
+          <span className="gain-value">{t('gainHours', { h: num(base, 0) })}</span>
+          <input type="range" min="1" max="12" step="1" value={base}
+                 onChange={e => setBase(Number(e.target.value))} />
+        </label>
+        <label className="gain-field">
+          <span className="gain-label">{t('gainShare')}</span>
+          <span className="gain-value">{t('pct', { n: share })}</span>
+          <input type="range" min="0" max={F_MAX * 100} step="1" value={share}
+                 onChange={e => setShare(Number(e.target.value))} />
+        </label>
+        <ul className="gain-refs">
+          <li><button type="button" onClick={() => setShare(Math.round(REF_AUTOSOAR * 100))}>
+            {t('gainRefAuto')} · {t('pct', { n: Math.round(REF_AUTOSOAR * 100) })}</button></li>
+          <li><button type="button" onClick={() => setShare(Math.round(REF_NASA * 100))}>
+            {t('gainRefNasa')} · {t('pct', { n: Math.round(REF_NASA * 100) })}</button></li>
+        </ul>
+        <p className="meta">{t('gainAssume')}</p>
+      </div>
+
+      <div className="gain-result" aria-live="polite">
+        <p className="gain-label">{t('gainResult')}</p>
+        <p className="gain-big">{t('gainHours', { h: num(hours, 1) })}</p>
+        <p className="gain-sub">
+          <span>{t('gainTimes', { x: num(mult, 2) })}</span>
+          <span className="lift">{t('gainExtra', { h: num(hours - base, 1) })}</span>
+        </p>
+        <svg className="gain-chart" viewBox={`0 0 ${W} ${H}`} role="img" aria-label={t('gainChartAlt')}>
+          {[1, 2, 3, 4, 5].map(m => (
+            <g key={m}>
+              <line x1={P.l} x2={W - P.r} y1={y(m)} y2={y(m)} className="gc-grid" />
+              <text x={P.l - 6} y={y(m) + 4} className="gc-tick" textAnchor="end">{m}×</text>
+            </g>
+          ))}
+          {[0, 0.2, 0.4, 0.6, 0.8].map(v => (
+            <text key={v} x={x(v)} y={H - 10} className="gc-tick" textAnchor="middle">{t('pct', { n: Math.round(v * 100) })}</text>
+          ))}
+          <polyline points={curve} className="gc-curve" />
+          <line x1={x(f)} x2={x(f)} y1={y(1)} y2={y(mult)} className="gc-drop" />
+          <circle cx={x(f)} cy={y(mult)} r="5" className="gc-dot" />
+        </svg>
+      </div>
     </div>
   );
 }
