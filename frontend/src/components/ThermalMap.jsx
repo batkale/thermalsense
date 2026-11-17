@@ -729,9 +729,10 @@ function ViewportReporter({ onChange }) {
 // -----------------------------------------------------------------------------
 // Scan focus — bring the map to a scan that would otherwise be too small to see
 //
-// The map opens on the whole European soaring belt (zoom 5), where a degree of
-// longitude is ~23 px and the 0.1-degree grid a prediction returns is two or
-// three. Since that became the opening view, clicking bare map from it produced
+// The map opens on the whole of Türkiye (zoom 6), where the 0.1-degree grid a
+// prediction returns is a few pixels — and the opening scan of İnönü relies on
+// this controller to fly in to it. When the opening view was the European
+// soaring belt (zoom 5), clicking bare map from it produced
 // a correct heatmap that occupied less space than the cursor. So a click that
 // would draw smaller than MIN_SCAN_PX flies in to fit the square; one made from
 // close enough to read it leaves the view exactly where the user put it.
@@ -744,19 +745,33 @@ const MIN_SCAN_PX = 160;
 function ScanFocusController({ target }) {
   const map = useMap();
   useEffect(() => {
-    if (!target) return;
-    const r    = PREDICT_RADIUS;
-    // The click arrives wrapped into ±180; near the date line the copy on
-    // screen may be the other one, and flying to the wrapped one would cross
-    // the whole world to get there.
-    const lon  = nearLng(target.lon, map.getCenter().lng);
-    const west = map.latLngToContainerPoint([target.lat, lon - r]);
-    const east = map.latLngToContainerPoint([target.lat, lon + r]);
-    if (Math.abs(east.x - west.x) >= MIN_SCAN_PX) return;
-    map.flyToBounds(
-      [[target.lat - r, lon - r], [target.lat + r, lon + r]],
-      { padding: [48, 48], maxZoom: 13, duration: 0.9 },
-    );
+    if (!target) return undefined;
+    // The opening scan (App.jsx) sets a target on the very first render, before
+    // the container has been laid out. flyToBounds on a zero-sized map divides
+    // by its size and throws "Invalid LatLng (NaN, NaN)", taking the whole app
+    // down with it. So wait, a frame at a time, until the map has real pixels.
+    let raf = 0;
+    let cancelled = false;
+    const run = () => {
+      if (cancelled) return;
+      map.invalidateSize({ pan: false });
+      const size = map.getSize();
+      if (size.x < 2 * 48 + 1 || size.y < 2 * 48 + 1) { raf = requestAnimationFrame(run); return; }
+      const r    = PREDICT_RADIUS;
+      // The click arrives wrapped into ±180; near the date line the copy on
+      // screen may be the other one, and flying to the wrapped one would cross
+      // the whole world to get there.
+      const lon  = nearLng(target.lon, map.getCenter().lng);
+      const west = map.latLngToContainerPoint([target.lat, lon - r]);
+      const east = map.latLngToContainerPoint([target.lat, lon + r]);
+      if (Math.abs(east.x - west.x) >= MIN_SCAN_PX) return;
+      map.flyToBounds(
+        [[target.lat - r, lon - r], [target.lat + r, lon + r]],
+        { padding: [48, 48], maxZoom: 13, duration: 0.9 },
+      );
+    };
+    map.whenReady(run);
+    return () => { cancelled = true; cancelAnimationFrame(raf); };
   }, [target, map]);
   return null;
 }

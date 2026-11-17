@@ -74,39 +74,47 @@ const STRINGS = {
     noInsolationTip:    'Yüzey ısınması termal oluşumu için gereken eşiğin '
                       + 'altında. Model bu koşulda hiç eğitilmedi, o yüzden '
                       + 'tahmin üretmek yerine üretmediğini söylüyor.',
-    thermalBaseTip:     'Termallerin tepe yaptığı tahmini yükseklik. Bunun '
-                      + 'üzerinde tırmanış beklemeyin.',
+    thermalBaseTip:     'Termallerin tepe yaptığı tahmini yükseklik, yerden '
+                      + '(AGL) ölçülür. Bunun üzerinde tırmanış beklemeyin.',
     capeTip:            'Konvektif potansiyel enerji. Yüksek değer güçlü '
                       + 'yükseliş, çok yüksek değer fırtına riski demektir.',
     predictionAlt:      'Tahmin yüksekliği',
-    predictionAltTip:   'Isı haritası bu yükseklik için geçerlidir. Planöre '
-                      + 'tıklamak onun yüksekliğini, boş haritaya tıklamak '
+    predictionAltTip:   'Isı haritası bu yükseklik için geçerlidir. Büyük '
+                      + 'rakam deniz seviyesinden (MSL), alttaki satır alanın '
+                      + 'ortalama arazisinden (AGL) ölçülür. Bir hava '
+                      + 'aracına tıklamak onun yüksekliğini, boş haritaya tıklamak '
                       + 'arazi ortalaması üzerinde varsayılan bir yüksekliği '
                       + 'kullanır.',
-    altFromGlider:      'planörden · arazi {n} m',
-    altFromDefault:     'varsayılan · arazi {n} m',
-    gliderCount:        '{n} planör',
+    altFromGlider:      'hava aracından · yerden {n} m AGL',
+    altFromDefault:     'varsayılan · yerden {n} m AGL',
+    // Every altitude on screen names its reference: a bare "m" next to another
+    // bare "m" invited comparing a sea-level height with an above-ground one
+    // (TUSAŞ HANGAR mentor review, Nov 2026).
+    metresMsl:          '{n} m MSL',
+    metresAgl:          '{n} m AGL',
+    thermalBaseMsl:     '≈ {n} m MSL (alanın arazisi üzerine)',
+    gliderCount:        '{n} süzülen hava aracı',
     circlingCount:      '{n} daire çiziyor',
     towPlaneCount:      '{n} çekici uçak',
     airborneOnly:       'Sadece havada',
     airborneHint:       '(AGL > 10 m)',
     liveActivityLayer:  'Canlı aktivite katmanı',
-    ognDensityHint:     '(OGN yoğunluğu)',
+    ognDensityHint:     '(termal telemetrisi)',
     retrainModel:       'Modeli yeniden eğit',
     retrainTitle:       'Modeli en güncel OGN verisiyle yeniden eğit',
 
     // raw data / product comparison (before/after divider on the map)
-    compareToggle:      'Ham veri karşılaştırması',
-    compareHint:        '(önce / sonra)',
-    compareHandle:      'Ham veri ile üzerine kurulan arasındaki ayırıcı — '
+    compareToggle:      'Ham veri ↔ ThermalSense AI',
+    compareHint:        '(AI kapalı / açık)',
+    compareHandle:      'Ham veri ile ThermalSense AI çıktısı arasındaki ayırıcı — '
                       + 'karşılaştırmak için sürükleyin',
-    compareBefore:      'Önce',
-    compareAfter:       'Sonra',
-    compareRawTitle:    'Ham veri',
-    compareBuiltTitle:  'Üzerine kurduğumuz',
+    compareBefore:      'AI kapalı',
+    compareAfter:       'AI açık',
+    compareRawTitle:    'Sistem kapalı · ham veri',
+    compareBuiltTitle:  'ThermalSense AI · işlenmiş çıktı',
     rawBeacons:         '{n} uçak: bildirilen konum, irtifa ve tırmanma hızı',
     rawElevation:       '{n} yükseklik ölçümü, ~{km} km arayla',
-    rawWeather:         'Tüm alan için tek bir hava durumu örneği',
+    rawWeather:         'Standart hava servisi: tüm alan için tek, düşük çözünürlüklü örnek',
     rawNoGrid:          'Arazi ve hava girdilerini görmek için haritaya tıklayın',
     builtCells:         '{n} hücre, her biri {f} özellik → termal olasılığı',
     builtCellsOnly:     '{n} hücre → termal olasılığı',
@@ -131,14 +139,14 @@ const STRINGS = {
     low:                'Düşük',
     high:               'Yüksek',
     circling:           'daire çiziyor',
-    glider:             'planör',
+    glider:             'süzülen hava aracı',
     towPlane:           'çekici uçak',
     activeThermal:      'aktif termal',
 
     // search
-    searchPlaceholder:  'Planör, havaalanı, yer ara…',
+    searchPlaceholder:  'Hava aracı, havaalanı, yer ara…',
     clearSearch:        'Aramayı temizle',
-    tagGlider:          'planör',
+    tagGlider:          'hava aracı',
     tagAirport:         'havaalanı',
     tagPlace:           'yer',
     searchAltVario:     'irtifa {alt} m  ·  {vario} m/s',
@@ -290,37 +298,42 @@ const STRINGS = {
     noInsolationTip:    'Surface heating is below the level any thermal needs. '
                       + 'The model was never trained in this regime, so it says '
                       + 'it has no forecast rather than inventing one.',
-    thermalBaseTip:     'Estimated height where thermals top out. Expect no '
-                      + 'climb above it.',
+    thermalBaseTip:     'Estimated height where thermals top out, measured '
+                      + 'above ground (AGL). Expect no climb above it.',
     capeTip:            'Convective available potential energy. Higher means '
                       + 'stronger lift; very high means storm risk.',
     predictionAlt:      'Prediction altitude',
-    predictionAltTip:   'The heatmap answers for this altitude. Clicking a '
-                      + 'glider uses the altitude of that aircraft; clicking '
+    predictionAltTip:   'The heatmap answers for this altitude. The large '
+                      + 'figure is above sea level (MSL); the line below is '
+                      + 'above the area’s mean terrain (AGL). Clicking an '
+                      + 'aircraft uses its own altitude; clicking '
                       + 'bare map uses a default height above mean terrain.',
-    altFromGlider:      'from glider · terrain {n} m',
-    altFromDefault:     'default · terrain {n} m',
-    gliderCount:        ({ n }) => `${n} glider${n === 1 ? '' : 's'}`,
+    altFromGlider:      'from aircraft · {n} m AGL',
+    altFromDefault:     'default · {n} m AGL',
+    metresMsl:          '{n} m MSL',
+    metresAgl:          '{n} m AGL',
+    thermalBaseMsl:     '≈ {n} m MSL (over the area’s terrain)',
+    gliderCount:        ({ n }) => `${n} soaring aircraft`,
     circlingCount:      '{n} circling',
     towPlaneCount:      ({ n }) => `${n} tow plane${n === 1 ? '' : 's'}`,
     airborneOnly:       'Airborne only',
     airborneHint:       '(AGL > 10 m)',
     liveActivityLayer:  'Live activity layer',
-    ognDensityHint:     '(OGN density)',
+    ognDensityHint:     '(thermal telemetry)',
     retrainModel:       'Retrain model',
     retrainTitle:       'Trigger model retraining on latest OGN data',
 
-    compareToggle:      'Raw data comparison',
-    compareHint:        '(before / after)',
-    compareHandle:      'Divider between the raw data and what is built on it — '
-                      + 'drag to compare',
-    compareBefore:      'Before',
-    compareAfter:       'After',
-    compareRawTitle:    'Raw data',
-    compareBuiltTitle:  'What we build on it',
+    compareToggle:      'Raw data ↔ ThermalSense AI',
+    compareHint:        '(AI off / on)',
+    compareHandle:      'Divider between the raw data and the ThermalSense AI '
+                      + 'output — drag to compare',
+    compareBefore:      'AI off',
+    compareAfter:       'AI on',
+    compareRawTitle:    'System off · raw data',
+    compareBuiltTitle:  'ThermalSense AI · processed output',
     rawBeacons:         '{n} aircraft: reported position, altitude and climb rate',
     rawElevation:       '{n} elevation samples, ~{km} km apart',
-    rawWeather:         'One weather sample for the whole area',
+    rawWeather:         'Standard weather service: one low-resolution sample for the whole area',
     rawNoGrid:          'Click the map to see the terrain and weather inputs',
     builtCells:         '{n} cells, {f} features each → lift probability',
     builtCellsOnly:     '{n} cells → lift probability',
@@ -344,13 +357,13 @@ const STRINGS = {
     low:                'Low',
     high:               'High',
     circling:           'circling',
-    glider:             'glider',
+    glider:             'soaring aircraft',
     towPlane:           'tow plane',
     activeThermal:      'active thermal',
 
-    searchPlaceholder:  'Search gliders, airports, places…',
+    searchPlaceholder:  'Search aircraft, airports, places…',
     clearSearch:        'Clear search',
-    tagGlider:          'glider',
+    tagGlider:          'aircraft',
     tagAirport:         'airport',
     tagPlace:           'place',
     searchAltVario:     'alt {alt} m  ·  {vario} m/s',

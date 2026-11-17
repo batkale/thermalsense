@@ -7,16 +7,44 @@ import { translateLanding } from './strings.js';
 import ThermalField from './ThermalField.jsx';
 import { BrandMark, SunIcon, MoonIcon } from '../components/Icons.jsx';
 
-const MAP_URL   = '/';
+const MAP_URL      = '/';
+const COMPARE_URL  = '/?compare=1';
 const TRAINING_URL = '/?panel=training';
 
-// Published third-party results — see the header of strings.js for the full
-// citations. Nothing here is a ThermalSense measurement.
+// Published third-party results — see the header of strings.js. Nothing here
+// is a ThermalSense measurement.
 const SOURCES = {
   nasaFlight: 'https://www.nasa.gov/news-release/nasa-experiment-explores-using-thermals-to-extend-uav-endurance/',
   nasaSim:    'https://ntrs.nasa.gov/citations/20050041655',
   autosoar:   'https://doi.org/10.1002/rob.21747',
 };
+
+// Bibliography. Citations are bibliographic data, identical in both languages,
+// so they live here rather than in strings.js; the headings around them are
+// translated. Every entry was checked against its publisher or index on
+// 17 Nov 2026 — add a new one only with a resolvable link.
+const REFS = [
+  { cite: 'Allen, M. J. (2005). Autonomous Soaring for Improved Endurance of a Small Uninhabited Air Vehicle. 43rd AIAA Aerospace Sciences Meeting. NASA NTRS 20050041655.',
+    href: 'https://ntrs.nasa.gov/citations/20050041655' },
+  { cite: 'NASA (2005). NASA Experiment Explores Using Thermals to Extend UAV Endurance. NASA Dryden press release.',
+    href: SOURCES.nasaFlight },
+  { cite: 'Allen, M. J., & Lin, V. (2007). Guidance and Control of an Autonomous Soaring UAV. NASA/TM-2007-214611.',
+    href: 'https://ntrs.nasa.gov/citations/20070022339' },
+  { cite: 'Edwards, D. J., & Silberberg, L. M. (2010). Autonomous Soaring: The Montague Cross-Country Challenge. Journal of Aircraft, 47(5), 1763–1769.',
+    href: 'https://doi.org/10.2514/1.C000287' },
+  { cite: 'Depenbusch, N. T., Bird, J. J., & Langelaan, J. W. (2018). The AutoSOAR autonomous soaring aircraft, part 2: Hardware implementation and flight results. Journal of Field Robotics, 35(4).',
+    href: SOURCES.autosoar },
+  { cite: 'Tabor, S., Guilliard, I., & Kolobov, A. (2018). ArduSoar: An Open-Source Thermalling Controller for Resource-Constrained Autopilots. arXiv:1802.08215.',
+    href: 'https://arxiv.org/abs/1802.08215' },
+  { cite: 'Lenschow, D. H., & Stephens, P. L. (1980). The role of thermals in the convective boundary layer. Boundary-Layer Meteorology, 19, 509–532.',
+    href: 'https://doi.org/10.1007/BF00122351' },
+  { cite: 'Ákos, Z., Nagy, M., & Vicsek, T. (2008). Comparing bird and human soaring strategies. PNAS, 105(11), 4139–4143.',
+    href: 'https://doi.org/10.1073/pnas.0707711105' },
+  { cite: 'Mordor Intelligence (2026). Unmanned Aerial Vehicles (UAV) Market — Outlook 2026–2031. Press release, 7 April 2026.',
+    href: 'https://www.bolsamania.com/nota-de-prensa/mercados/unmanned-aerial-vehicles-uav-market-outlook-2026-2031-led-by-the-fixed-wing-segment-with-7478-share-in-2025---mordor-intelligence--22250897.html' },
+  { cite: 'Mordor Intelligence (2026). Small UAV Market — Share Analysis, Industry Trends & Statistics, Growth Forecasts. 28 July 2026.',
+    href: 'https://www.giiresearch.com/report/moi1850151-small-uav-market-share-analysis-industry-trends.html' },
+];
 
 // ThermalSense's own scores, within-(day, cell, hour) micro AUC:
 // `python -m evaluation.evaluate --variant base --by-hour`, run 16 Nov 2026 on
@@ -30,15 +58,50 @@ const SCORES = [
   { key: 'rowAlps',    value: 0.612, emphasis: true },
 ];
 
-// Reference points on the endurance curve, both from the publications above.
+// Forecast ledger, GET /verification/summary?days=30 on the live node, read
+// 17 Nov 2026 (rules_version 1). [value, lo, hi]; n = forecasts that had
+// traffic to score against. pooled = pooled_served, hit = hit_rate (chance
+// 0.2), within = within_served. 360 was added to LEDGER_HORIZONS_MIN that day
+// and has no result yet — it stays "being measured" until it does.
+const HORIZONS = [
+  { min: 15,  pooled: [0.714, 0.671, 0.753], hit: [0.254, 0.213, 0.307], within: [0.530, 0.490, 0.577], n: 199 },
+  { min: 30,  pooled: [0.683, 0.632, 0.731], hit: [0.243, 0.198, 0.292], within: [0.502, 0.454, 0.558], n: 149 },
+  { min: 60,  pooled: [0.701, 0.643, 0.753], hit: [0.220, 0.165, 0.272], within: [0.477, 0.425, 0.530], n: 119 },
+  { min: 120, pooled: [0.709, 0.626, 0.784], hit: [0.143, 0.080, 0.215], within: [0.468, 0.391, 0.546], n: 68 },
+  { min: 180, pooled: [0.671, 0.559, 0.808], hit: [0.132, 0.067, 0.208], within: [0.482, 0.354, 0.619], n: 51 },
+  { min: 360, pending: true },
+];
+
+// Competition matrix: one row per question, one cell per column, each a
+// strings.js key. Claims about other products are limited to what their own
+// pages show; "none found" is the honest form of "they do not have it".
+const CMP_COLS = ['cmpColUs', 'cmpColSoar', 'cmpColNwp', 'cmpColOnboard', 'cmpColTrad'];
+const CMP_ROWS = [
+  ['cmpRowPre',   ['cmpYes', 'cmpYes', 'cmpPartial', 'cmpNo', 'cmpNo']],
+  ['cmpRowRes',   ['cmpResUs', 'cmpResNwp', 'cmpResNwp', 'cmpResOnboard', 'cmpDash']],
+  ['cmpRowLearn', ['cmpLearnUs', 'cmpLearnNone', 'cmpLearnNone', 'cmpLearnOnboard', 'cmpLearnTrad']],
+  ['cmpRowHw',    ['cmpNotNeeded', 'cmpNotNeeded', 'cmpNotNeeded', 'cmpNotNeeded', 'cmpNotNeeded']],
+  ['cmpRowAudit', ['cmpAuditUs', 'cmpAuditNone', 'cmpAuditNone', 'cmpDash', 'cmpDash']],
+  ['cmpRowUser',  ['cmpUserUs', 'cmpUserSoar', 'cmpUserNwp', 'cmpUserOnboard', 'cmpUserTrad']],
+  ['cmpRowPrice', ['cmpPriceUs', 'cmpPriceSoar', 'cmpPriceNwp', 'cmpPriceOnboard', 'cmpDash']],
+];
+
+// Market: TAM / SAM / SOM. Figures and their sources are in strings.js.
+const MARKET = ['tam', 'sam', 'som'];
+
+// Reference points on the flight-time curve, both from the publications above.
 // AutoSOAR: ~3 h climbing of 7.8 h engaged. NASA simulation: 2 h -> 8.6 h is a
 // 4.3x multiplier, which 1/(1-f) reaches at f = 1 - 1/4.3.
 const REF_AUTOSOAR = 3 / 7.8;
 const REF_NASA     = 1 - 2 / 8.6;
 const F_MAX = 0.8;
 
-const SECTIONS = ['problem', 'evidence', 'product', 'lale', 'gain', 'ask'];
-const TOTAL = 9;
+const SECTIONS = ['problem', 'product', 'architecture', 'horizon', 'competition', 'market', 'gain', 'roadmap'];
+const NAV_KEY = {
+  problem: 'navProblem', product: 'navProduct', architecture: 'navArch', horizon: 'navHorizon',
+  competition: 'navCompete', market: 'navMarket', gain: 'navGain', roadmap: 'navRoad',
+};
+const TOTAL = 13;
 
 /**
  * How many thermals the feed is marking right now — the one live number on the
@@ -78,8 +141,6 @@ export default function Landing() {
 
   const langLabel  = lang === 'tr' ? tApp('switchToEnglish') : tApp('switchToTurkish');
   const themeLabel = theme === 'dark' ? tApp('switchToLight') : tApp('switchToDark');
-  const navKey = { problem: 'navProblem', evidence: 'navEvidence', product: 'navProduct',
-                   lale: 'navLale', gain: 'navGain', ask: 'navAsk' };
 
   return (
     <>
@@ -89,7 +150,7 @@ export default function Landing() {
         <div className="wrap nav">
           <a className="brand" href="#cover"><BrandMark className="brand-mark" size={22} />ThermalSense</a>
           <nav className="nav-links" aria-label={t('navLabel')}>
-            {SECTIONS.map(id => <a key={id} href={`#${id}`}>{t(navKey[id])}</a>)}
+            {SECTIONS.map(id => <a key={id} href={`#${id}`}>{t(NAV_KEY[id])}</a>)}
           </nav>
           <div className="nav-tools">
             <button type="button" className="tool" onClick={toggleLang} title={langLabel} aria-label={langLabel}>
@@ -115,8 +176,8 @@ export default function Landing() {
             </h1>
             <p className="lede">{t('coverLede')}</p>
             <div className="actions">
-              <a className="btn primary" href="#gain">{t('coverCta')}</a>
-              <a className="btn quiet" href={MAP_URL}>{t('openMap')}</a>
+              <a className="btn primary" href={MAP_URL}>{t('openMap')}</a>
+              <a className="btn quiet" href="#gain">{t('coverCta')}</a>
             </div>
             <p className="status"><span className="live-dot on" aria-hidden="true" />{t('coverStatus')}</p>
             {live != null && (
@@ -133,8 +194,8 @@ export default function Landing() {
               <h2 id="problem-h">{t('probTitle')}</h2>
               <p className="intro">{t('probText')}</p>
               <dl className="definition">
-                <dt>{t('laleDefTerm')}</dt>
-                <dd>{t('laleDef')}</dd>
+                <dt>{t('classDefTerm')}</dt>
+                <dd>{t('classDef')}</dd>
               </dl>
             </div>
             <div className="points">
@@ -199,19 +260,41 @@ export default function Landing() {
               </div>
               <ScoreBars rows={SCORES} t={t} num={num} />
             </div>
+            <div className="demo-call">
+              <div>
+                <h3>{t('demoTitle')}</h3>
+                <p>{t('demoText')}</p>
+              </div>
+              <a className="btn primary" href={COMPARE_URL}>{t('openCompare')}</a>
+            </div>
           </div>
         </section>
 
-        {/* 06 — LALE */}
-        <section className="slide" id="lale" aria-labelledby="lale-h">
+        {/* 06 — architecture: where the AI is, and what runs offline */}
+        <section className="slide" id="architecture" aria-labelledby="arch-h">
           <div className="wrap">
             <Counter n={6} t={t} />
-            <h2 id="lale-h">{t('laleTitle')}</h2>
-            <p className="intro">{t('laleIntro')}</p>
+            <h2 id="arch-h">{t('archTitle')}</h2>
+            <p className="intro">{t('archIntro')}</p>
+            <div className="pipeline">
+              <p className="pipe-zone online">{t('archOnline')}</p>
+              <p className="pipe-zone offline">{t('archOffline')}</p>
+              <ol className="pipe">
+                {[1, 2, 3, 4].map(i => (
+                  <li key={i} className={`pipe-step s${i}${i === 2 ? ' ai' : ''}`}>
+                    <span className="pipe-tag">{t(`arch${i}Tag`)}</span>
+                    <h3>{t(`arch${i}`)}</h3>
+                    <p>{t(`arch${i}Text`)}</p>
+                  </li>
+                ))}
+              </ol>
+            </div>
+            <p className="meta alt-ref">{t('archAltRef')}</p>
+            <h3 className="sub">{t('opsTitle')}</h3>
             <ol className="modes">
-              <li><span className="mode-n">A</span><h3>{t('mode1')}</h3><p>{t('mode1Text')}</p></li>
-              <li><span className="mode-n">B</span><h3>{t('mode2')}</h3><p>{t('mode2Text')}</p></li>
-              <li className="later"><span className="mode-n">C</span><h3>{t('mode3')}</h3><p>{t('mode3Text')}</p></li>
+              <li><span className="mode-n">1</span><h3>{t('ops1')}</h3><p>{t('ops1Text')}</p></li>
+              <li><span className="mode-n">2</span><h3>{t('ops2')}</h3><p>{t('ops2Text')}</p></li>
+              <li><span className="mode-n">3</span><h3>{t('ops3')}</h3><p>{t('ops3Text')}</p></li>
             </ol>
             <h3 className="sub">{t('usesTitle')}</h3>
             <div className="notes uses">
@@ -220,14 +303,85 @@ export default function Landing() {
               <div><h3>{t('use3')}</h3><p>{t('use3Text')}</p></div>
               <div><h3>{t('use4')}</h3><p>{t('use4Text')}</p></div>
             </div>
-            <p className="meta acoustic">{t('acoustic')}</p>
           </div>
         </section>
 
-        {/* 07 — gain */}
-        <section className="slide" id="gain" aria-labelledby="gain-h">
+        {/* 07 — forecast horizon: accuracy against lead time, from the ledger */}
+        <section className="slide" id="horizon" aria-labelledby="horizon-h">
           <div className="wrap">
             <Counter n={7} t={t} />
+            <h2 id="horizon-h">{t('hzTitle')}</h2>
+            <p className="intro">{t('hzIntro')}</p>
+            <HorizonTable t={t} num={num} />
+            <p className="meta">{t('hzPending')}</p>
+            <div className="honest">
+              <h3>{t('hzReadTitle')}</h3>
+              <p>{t('hzRead')}</p>
+            </div>
+            <p className="meta hz-meta">{t('hzMeta')}</p>
+          </div>
+        </section>
+
+        {/* 08 — competition */}
+        <section className="slide" id="competition" aria-labelledby="cmp-h">
+          <div className="wrap">
+            <Counter n={8} t={t} />
+            <h2 id="cmp-h">{t('cmpTitle')}</h2>
+            <p className="intro">{t('cmpIntro')}</p>
+            <div className="table-scroll">
+              <table className="matrix">
+                <caption className="sr-only">{t('cmpTitle')}</caption>
+                <thead>
+                  <tr>
+                    <td />
+                    {CMP_COLS.map((c, i) => <th key={c} scope="col" className={i === 0 ? 'us' : undefined}>{t(c)}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {CMP_ROWS.map(([row, cells]) => (
+                    <tr key={row}>
+                      <th scope="row">{t(row)}</th>
+                      {cells.map((c, i) => (
+                        <td key={i} className={[i === 0 ? 'us' : '', c === 'cmpYes' ? 'yes' : '', c === 'cmpNo' ? 'no' : ''].join(' ').trim() || undefined}>
+                          {t(c)}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="meta cmp-note">{t('cmpNote')}</p>
+          </div>
+        </section>
+
+        {/* 09 — market */}
+        <section className="slide" id="market" aria-labelledby="mkt-h">
+          <div className="wrap">
+            <Counter n={9} t={t} />
+            <h2 id="mkt-h">{t('mktTitle')}</h2>
+            <p className="intro">{t('mktIntro')}</p>
+            <dl className="market">
+              {MARKET.map(k => (
+                <div key={k} className={`mkt ${k}`}>
+                  <dt>
+                    <span className="mkt-label">{t(`${k}Label`)}</span>
+                    <span className="mkt-fig">{t(`${k}Fig`)}</span>
+                    <span className="mkt-what">{t(`${k}What`)}</span>
+                  </dt>
+                  <dd>{t(`${k}Text`)}</dd>
+                </div>
+              ))}
+            </dl>
+            <p className="reading">{t('mktPlayers')}</p>
+            <p className="meta">{t('mktMeta')}</p>
+          </div>
+        </section>
+
+        {/* 10 — gain */}
+        <section className="slide" id="gain" aria-labelledby="gain-h">
+          <div className="wrap">
+            <Counter n={10} t={t} />
             <h2 id="gain-h">{t('gainTitle')}</h2>
             <p className="intro">{t('gainIntro')}</p>
             <GainCalculator t={t} num={num} />
@@ -238,10 +392,10 @@ export default function Landing() {
           </div>
         </section>
 
-        {/* 08 — why us */}
+        {/* 11 — why us */}
         <section className="slide" aria-labelledby="why-h">
           <div className="wrap">
-            <Counter n={8} t={t} />
+            <Counter n={11} t={t} />
             <h2 id="why-h">{t('whyTitle')}</h2>
             <div className="notes why">
               <div><h3>{t('why1')}</h3><p>{t('why1Text')}</p></div>
@@ -252,18 +406,21 @@ export default function Landing() {
           </div>
         </section>
 
-        {/* 09 — roadmap and ask */}
-        <section className="slide ask" id="ask" aria-labelledby="ask-h">
-          <div className="wrap split">
-            <div>
-              <Counter n={9} t={t} />
-              <h2>{t('roadTitle')}</h2>
-              <ol className="road">
-                <li><span className="when">{t('road1When')}</span><span>{t('road1')}</span></li>
-                <li><span className="when">{t('road2When')}</span><span>{t('road2')}</span></li>
-                <li><span className="when">{t('road3When')}</span><span>{t('road3')}</span></li>
-              </ol>
-            </div>
+        {/* 12 — roadmap and ask */}
+        <section className="slide ask" id="roadmap" aria-labelledby="road-h">
+          <div className="wrap">
+            <Counter n={12} t={t} />
+            <h2 id="road-h">{t('roadTitle')}</h2>
+            <ol className="milestones">
+              {[0, 1, 2, 3, 4, 5].map(i => (
+                <li key={i} className={i === 0 ? 'done' : undefined}>
+                  <span className="ms-id">M{i}</span>
+                  <span className="ms-when">{t(`m${i}When`)}{i === 0 && <> · {t('roadDone')}</>}</span>
+                  <h3>{t(`m${i}`)}</h3>
+                  <p>{t(`m${i}Text`)}</p>
+                </li>
+              ))}
+            </ol>
             <div className="ask-box">
               <h2 id="ask-h">{t('askTitle')}</h2>
               <p className="intro">{t('askText')}</p>
@@ -274,6 +431,22 @@ export default function Landing() {
             </div>
           </div>
         </section>
+
+        {/* 13 — references */}
+        <section className="slide refs" id="references" aria-labelledby="ref-h">
+          <div className="wrap">
+            <Counter n={13} t={t} />
+            <h2 id="ref-h">{t('refTitle')}</h2>
+            <p className="intro">{t('refIntro')}</p>
+            <ol className="ref-list">
+              {REFS.map(r => (
+                <li key={r.href + r.cite.slice(0, 20)}>
+                  {r.cite} <a href={r.href} rel="noopener">↗</a>
+                </li>
+              ))}
+            </ol>
+          </div>
+        </section>
       </main>
 
       <footer className="close">
@@ -282,6 +455,46 @@ export default function Landing() {
         </div>
       </footer>
     </>
+  );
+}
+
+/** Ledger results per horizon; a horizon with no result says so instead of a number. */
+function HorizonTable({ t, num }) {
+  const label = m => (m < 60 ? t('hzMin', { n: m }) : t('hzHour', { n: num(m / 60, 0) }));
+  const auc = ([v, lo, hi]) => `${num(v, 2)} [${num(lo, 2)}–${num(hi, 2)}]`;
+  const pct = ([v, lo, hi]) => `${t('pct', { n: Math.round(v * 100) })} [${Math.round(lo * 100)}–${Math.round(hi * 100)}]`;
+  return (
+    <div className="table-scroll">
+      <table className="sources horizon">
+        <caption className="sr-only">{t('hzTitle')}</caption>
+        <thead>
+          <tr>
+            <th scope="col">{t('hzColHorizon')}</th>
+            <th scope="col">{t('hzColPooled')}</th>
+            <th scope="col">{t('hzColHit')}</th>
+            <th scope="col">{t('hzColWithin')}</th>
+            <th scope="col">{t('hzColN')}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {HORIZONS.map(h => (
+            <tr key={h.min} className={h.pending ? 'pending' : undefined}>
+              <th scope="row">{label(h.min)}</th>
+              {h.pending ? (
+                <td colSpan={4}>{t('hzPendingRow')}</td>
+              ) : (
+                <>
+                  <td className="num em">{auc(h.pooled)}</td>
+                  <td className={`num${h.hit[1] > 0.2 ? ' above' : h.hit[2] < 0.2 ? ' below' : ''}`}>{pct(h.hit)}</td>
+                  <td className="num">{auc(h.within)}</td>
+                  <td className="num">{num(h.n, 0)}</td>
+                </>
+              )}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -386,7 +599,8 @@ function SearchFigure({ t }) {
   );
 }
 
-/** 1 / (1 - f): arithmetic on a stated assumption, not a measurement. */
+/** 1 / (1 - f): arithmetic on a stated assumption, not a measurement. Flight
+ * duration, never range — see the wording rules in strings.js. */
 function GainCalculator({ t, num }) {
   const [base, setBase] = useState(4);
   const [share, setShare] = useState(Math.round(REF_AUTOSOAR * 100));
@@ -434,6 +648,7 @@ function GainCalculator({ t, num }) {
         <p className="gain-big">{t('gainHours', { h: num(hours, 1) })}</p>
         <p className="gain-sub">
           <span>{t('gainTimes', { x: num(mult, 2) })}</span>
+          <span className="lift">{t('gainPct', { n: Math.round((mult - 1) * 100) })}</span>
           <span className="lift">{t('gainExtra', { h: num(hours - base, 1) })}</span>
         </p>
         <svg className="gain-chart" viewBox={`0 0 ${W} ${H}`} role="img" aria-label={t('gainChartAlt')}>

@@ -52,15 +52,25 @@ export const WS_URL = resolveWsUrl();
 // retraining with curl instead.
 export const ADMIN_TOKEN = import.meta.env.VITE_ADMIN_TOKEN ?? '';
 
-// Opening view: the European soaring belt. The OGN feed is worldwide and its
-// traffic sits here, so the map lands on live gliders instead of on an empty
-// airfield. This is deliberately *not* the prediction grid above (İnönü) —
-// a prediction is built around whatever point is clicked, so the two are free
-// to disagree. Zoom 5 spans roughly Ireland → Black Sea on a laptop-width
-// window; İnönü havaalanı (THK yelken kanat merkezi) is [39.8167, 30.1167] for
-// anyone restoring the old regional default.
-export const MAP_CENTER = [46.5, 15.5];
-export const MAP_ZOOM   = 5;
+// Opening view: Türkiye. The map used to open on the European soaring belt,
+// where the worldwide feed's traffic is — but a demo that opens on foreign
+// gliders over an empty Anatolia answers the wrong question for a Turkish
+// audience (TUSAŞ HANGAR mentor review, Nov 2026). It now opens on Türkiye and
+// scans HOME_SCAN straight away (App.jsx), so the first thing on screen is a
+// filled heatmap over İnönü rather than a blank map waiting for a click.
+// Zoom 6 shows the whole country on a laptop-width window; ScanFocusController
+// then flies in to the scan, because at zoom 6 the 11 km grid is a few pixels.
+export const MAP_CENTER = [39.0, 35.0];
+export const MAP_ZOOM   = 6;
+
+// İnönü havaalanı (THK yelken kanat merkezi), the primary operating area.
+export const HOME_SCAN = { lat: 39.8167, lon: 30.1167 };
+// Türkiye keeps UTC+3 all year (no DST since 2016), so the opening scan can pick
+// a daylight hour without a zone lookup. Between these local hours it scans now;
+// outside them it asks for the next local noon, because a night scan is zeroed
+// by the night guard and would open the demo on an empty map.
+export const HOME_UTC_OFFSET_H = 3;
+export const HOME_DAY_HOURS    = [9, 16];
 
 // Forecast slider stops, in hours ahead. Every 15 minutes across the first three
 // hours — the window a pilot is choosing a launch time in, where a whole hour is

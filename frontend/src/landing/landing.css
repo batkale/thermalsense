@@ -835,7 +835,7 @@ html { scroll-padding-top: 72px; }
   font-weight: 600;
 }
 
-/* ── 06 LALE ── */
+/* ── 06 architecture: operating principles ── */
 .modes {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -867,7 +867,7 @@ html { scroll-padding-top: 72px; }
 }
 .notes.uses, .notes.why { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .notes.why { margin-top: 12px; }
-.acoustic { margin-top: 22px; }
+
 
 /* ── 07 gain ── */
 .gain {
@@ -979,3 +979,181 @@ html { scroll-padding-top: 72px; }
 
 .live-count { margin-top: 8px; padding-left: 20px; color: var(--ink-3); }
 #product .field-figure { margin: 0 0 48px; }
+
+/* ── Mentor-review additions (Nov 2026): demo call-out, architecture pipeline,
+   horizon table, competition matrix, market, milestones, references. ── */
+@media (max-width: 1240px) { .pitch-top .nav-links { display: none; } }
+
+.demo-call {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px 32px;
+  margin-top: 48px;
+  padding: 24px 28px;
+  border-left: 3px solid var(--lift);
+  border-radius: 0 6px 6px 0;
+  background: var(--panel);
+}
+.demo-call > div { flex: 1 1 420px; }
+.demo-call h3 { margin: 0 0 6px; color: var(--ink); }
+.demo-call p { margin: 0; font-size: 0.96rem; }
+
+/* Pipeline: four steps; the zone bands above them say which side of the
+   take-off line needs a connection. Step 2 is the AI layer and carries the
+   warm colour — the one place on this slide where something is learned. */
+.pipeline {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0 16px;
+  margin-bottom: 8px;
+}
+.pipe-zone {
+  margin: 0 0 10px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 0.78rem;
+  font-weight: 620;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.pipe-zone.online  { grid-column: 1 / 4; color: var(--ink); background: color-mix(in srgb, var(--sink) 18%, transparent); }
+.pipe-zone.offline { grid-column: 4 / 5; color: var(--ink); border: 1px dashed var(--ink-3); }
+.pipe {
+  display: contents;
+  list-style: none;
+}
+.pipe-step {
+  position: relative;
+  padding: 18px 20px 12px;
+  border-top: 2px solid var(--ink-3);
+  border-radius: 0 0 4px 4px;
+  background: var(--panel);
+  font-size: 0.94rem;
+}
+.pipe-step:not(:last-child)::after {
+  content: '→';
+  position: absolute;
+  top: 16px;
+  right: -14px;
+  color: var(--ink-3);
+  font-weight: 600;
+}
+.pipe-step.ai { border-top: 3px solid var(--lift); }
+.pipe-step.ai .pipe-tag { color: var(--lift); }
+.pipe-step.s4 { border-top-style: dashed; }
+.pipe-tag {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--ink-3);
+  font-size: 0.74rem;
+  font-weight: 640;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.pipe-step h3 { margin: 0 0 6px; color: var(--ink); font-size: 1.05rem; }
+
+/* Wide tables scroll inside their own box on a phone, never the page. */
+.table-scroll { max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+.horizon { margin-bottom: 12px; }
+.horizon th:first-child { white-space: nowrap; }
+.horizon td.num { color: var(--ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.horizon td.em { font-weight: 640; }
+.horizon td.above { color: var(--lift); font-weight: 640; }
+.horizon td.below { color: var(--ink-3); }
+.horizon tr.pending td { color: var(--ink-3); font-style: italic; }
+.hz-meta { margin-top: 18px; }
+
+.matrix { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 0.9rem; }
+.matrix th, .matrix td {
+  padding: 12px 14px 12px 0;
+  border-top: 1px solid var(--rule);
+  text-align: left;
+  vertical-align: top;
+}
+.matrix thead th {
+  border-top: 0;
+  color: var(--ink-3);
+  font-size: 0.74rem;
+  font-weight: 620;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.matrix tbody th { width: 18%; color: var(--ink); font-weight: 600; }
+.matrix .us { padding-left: 12px; background: color-mix(in srgb, var(--lift) 10%, transparent); color: var(--ink); font-weight: 600; }
+.matrix thead th.us { color: var(--lift); }
+.matrix td.no { color: var(--ink-3); }
+.cmp-note { margin-top: 18px; }
+
+.market {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 20px;
+  margin: 0 0 28px;
+}
+.mkt {
+  padding: 22px 24px 18px;
+  border-top: 2px solid var(--ink-3);
+  border-radius: 0 0 4px 4px;
+  background: var(--panel);
+}
+.mkt.som { border-top: 2px dashed var(--lift); }
+.mkt dt { display: grid; gap: 4px; margin-bottom: 10px; }
+.mkt-label { color: var(--ink-3); font-size: 0.78rem; font-weight: 660; letter-spacing: 0.1em; }
+.mkt-fig {
+  color: var(--ink);
+  font-stretch: 112%;
+  font-weight: 640;
+  font-size: clamp(1.6rem, 3vw, 2.2rem);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+.mkt.som .mkt-fig { color: var(--lift); }
+.mkt-what { color: var(--ink); font-weight: 560; font-size: 0.95rem; }
+.mkt dd { margin: 0; font-size: 0.92rem; }
+
+.milestones {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+  margin: 8px 0 48px;
+  padding: 0;
+  list-style: none;
+}
+.milestones li {
+  padding: 16px 20px 8px;
+  border-top: 2px solid var(--ink-3);
+  border-radius: 0 0 4px 4px;
+  background: var(--panel);
+  font-size: 0.93rem;
+}
+.milestones li.done { border-top-color: var(--lift); }
+.ms-id { margin-right: 10px; color: var(--sink); font-family: var(--mono); font-size: 0.82rem; }
+.milestones li.done .ms-id { color: var(--lift); }
+.ms-when { color: var(--ink-3); font-size: 0.82rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.milestones h3 { margin: 6px 0 6px; color: var(--ink); font-size: 1.05rem; }
+.milestones p { margin-bottom: 8px; }
+
+.refs .ref-list { max-width: 96ch; margin: 0; padding-left: 1.4em; font-size: 0.9rem; }
+.refs .ref-list li { margin-bottom: 10px; }
+.refs .ref-list a { text-decoration: none; }
+
+@media (max-width: 980px) {
+  /* One column, in take-off order: the offline band moves down to sit over
+     the one step it describes. The ol is display: contents, so its items are
+     grid items of .pipeline and `order` reaches them. */
+  .pipeline { grid-template-columns: 1fr; gap: 12px; }
+  .pipe-zone.online, .pipe-zone.offline { grid-column: auto; margin: 0; }
+  .pipe-zone.online { order: 0; }
+  .pipe-step { order: 1; }
+  .pipe-zone.offline { order: 2; margin-top: 8px; }
+  .pipe-step.s4 { order: 3; }
+  .pipe-step::after { display: none; }
+  .market, .milestones { grid-template-columns: 1fr; }
+}
+@media (max-width: 720px) {
+  .demo-call { padding: 20px 16px; }
+}
+.alt-ref { margin-top: 18px; max-width: 86ch; }
