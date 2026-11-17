@@ -14,6 +14,8 @@ import { BrandMark, SunIcon, MoonIcon } from '../components/Icons.jsx';
 const MAP_URL      = '/';
 const COMPARE_URL  = '/?compare=1';
 const TRAINING_URL = '/?panel=training';
+// The pre-seed pitch for defence partners, a third page of the same build.
+const PITCH_URL    = '/sunum';
 
 // Within-(day, cell, hour) ranking score, micro AUC with 95% bootstrap CI.
 // `python -m evaluation.evaluate --variant base --by-hour`, run 16 Nov 2026 on
@@ -84,6 +86,7 @@ export default function Landing() {
             <a href="#learn">{t('navLearn')}</a>
             <a href="#score">{t('navScore')}</a>
             <a href="#data">{t('navData')}</a>
+            <a href={PITCH_URL}>{t('navPitch')}</a>
           </nav>
           <div className="nav-tools">
             <button type="button" className="tool" onClick={toggleLang} title={langLabel} aria-label={langLabel}>

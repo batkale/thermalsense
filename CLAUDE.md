@@ -83,6 +83,7 @@ local `cache/terrain-copernicus/points.json` held 200 entries, all
 | [frontend/src/components/ThermalMap.jsx](frontend/src/components/ThermalMap.jsx) | Leaflet map, heatmap canvas, glider markers and tracks |
 | [frontend/src/components/CompareLayer.jsx](frontend/src/components/CompareLayer.jsx) | Raw data / product comparison: the before/after divider, the raw-inputs canvas and the two caption cards |
 | [frontend/src/i18n/strings.js](frontend/src/i18n/strings.js) | TR/EN dictionaries — must stay in key parity |
+| [frontend/sunum.html](frontend/sunum.html), [frontend/src/pitch/](frontend/src/pitch/) | Pre-seed pitch for defence partners at `/sunum` (LALE-class UAVs). Own TR/EN dictionary; reuses `landing.css` |
 | [frontend/about.html](frontend/about.html), [frontend/src/landing/](frontend/src/landing/) | Landing page at `/about`: a second page of the same Vite build, not a route in the app. Own stylesheet and own TR/EN dictionary (`landing/strings.js`); language and theme come from the app's two providers, so both are one choice across the two pages |
 | [DEPLOY.md](DEPLOY.md) | Hosting rationale, sizing, TLS, operating runbook |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Data flow, feature pipeline, training loop, resource budget |
@@ -476,6 +477,16 @@ links keep working; the landing page links to both.
 - **The hero is a simulation and its caption says so.** No real beacon is
   drawn there. The one live number on the page is the count from
   `/thermals/active`, and the line is simply absent when that request fails.
+
+**The pitch page (`/sunum`) is a third page of the same build**, written as a
+pre-seed presentation to defence companies around LALE-class UAVs
+(`sunum.html`, `src/pitch/`, styled on top of `landing.css`). It carries two
+kinds of figure and must keep them apart: published third-party soaring
+results (NASA Dryden 2005 flight test and Allen's simulation, Penn State
+AutoSOAR 2018), each linked to its source, and our own scores, copied from
+`/about`. **No figure there claims how much ThermalSense extends endurance —
+that is unmeasured, and the page says so.** The calculator is `1 / (1 − f)`
+on a stated assumption. Re-measure a score and change it in all three places.
 
 ## Forecast ledger (`data/forecast_ledger.py`)
 

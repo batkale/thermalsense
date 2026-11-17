@@ -8,12 +8,14 @@ export default defineConfig({
   plugins: [react()],
   build: {
     rollupOptions: {
-      // Two pages, one build: the map app at / and the landing page at /about.
+      // Three pages, one build: the map app at /, the landing page at /about
+      // and the pre-seed pitch at /sunum.
       // Both land in dist/ beside each other; FastAPI serves about.html for
       // /about (see _static_file in backend/main.py).
       input: {
         main:  page('./index.html'),
         about: page('./about.html'),
+        sunum: page('./sunum.html'),
       },
     },
   },
