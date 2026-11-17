@@ -8,6 +8,9 @@ pandas
 numpy
 scipy
 python-dotenv
+# IANA zones for zoneinfo: the slim image may ship no /usr/share/zoneinfo, and
+# without it the local clock falls back to Open-Meteo's offset for *now*.
+tzdata
 apscheduler
 # ogn-client removed — pure-Python APRS client in data/ogn_client.py
 # geopandas/rasterio removed — imported nowhere, and they drag in GDAL

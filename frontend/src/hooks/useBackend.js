@@ -195,7 +195,9 @@ export function useBackend(pinnedId = null) {
       // with gridMeta's centre and radius, so one without the other would draw
       // this prediction's terrain on the previous prediction's ground.
       setRawInputs(data.inputs ?? null);
-      setWeather(data.weather);
+      // target_at rides along with the weather it labels, so the local clock in
+      // the top bar is the slider's moment, not the moment the reply arrived.
+      setWeather(data.weather ? { ...data.weather, target_at: data.target_at } : data.weather);
     } catch {
       if (seq === predictSeqRef.current) setError('predictFailed');
     } finally {

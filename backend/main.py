@@ -735,7 +735,53 @@ async def predict(lat: float, lon: float, alt: int | None = None,
             "thermal_base": meteo["cape_base"],
             "pbl_height":  round(meteo["pbl_height"]),
             "soil_temp":   round(meteo["soil_temp"], 1),
+            **_sky_and_clock(meteo),
         },
+    }
+
+
+def _sky_and_clock(meteo: dict) -> dict:
+    """What the map shows beside the numbers: the sky and the local clock.
+
+    Display only, never a feature (see meteo_client.DISPLAY_VARS).  The fallback
+    has none of these keys, so it reports no condition and no offset rather than
+    a sunny sky and UTC for a place nobody fetched — the client hides both.
+    `condition` is a translation key, not text.  `utc_offset_s` is for the
+    moment the map answers for (target_at), so the clock the client draws is
+    the forecast moment's local time, DST included.
+    """
+    is_day = meteo.get("is_day")
+    return {
+        "condition":    meteo_client.weather_condition(meteo.get("weather_code")),
+        "weather_code": meteo.get("weather_code"),
+        "is_day":       None if is_day is None else bool(is_day),
+        "timezone":     meteo.get("timezone"),
+        "utc_offset_s": meteo.get("utc_offset_s"),
+    }
+
+
+@app.get("/weather")
+async def weather(lat: Annotated[float, Query(ge=-90, le=90)],
+                  lon: Annotated[float, Query(ge=-180, le=180)],
+                  forecast_h: Annotated[float, Query(ge=0, le=24)] = 0):
+    """The sky and the local time at one point, for the pinned glider card.
+
+    The card follows an aircraft, so it cannot borrow /predict's weather — that
+    answers for wherever the map was last scanned.  Running the model for a
+    weather icon would be absurd, so this is the meteo lookup alone.  It is the
+    same cached call /predict and the sampler make, keyed per 0.1 degree cell and
+    hour, so a card riding along with a glider costs one upstream request per
+    ~11 km of flight, and none while the cell is already warm.
+    """
+    forecast_h = round(forecast_h * 4) / 4
+    meteo = await fetch_meteo_features(lat, lon, forecast_h)
+    target_at = datetime.now(timezone.utc) + timedelta(hours=forecast_h)
+    fallback = meteo_client.is_synthetic(meteo)
+    return {
+        "target_at": target_at.isoformat(timespec="seconds"),
+        "meteo_fallback": bool(fallback),
+        "temp_2m": None if fallback else round(meteo["temp_2m"], 1),
+        **_sky_and_clock(meteo),
     }
 
 # Ground elevation is cached on a ~1 km lattice, which is accurate enough at
