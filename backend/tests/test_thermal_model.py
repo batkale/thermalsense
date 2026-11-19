@@ -225,8 +225,8 @@ def test_feature_count_matches_the_matrix_width():
 
 def test_above_thermal_base_compares_agl_not_amsl():
     """
-    APRS altitude is AMSL, cape_base is a height above ground. Comparing them
-    directly would reject every aircraft over high terrain.
+    APRS altitude is AMSL, the thermal top is a height above ground. Comparing
+    them directly would reject every aircraft over high terrain.
     """
     ground, base = 1000.0, 1500.0
     # 2200 m AMSL over 1000 m ground = 1200 m AGL — below a 1500 m base
@@ -241,10 +241,17 @@ def test_above_thermal_base_allows_the_margin():
     assert _above_thermal_base(base + _THERMAL_BASE_MARGIN_M + 50, 0.0, base)
 
 
-@pytest.mark.parametrize("base", [0, 0.0, None])
-def test_no_thermal_base_estimate_keeps_the_sample(base):
+def test_no_thermal_base_estimate_keeps_the_sample():
     """Without a usable estimate we must not discard on a guess."""
-    assert not _above_thermal_base(9000.0, 0.0, base)
+    assert not _above_thermal_base(9000.0, 0.0, None)
+
+
+def test_a_zero_thermal_top_is_an_estimate_not_a_missing_value():
+    """The old cape_base used 0 for "undefined" (every hour under 8 degC), so 0
+    switched the filter off.  The thermal top is 0 only in saturated air, and
+    then a climb 1 km up is not a thermal."""
+    assert not _above_thermal_base(_THERMAL_BASE_MARGIN_M - 50, 0.0, 0.0)
+    assert _above_thermal_base(1000.0, 0.0, 0.0)
 
 
 def test_plausible_coords_rejects_grid_indices():

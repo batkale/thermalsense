@@ -171,9 +171,13 @@ Breaking any of these has taken the app down or silently corrupted results befor
   and meteo budget is not spent on rows that get discarded afterwards.
 - **Rejected samples:** below `_MIN_SOLAR_GHI` (50 W/m², no surface heating),
   below `_MIN_SAMPLE_AGL` (200 m AGL — on the field, on the roll or on approach)
-  and above the estimated thermal base + 300 m (that climb is wave, ridge or
-  engine). The AGL floor is applied at collection *and* again in `fit_and_gate`,
-  so a buffer written before it existed is cleaned without a `/seed` rebuild.
+  and above the estimated thermal top + 300 m (that climb is wave, ridge or
+  engine; the top is `meteo_client.thermal_top_agl` — see "The thermal top
+  replaced `cape_base`" below). The AGL floor is applied at collection *and*
+  again in `fit_and_gate`, so a buffer written before it existed is cleaned
+  without a `/seed` rebuild. The thermal-top filter is applied at collection
+  only, deliberately — measured as neutral, and applying it in `fit_and_gate`
+  would thin the frozen benchmark's groups in the middle of a run.
 - **Why the AGL floor exists:** without it 18% of the buffer sat at exactly 0 m
   AGL, all negative, and the model learned "aircraft on the ground are not
   thermalling". Measured: `alt_agl` alone scored 0.631 within-group against 0.664
@@ -455,6 +459,54 @@ Breaking any of these has taken the app down or silently corrupted results befor
   agreement for commercial use. **Not in production;** re-measure once the
   archive holds a flying season. `build --bbox` writes the layer itself as
   Parquet (Alps: 174,114 blocks with ≥ 5 aircraft-days, 1.2 MB).
+- **The thermal top replaced `cape_base`, 19 Nov 2026** — the "thermal base"
+  on the map and the ceiling of the training filter. Now
+  `meteo_client.thermal_top_agl`: **min(boundary layer height, condensation
+  level)**, the LCL being 125 m per °C of dew-point spread (Magnus dew point
+  from 2 m temperature and humidity). Dry thermals stop at the layer top;
+  where the layer clears the LCL they stop at cloud base. The old
+  `(t2m − 8) / max(1, (t2m − t850) / 1.5) × 1000` read no humidity and no
+  layer: over the 3,567 cached daylight hours it was **0 m — filter off — on
+  22.7%** (every hour under 8 °C), sat > 300 m above the new estimate on 42%,
+  and reached 27,200 m wherever 2 m and 850 hPa were within 1.5 °C (high
+  ground, inversions). At İnönü that noon it said 2,273 m against an 890 m
+  cloud base. Measured three ways (`evaluation/thermal_top.py`):
+  - **It predicts how high gliders climb** (`replay`): in the 978 (0.5°,
+    hour) buckets with ≥ 3 thermalling aircraft, the p95 height of
+    climbing-circling beacons (median 855 m) against each estimate — new
+    Spearman **0.73**, median miss **229 m**, observed/estimate 0.90; old
+    0.55, 715 m, 0.57, and no estimate at all in 11% of buckets. Layer
+    height alone 0.71 / 290 m, LCL alone 0.66 / 375 m: the minimum beats both.
+  - **What it admits** (`replay`): 10 archive days (17 Sep – 5 Nov) joined
+    to the cached meteo, 2.35M labelled beacons ≥ 200 m AGL, terrain from the
+    cached Copernicus lattice (95.1% known). Positives kept 89.8% → **96.8%**
+    (per aircraft-hour 94.8% → 95.8%), negatives 87.6% → 89.5% (93.9% →
+    92.2%). The old filter was throwing away real climbs: Germany positives
+    74.9% → 96.3%: on cool October days just above 8 °C the old formula
+    gave a median 132 m, and dropped climbs at a median 718 m AGL under a
+    778 m new top.
+    The Alps are the one place it keeps fewer climbing aircraft-hours (97.0%
+    → 95.4%) — wave and high mountain thermals a coarse NWP layer
+    under-reads. These rows are absent from any buffer, so only the replay
+    sees them.
+  - **The score does not move** (`buffer`, 6 Nov buffer, 47,419 rows): on
+    top of the old filter the new one drops 250 positives (4.0%) and 4,151
+    negatives (10.1%). Same folds, a model trained only on what it keeps
+    against one trained on everything, served, by hour: **+0.003 / −0.001 /
+    +0.000** (seeds 0–2) on the kept rows, every interval within ±0.012 of
+    zero over 1,909 units; on all rows ±0.001. `evaluate.py --variant base
+    --by-hour` on the filtered buffer: 0.569 / 0.570 / 0.559 against 0.570 /
+    0.569 / 0.567 unfiltered — the seed-2 dip is the folds being re-cut on
+    fewer rows; the paired run, on fixed folds, shows +0.000.
+  So the switch is justified by the estimate, not by the model: the map shows
+  a number that tracks reality, and the filter stops discarding real climbs
+  on cool days and stops switching itself off — at no cost to the score.
+  **Semantics changed with it:** only `None` is "no estimate"; 0 m (saturated
+  air) is a real one. The old function treated 0 as missing because the old
+  formula produced it below 8 °C. Historical-cache entries keep a
+  `cape_base` key, now holding the new top (`_with_legacy_base`), so an older
+  image's `/seed` still reads them after a rollback; nothing in this code
+  reads the key, and old entries are recomputed from their own fields.
 - **Quality gate:** the challenger and the serving model are scored on identical
   rows from a *frozen, group-disjoint* benchmark (`evaluation/holdout.py`), and
   the challenger is **rejected only when the paired bootstrap CI
@@ -741,12 +793,12 @@ tuned.
 carries — dew point by Magnus from 2 m temperature and humidity, base ≈ 125 m
 per °C of spread (Lawrence 2005), cumulus where `boundary_layer_height` clears
 it. Display only, no variable and no call added, `None` under the fallback.
-**It disagrees with "thermal base"** (`cape_base`): on 19 Nov at İnönü noon it
-gave a 900 m base under a 1,000 m layer while `cape_base` said 2,273 m AGL.
-`cape_base` comes from a temperature-only formula with no humidity and no
-layer height in it, and it is not display-only — `_above_thermal_base` rejects
-training samples with it. Replacing it changes the training filter, so measure
-before switching.
+It shares `lcl_agl` with the thermal top (see "The thermal top replaced
+`cape_base`"), so the two agree by construction: under `cumulus` the "T-base"
+chip and the cloud base are the same level; under `blue` the thermal base is
+the layer top, below the cloud base this chip names. Before that switch they
+disagreed — 900 m cloud base against a `cape_base` of 2,273 m AGL at İnönü
+noon on 19 Nov — which is how the old formula was caught.
 
 **Satellite clouds** (`components/SatelliteLayer.jsx`, toggle or `?clouds=1`):
 Meteosat MTG GeoColour from EUMETSAT's public WMS, fetched by the browser — no
@@ -869,8 +921,8 @@ separate x and y pixel sizes.
   compare toggle is labelled "Ham veri ↔ ThermalSense AI".
 - **Every altitude on screen names its reference** (`metresMsl` /
   `metresAgl`). The prediction altitude is MSL (with its AGL beneath), the
-  thermal base is AGL (`cape_base` is a height above the surface) with its MSL
-  equivalent over the grid's mean terrain. Two bare "m" figures side by side
+  thermal base is AGL (`thermal_top_agl` is a height above the surface, in
+  50 m steps) with its MSL equivalent over the grid's mean terrain. Two bare "m" figures side by side
   read as comparable and were not — the mentor review asked exactly this.
   The GeoJSON export's `thermal_base_m` is still AGL and still unlabelled.
 - Map labels come from Esri's `Reference/World_Boundaries_and_Places` layer,

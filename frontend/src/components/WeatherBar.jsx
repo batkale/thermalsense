@@ -58,7 +58,9 @@ export default function WeatherBar({ weather, forecastH = 0, onForecastChange, l
             <>
               <WxChip label="CAPE"       tip={t('capeTip')}        value={`${Math.round(weather.cape)} J/kg`} />
               <WxChip label="CIN"        tip={t('cinTip')}         value={`${Math.round(weather.cin)} J/kg`} />
-              <WxChip label={t('tBase')} tip={t('thermalBaseTip')} value={t('metresAgl', { n: weather.thermal_base })} />
+              {weather.thermal_base != null && (
+                <WxChip label={t('tBase')} tip={t('thermalBaseTip')} value={t('metresAgl', { n: weather.thermal_base })} />
+              )}
               {weather.cumulus && <CumulusChip cumulus={weather.cumulus} pbl={weather.pbl_height} />}
             </>
           ) : (
