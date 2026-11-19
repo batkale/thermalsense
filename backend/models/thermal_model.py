@@ -68,17 +68,23 @@ async def _land_props(lat: float, lon: float, shape):
         return None
 
 
-def _above_thermal_base(alt_amsl: float, ground_elev: float, thermal_base_agl: float) -> bool:
+def _above_thermal_base(alt_amsl: float, ground_elev: float,
+                        top_agl: float | None) -> bool:
     """
-    True when the aircraft was flying above the estimated thermal base.
+    True when the aircraft was flying above the estimated thermal top.
 
-    alt_amsl comes from APRS (metres above sea level); thermal_base_agl is
-    meteo["cape_base"], a height above ground.  They must be compared in the
-    same frame, hence subtracting the ground elevation under the aircraft.
+    alt_amsl comes from APRS (metres above sea level); top_agl is
+    meteo_client.thermal_top_agl(meteo), a height above ground.  They must be
+    compared in the same frame, hence subtracting the ground elevation under
+    the aircraft.
+
+    Only None means "no estimate".  The old cape_base used 0 for that, because
+    its formula went to 0 below 8 degC; the thermal top is 0 only in saturated
+    air, and then it is a real estimate.
     """
-    if not thermal_base_agl or thermal_base_agl <= 0:
+    if top_agl is None:
         return False        # no usable estimate — do not discard on a guess
-    return (alt_amsl - ground_elev) > (thermal_base_agl + _THERMAL_BASE_MARGIN_M)
+    return (alt_amsl - ground_elev) > (top_agl + _THERMAL_BASE_MARGIN_M)
 
 
 def _plausible_coords(X: np.ndarray) -> np.ndarray:
@@ -151,11 +157,12 @@ log = logging.getLogger(__name__)
 # (confirmed thermal), 0 = glider was present but not thermalling.
 # At 176 bytes per sample (21 × float64 + 1 × int64) the full buffer is ~3.5 GB on disk.
 # Sized for 10 years of continuous collection (20 samples × 12 cycles/hr × 24 hr × 365 days × 10 yr).
-# A thermal cannot exist above the convective condensation level, so an aircraft
-# circling higher than the estimated thermal base is climbing on something else —
-# wave, ridge lift, or an engine.  Its position says nothing reliable about lift
-# over the ground cell below, so the sample is dropped rather than labelled.
-# cape_base is an estimate, hence the margin.
+# A thermal stops at the top of the boundary layer, or at cloud base where that is
+# lower, so an aircraft circling higher than the estimated thermal top is climbing
+# on something else — wave, ridge lift, or an engine.  Its position says nothing
+# reliable about lift over the ground cell below, so the sample is dropped rather
+# than labelled.  The top (meteo_client.thermal_top_agl) is an estimate, hence
+# the margin.
 _THERMAL_BASE_MARGIN_M = 300
 
 # Below this there is no meaningful surface heating, so no thermal can exist and
@@ -700,7 +707,8 @@ class ThermalModel:
         samples are collected.
         """
         from data.ogn_client import fetch_ogn_gliders, is_thermal_evidence
-        from data.meteo_client import fetch_meteo_features, live_usage as meteo_live_usage
+        from data.meteo_client import (fetch_meteo_features, thermal_top_agl,
+                                       live_usage as meteo_live_usage)
         from data.terrain_client import fetch_elevation_grid, fetch_hires_grid, snap_grid_centre
         from pipeline.feature_engineering import build_feature_matrix
 
@@ -823,7 +831,7 @@ class ThermalModel:
                         on_ground += 1
                         sampled.add(o["id"])   # judged and rejected; do not retry
                         continue
-                    if _above_thermal_base(o["alt"], row[2], meteo["cape_base"]):
+                    if _above_thermal_base(o["alt"], row[2], thermal_top_agl(meteo)):
                         above_base += 1
                         sampled.add(o["id"])   # judged and rejected; do not retry
                         continue
@@ -1169,7 +1177,7 @@ class ThermalModel:
         from collections import defaultdict
         from datetime import datetime, timezone, timedelta
         import sqlite3
-        from data.meteo_client import fetch_meteo_historical
+        from data.meteo_client import fetch_meteo_historical, thermal_top_agl
         from data.terrain_client import fetch_elevation_grid, fetch_hires_grid, snap_grid_centre
         from data.ogn_client import SOARING_AC_TYPES
         from pipeline.feature_engineering import (build_feature_matrix, cyclic,
@@ -1452,7 +1460,7 @@ class ThermalModel:
                     if row[COL_ALT_AGL] < _MIN_SAMPLE_AGL:
                         on_ground += 1
                         continue
-                    if _above_thermal_base(alt, row[2], meteo["cape_base"]):
+                    if _above_thermal_base(alt, row[2], thermal_top_agl(meteo)):
                         above_base += 1
                         continue
                     label = _label_for(bool(circling), float(vario))

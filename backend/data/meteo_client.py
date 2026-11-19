@@ -130,7 +130,6 @@ _FALLBACK: dict = {
     "temp_850":      5.0,
     "temp_500":    -12.0,
     "lapse_rate":    4.9,
-    "cape_base":    1200,
     "pbl_height":  1500.0,
     "soil_temp":     20.0,
 }
@@ -314,9 +313,9 @@ async def fetch_meteo_features(lat: float, lon: float, forecast_h: float,
             return _interp(hourly[key][i0], hourly[key][i1], w,
                            _FALLBACK[fb_key], circular)
 
-        # The derived values below (lapse rate, cloud base) are computed from
-        # the interpolated temperatures, not interpolated themselves, so they
-        # stay consistent with the three numbers they are built from.
+        # The lapse rate below is computed from the interpolated temperatures,
+        # not interpolated itself, so it stays consistent with the numbers it
+        # is built from.  The thermal top is too, by thermal_top_agl at use.
         t2m  = _v("temperature_2m",     "temp_2m")
         t850 = _v("temperature_850hPa", "temp_850")
         t500 = _v("temperature_500hPa", "temp_500")
@@ -332,7 +331,6 @@ async def fetch_meteo_features(lat: float, lon: float, forecast_h: float,
             "temp_850":   t850,
             "temp_500":   t500,
             "lapse_rate": (t850 - t500) / 3.5,
-            "cape_base":  max(0, int(((t2m - 8) / max(1, (t2m - t850) / 1.5)) * 1000)),
             "pbl_height": _v("boundary_layer_height",     "pbl_height"),
             "soil_temp":  _v("soil_temperature_0_to_7cm", "soil_temp"),
             # Display only — see DISPLAY_VARS.  .get: a slot or a whole
@@ -371,6 +369,96 @@ def is_synthetic(meteo: dict) -> bool:
     fallback to _FALLBACK directly and it would break every one of them.
     """
     return meteo == _FALLBACK
+
+
+# --- thermal top ---------------------------------------------------------------
+#
+# How high thermals reach, in metres above the ground.  Dry thermals stop at the
+# top of the convective boundary layer; where the layer clears the condensation
+# level they stop at cloud base instead, because that is where cumulus forms and
+# where a glider has to leave the climb.  So the top is the lower of the two.
+#
+# Cloud base is the lifting condensation level of a surface parcel: about 125 m
+# per degree C of dew-point spread (Lawrence 2005, BAMS 86:225 -- the pilot's
+# "400 ft per degree").  The layer height is Open-Meteo's boundary_layer_height,
+# already in every request.
+#
+# It replaced `cape_base`, (t2m - 8) / max(1, (t2m - t850) / 1.5) * 1000, on
+# 19 Nov 2026.  That formula read no humidity and no layer height: 0 m (filter
+# off) on every hour under 8 degC, tens of kilometres wherever 2 m and 850 hPa
+# were within 1.5 degC of each other, and 2,273 m at Inonu that noon against a
+# 900 m cloud base.  Measured against how high thermalling aircraft actually
+# climbed in 978 (0.5 deg, hour) buckets of the archive, Spearman 0.73 and a
+# median miss of 229 m here against 0.55 and 715 m there -- see CLAUDE.md.
+_LCL_M_PER_C = 125.0
+# Magnus coefficients over water (Alduchov & Eskridge 1996).
+_MAGNUS_A, _MAGNUS_B = 17.625, 243.04
+
+
+def dew_point_c(temp_c: float, rh_frac: float) -> float | None:
+    """Dew point in degrees C from air temperature and relative humidity (0-1)."""
+    if temp_c is None or rh_frac is None or rh_frac <= 0:
+        return None
+    rh = min(float(rh_frac), 1.0)
+    g = math.log(rh) + _MAGNUS_A * temp_c / (_MAGNUS_B + temp_c)
+    return _MAGNUS_B * g / (_MAGNUS_A - g)
+
+
+def lcl_agl(temp_c: float, rh_frac: float) -> float | None:
+    """Condensation level of a surface parcel, metres above ground — the cumulus base."""
+    td = dew_point_c(temp_c, rh_frac)
+    if td is None:
+        return None
+    return max(0.0, (temp_c - td) * _LCL_M_PER_C)
+
+
+def thermal_top_agl(meteo: dict) -> float | None:
+    """How high thermals reach, metres above ground: min(boundary layer, cloud base).
+
+    Reads only temp_2m, humidity and pbl_height, which every meteo dict carries
+    -- including historical-cache entries written before this function existed,
+    so nothing on disk needs rewriting.  None when one of the three is missing:
+    that is "no estimate", and callers must not filter on it.  0 is an estimate
+    (saturated air at 2 m: fog or stratus on the ground), not a missing value.
+    """
+    lcl = lcl_agl(meteo.get("temp_2m"), meteo.get("humidity"))
+    pbl = meteo.get("pbl_height")
+    if lcl is None or pbl is None:
+        return None
+    return min(max(float(pbl), 0.0), lcl)
+
+
+def thermal_top_columns(X):
+    """thermal_top_agl over feature rows (temp_2m, humidity, pbl_height columns).
+
+    The three inputs are columns 5, 6 and 19 of build_feature_matrix, so a
+    buffer row carries everything needed to recompute its own thermal top.
+    NaN where humidity is not positive (no dew point).
+    """
+    import numpy as np
+    X = np.asarray(X, dtype=float)
+    t, rh, pbl = X[:, 5], X[:, 6], X[:, 19]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        g = np.log(np.clip(rh, None, 1.0)) + _MAGNUS_A * t / (_MAGNUS_B + t)
+        td = _MAGNUS_B * g / (_MAGNUS_A - g)
+    lcl = np.maximum((t - td) * _LCL_M_PER_C, 0.0)
+    top = np.minimum(np.maximum(pbl, 0.0), lcl)
+    return np.where(rh > 0, top, np.nan)
+
+
+def _with_legacy_base(meteo: dict) -> dict:
+    """Write the thermal top under the old `cape_base` key too, for a rollback.
+
+    Nothing in this code reads `cape_base` any more -- it recomputes the top
+    from the fields, so cache entries written under the old formula are read
+    correctly.  But the historical cache is permanent and an older image reads
+    `meteo["cape_base"]` from every entry: without the key its /seed would fail
+    each beacon of every bucket cached after the switch.  It gets the new value,
+    which is the better one for it as well.
+    """
+    top = thermal_top_agl(meteo)
+    meteo["cape_base"] = 0 if top is None else int(round(top))
+    return meteo
 
 
 # The feature columns _FALLBACK lands in, with the value each one takes.  A real
@@ -531,7 +619,7 @@ async def fetch_meteo_historical(
         t850 = _v("temperature_850hPa", "temp_850")
         t500 = _v("temperature_500hPa", "temp_500")
         _count_live(hit=False, historical=True)
-        return _hist_cache_put(ckey, {
+        return _hist_cache_put(ckey, _with_legacy_base({
             "temp_2m":    t2m,
             "humidity":   _v("relativehumidity_2m",        "humidity_pct") / 100,
             "wind_speed": _v("windspeed_10m",              "wind_speed"),
@@ -542,10 +630,9 @@ async def fetch_meteo_historical(
             "temp_850":   t850,
             "temp_500":   t500,
             "lapse_rate": (t850 - t500) / 3.5,
-            "cape_base":  max(0, int(((t2m - 8) / max(1, (t2m - t850) / 1.5)) * 1000)),
             "pbl_height": _v("boundary_layer_height",      "pbl_height"),
             "soil_temp":  _v("soil_temperature_0_to_7cm",  "soil_temp"),
-        })
+        }))
     except Exception as exc:
         detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
         log.warning(

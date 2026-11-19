@@ -213,7 +213,9 @@ async def fetch_historical_meteo(client: httpx.AsyncClient,
             "temp_850":   t850,
             "temp_500":   t500,
             "lapse_rate": (t850 - t500) / 3.5 if (t850 and t500) else 5.0,
-            "cape_base":  max(0, int(((t2m - 8) / max(1, (t2m - t850) / 1.5)) * 1000)) if t850 else 1200,
+            # No cape_base: nothing here read it, and its replacement
+            # (meteo_client.thermal_top_agl) needs a boundary layer height this
+            # smaller variable set does not request.
         }
     except Exception as exc:
         log.debug(f"[meteo] {date_str} {lat:.2f}/{lon:.2f} failed: {exc}")
