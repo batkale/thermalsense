@@ -56,6 +56,15 @@ TERRAIN_SOURCE    = os.getenv("TERRAIN_SOURCE", "copernicus").strip().lower()
 #   600 grid centres      185 MB kept         64 grids kept
 TERRAIN_GRID_CACHE  = int(os.getenv("TERRAIN_GRID_CACHE", "64"))
 TERRAIN_POINT_CACHE = int(os.getenv("TERRAIN_POINT_CACHE", "200000"))
+# Full-resolution terrain columns (pipeline/hires_terrain.py) per grid centre:
+# 201 x 201 x 8 float32 = 1.3 MB each, so 16 is ~21 MB.  Memory only — a grid is
+# rebuilt from the Copernicus blocks (dem_client's LRU) in well under a second,
+# and keeping one on disk per centre would be ~2 GB a day at ~2,900 new centres.
+TERRAIN_HIRES_CACHE = int(os.getenv("TERRAIN_HIRES_CACHE", "16"))
+# How long one retrain cycle may spend filling the full-resolution columns into
+# buffer rows collected before they existed.  Fits wait until it is done, so the
+# first wider model is judged on complete rows; ~33k rows take a few cycles.
+HIRES_BACKFILL_BUDGET_S = float(os.getenv("HIRES_BACKFILL_BUDGET_S", "60"))
 
 # Candidate grids one retrain cycle may sample, and how long it may spend doing
 # it.  The old fixed 20 was chosen to spare the terrain API's 1,000/day — which

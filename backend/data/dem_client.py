@@ -179,6 +179,106 @@ async def _block(name: str, meta: dict, idx: int) -> np.ndarray:
     return arr
 
 
+def _pixels(meta: dict, lat: np.ndarray, lon: np.ndarray):
+    """pixel_index over arrays: same rounding, same clamping."""
+    fx = (lon - meta["lon0"]) / meta["dx"]
+    fy = (meta["lat0"] - lat) / meta["dy"]
+    if meta["point"]:
+        col, row = np.round(fx), np.round(fy)
+    else:
+        col, row = np.floor(fx), np.floor(fy)
+    return (np.clip(row, 0, meta["height"] - 1).astype(np.int64),
+            np.clip(col, 0, meta["width"] - 1).astype(np.int64))
+
+
+async def load_window(south: float, north: float, west: float, east: float) -> dict:
+    """
+    Every block covering a box, read through the usual cache: {tile name: (meta, {block: array})}.
+
+    The network half of an array read.  The other half, sample_window, is pure
+    numpy over what this returns, so callers can run it in a worker thread —
+    a full-resolution grid is ~4M sample points, and that much arithmetic on
+    the event loop stalls every live frame behind it.  meta is None for a tile
+    that is not published.  A read that fails raises.
+    """
+    window: dict = {}
+    async with _get_lock():
+        for tl in range(math.ceil(south) - 1, math.ceil(north)):
+            for tn in range(math.floor(west), math.floor(east) + 1):
+                name = tile_name(tl, tn)
+                meta = await _header(name)
+                if meta is None:
+                    window[name] = (None, {})
+                    continue
+                (r0, r1), (c0, c1) = zip(*(_pixels(meta, np.array([la]), np.array([lo]))
+                                           for la, lo in ((north, west), (south, east))))
+                tw, th = meta["tile_w"], meta["tile_h"]
+                across = -(-meta["width"] // tw)
+                blocks = {}
+                for br in range(int(r0[0]) // th, int(r1[0]) // th + 1):
+                    for bc in range(int(c0[0]) // tw, int(c1[0]) // tw + 1):
+                        idx = br * across + bc
+                        blocks[idx] = await _block(name, meta, idx)
+                window[name] = (meta, blocks)
+    return window
+
+
+def sample_window(window: dict, lats, lons) -> np.ndarray:
+    """
+    Elevation at every (lat, lon) from a load_window result; NaN where unknown.
+
+    No awaits and no shared state, so it is safe in a worker thread.  Same tile
+    naming and pixel rule as fetch_elevations — a test pins the two together.
+    Tiles are told apart by one integer each, not np.unique over (lat, lon)
+    pairs: that sorted every point and cost ~4 s of a 4.5 s grid.
+    """
+    lats = np.asarray(lats, dtype=float)
+    lons = np.asarray(lons, dtype=float)
+    flat_lat, flat_lon = lats.ravel(), lons.ravel()
+    out = np.full(flat_lat.shape, np.nan, dtype=np.float32)
+    if not len(flat_lat):
+        return out.reshape(lats.shape)
+    tile_key = (np.ceil(flat_lat).astype(np.int64) - 1) * 1000 + np.floor(flat_lon).astype(np.int64)
+    one_tile = bool((tile_key == tile_key[0]).all())
+    for key in ([tile_key[0]] if one_tile else np.unique(tile_key)):
+        sel = np.arange(len(tile_key)) if one_tile else np.flatnonzero(tile_key == key)
+        name = tile_name(int(np.ceil(flat_lat[sel[0]])) - 1, int(np.floor(flat_lon[sel[0]])))
+        meta, blocks = window.get(name, (None, {}))
+        if meta is None:
+            continue
+        row, col = _pixels(meta, flat_lat[sel], flat_lon[sel])
+        tw, th = meta["tile_w"], meta["tile_h"]
+        blk = (row // th) * (-(-meta["width"] // tw)) + (col // tw)
+        present = np.unique(blk)
+        for idx in present:
+            if int(idx) not in blocks:
+                raise KeyError(f"block {idx} of {name} is outside the loaded window")
+            k = slice(None) if len(present) == 1 else blk == idx
+            v = blocks[int(idx)][row[k] % th, col[k] % tw].astype(np.float32)
+            v[~(np.isfinite(v) & (v > -1000))] = np.nan
+            out[sel[k]] = v
+    return out.reshape(lats.shape)
+
+
+async def sample_elevations(lats, lons) -> np.ndarray:
+    """
+    Elevation at every (lat, lon) in two same-shaped arrays; NaN where unknown.
+
+    load_window over the points' own box, then sample_window — on the event
+    loop, so for small reads.  The full-resolution columns call the two halves
+    separately and run the second in a thread.  An unpublished tile is NaN, as
+    it is None in fetch_elevations; a read that fails raises.
+    """
+    lats = np.asarray(lats, dtype=float)
+    lons = np.asarray(lons, dtype=float)
+    if lats.size == 0:
+        return np.full(lats.shape, np.nan, dtype=np.float32)
+    window = await load_window(lats.min(), lats.max(), lons.min(), lons.max())
+    out = sample_window(window, lats, lons)
+    _tick(points=int(np.isfinite(out).sum()), missing=int(np.isnan(out).sum()))
+    return out
+
+
 async def fetch_elevations(points: list[tuple[float, float]]) -> dict[tuple[float, float], float | None]:
     """
     Elevation in metres for each (lat, lon), or None where it cannot be read.

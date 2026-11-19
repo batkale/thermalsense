@@ -10,10 +10,24 @@ from pathlib import Path
 from config import (MODEL_PATH, BUFFER_PATH, GRID_RADIUS, LAT_MIN, LAT_MAX, LON_MIN, LON_MAX,
                     XGB_FIT_THREADS, XGB_PREDICT_THREADS, ENABLE_LANDCOVER,
                     MAX_SAMPLE_GRIDS, SAMPLE_TIME_BUDGET_S, TERRAIN_SOURCE,
-                    SEED_METEO_BUDGET, SEED_TIME_BUDGET_S)
+                    SEED_METEO_BUDGET, SEED_TIME_BUDGET_S, HIRES_BACKFILL_BUDGET_S)
 from evaluation.holdout import split as bench_split
 from evaluation.metrics import grouped_auc, paired_delta_ci
-from pipeline.feature_engineering import FEATURE_COUNT
+from pipeline.feature_engineering import FEATURE_COUNT, COL_HIRES, HIRES_COUNT, LEGACY_WIDTHS
+
+
+def _model_view(clf, X: np.ndarray) -> np.ndarray:
+    """
+    The columns a model was fitted on: all of X, or the leading prefix.
+
+    A model from before the full-resolution terrain columns was fitted on 22,
+    which are exactly the first 22 of today's 30 (LEGACY_WIDTHS).  It keeps
+    serving on those during the switch, and the gate scores it on the same rows
+    as a 30-column challenger — which is how the new columns have to earn their
+    place on live data rather than on a promise.
+    """
+    width = getattr(clf, "n_features_in_", None)
+    return X if width is None or width == X.shape[1] else X[:, :width]
 
 
 def _set_aside(path: Path, suffix: str) -> Path | None:
@@ -241,8 +255,11 @@ _MAX_BUFFER  = 200_000
 # lattice, so a handful covers nearly every beacon in it.  Each entry is an
 # elevation grid (~320 KB) plus its matrix (~7 MB), so this is the largest thing
 # the seed holds: 4 is ~29 MB, which the container has, and a dict with no
-# ceiling is what it does not.
+# ceiling is what it does not.  (30 columns made each matrix ~9.7 MB: ~39 MB.)
 _SEED_GRID_CACHE = 4
+
+# Buffer rows per full-resolution read during the fill-in (~50k sample points).
+_BACKFILL_CHUNK = 512
 
 
 # Columns holding the cyclic day-of-year encoding.  Every row collected on one
@@ -382,6 +399,12 @@ class ThermalModel:
         self.last_fit: dict | None = None
         self.last_seed: dict | None = None
         self._summary_cache: tuple[int, dict] | None = None
+        # Set when load() widened an old buffer: its rows carry NaN where the
+        # full-resolution terrain columns go until _backfill_hires reads them.
+        # Fits wait for it, so the first wider model is judged on complete rows.
+        self._hires_backfill = False
+        self._hires_tried: set[int] = set()   # id() of rows already attempted
+        self._hires_filled = 0
 
     def _note_fit(self, outcome: str, **detail) -> None:
         self.last_fit = {
@@ -480,7 +503,16 @@ class ThermalModel:
         meteo columns, which are constant within a group, so it cannot change
         within-group ranking and would only add variance.
         """
-        return clf.predict_proba(X)[:, 1] * self._terrain_multiplier(X)
+        return clf.predict_proba(_model_view(clf, X))[:, 1] * self._terrain_multiplier(X)
+
+    def hires_status(self) -> dict:
+        """Progress of the full-resolution terrain fill-in, for /training/status."""
+        remaining = sum(1 for r in self._buffer_X
+                        if np.isnan(r[COL_HIRES]) and id(r) not in self._hires_tried)
+        width = getattr(self.model, "n_features_in_", None)
+        return {"backfill_pending": self._hires_backfill, "rows_remaining": remaining,
+                "rows_filled": self._hires_filled, "model_width": width,
+                "feature_count": FEATURE_COUNT}
 
     @property
     def is_loaded(self) -> bool:
@@ -493,7 +525,14 @@ class ThermalModel:
             candidate = xgb.XGBClassifier()
             candidate.load_model(str(p))
             width = getattr(candidate, "n_features_in_", None)
-            if width is not None and width != FEATURE_COUNT:
+            if width in LEGACY_WIDTHS:
+                # Its columns are a prefix of today's: keep it serving on them
+                # until a fit on the full width replaces it through the gate.
+                self.model = _for_serving(candidate)
+                log.info(f"[model] loaded a {width}-column model from {MODEL_PATH}; it "
+                         f"serves on the first {width} of {FEATURE_COUNT} columns until a "
+                         f"{FEATURE_COUNT}-column fit replaces it")
+            elif width is not None and width != FEATURE_COUNT:
                 # Serving with a stale model is worse than not serving with one:
                 # predict_proba raises a shape mismatch deep inside /predict,
                 # which reaches the client as a bare 500 and an empty map. The
@@ -524,7 +563,7 @@ class ThermalModel:
                 # Absent means written before labels were versioned, i.e. v1.
                 if "label_version" in data.files:
                     label_version = int(data["label_version"])
-                if width == FEATURE_COUNT:
+                if width == FEATURE_COUNT or width in LEGACY_WIDTHS:
                     X = data["X"]
                     y = data["y"].astype(int)
         except Exception as exc:
@@ -532,7 +571,8 @@ class ThermalModel:
             _set_aside(bp, ".unreadable")
             return
 
-        if width == FEATURE_COUNT and label_version != _LABEL_VERSION:
+        usable = width == FEATURE_COUNT or width in LEGACY_WIDTHS
+        if usable and label_version != _LABEL_VERSION:
             dest = _set_aside(bp, f".labels-v{label_version}")
             log.warning(
                 f"[model] buffer was labelled under rule v{label_version}, current is "
@@ -550,7 +590,18 @@ class ThermalModel:
                 log.warning(f"[model] could not write an empty buffer ({exc})")
             return
 
-        if width != FEATURE_COUNT:
+        if width in LEGACY_WIDTHS:
+            # An older layout whose columns are a prefix of today's: keep every
+            # row and append the new columns as unknown.  _backfill_hires reads
+            # them in from each row's own cell, which is the cell the live grid
+            # would compute them for, and fits wait until it is done.  Setting
+            # the buffer aside instead would throw away weeks of collection and
+            # leave the gate without a benchmark for as long again.
+            X = np.hstack([X, np.full((len(X), FEATURE_COUNT - width), np.nan)])
+            self._hires_backfill = len(X) > 0
+            log.info(f"[model] buffer has {width} features: widened to {FEATURE_COUNT}, "
+                     f"{len(X)} rows to fill in with full-resolution terrain")
+        elif width != FEATURE_COUNT:
             # Set aside, not deleted: the samples are still real observations and
             # are expensive to re-collect, even though the feature layout has moved
             # on and they can no longer be mixed with new ones.
@@ -650,16 +701,18 @@ class ThermalModel:
         """
         from data.ogn_client import fetch_ogn_gliders, is_thermal_evidence
         from data.meteo_client import fetch_meteo_features, live_usage as meteo_live_usage
-        from data.terrain_client import fetch_elevation_grid, snap_grid_centre
+        from data.terrain_client import fetch_elevation_grid, fetch_hires_grid, snap_grid_centre
         from pipeline.feature_engineering import build_feature_matrix
 
         try:
             gliders = await fetch_ogn_gliders()
         except Exception as exc:
             log.warning(f"[model] OGN unreachable ({exc}) — skipping retrain")
+            await self._backfill_hires(HIRES_BACKFILL_BUDGET_S)
             return
         if not gliders:
             log.info("[model] no gliders returned — skipping")
+            await self._backfill_hires(HIRES_BACKFILL_BUDGET_S)
             return
 
         now = datetime.now(timezone.utc)
@@ -670,6 +723,8 @@ class ThermalModel:
         soaring = [g for g in gliders if is_thermal_evidence(g)]
         if not soaring:
             log.info("[model] no soaring aircraft in view — skipping")
+            # Quiet hours are when the fill-in has the network to itself.
+            await self._backfill_hires(HIRES_BACKFILL_BUDGET_S)
             return
         candidates = soaring[:MAX_SAMPLE_GRIDS]
         # Stop on whichever bound arrives first — see MAX_SAMPLE_GRIDS.
@@ -715,6 +770,12 @@ class ThermalModel:
                 if elev is None:
                     no_terrain += 1
                     continue
+                # Same contract for the full-resolution columns: a grid with
+                # holes punched by a failed read is not the ground.
+                hires = await fetch_hires_grid(g["lat"], g["lon"], strict=True, shape=elev.shape)
+                if hires is None:
+                    no_terrain += 1
+                    continue
                 # Bounds must come from the SNAPPED centre, not the raw glider
                 # position: fetch_elevation_grid builds and caches the array for
                 # the snapped point, so pairing it with unsnapped bounds labels
@@ -730,6 +791,7 @@ class ThermalModel:
                     lon_bounds=lon_bounds,
                     alt_amsl=g["alt"],
                     land_use_props=await _land_props(g["lat"], g["lon"], elev.shape),
+                    hires=hires,
                 )
                 # Every soaring aircraft inside this grid, not just the one it is
                 # centred on.  They share the grid's weather and terrain, so they
@@ -818,6 +880,10 @@ class ThermalModel:
         # away real work; durability must not depend on reaching the fit threshold.
         self._save_buffer()
 
+        # Rows from before the full-resolution columns get them filled in, a
+        # bounded slice per cycle; fit_and_gate waits until none are left.
+        await self._backfill_hires(HIRES_BACKFILL_BUDGET_S)
+
         # to_thread for the same reason as predict(): the fit is pure CPU and the
         # app runs a single worker, so calling it inline froze every request for
         # the duration of the boosting run.  Only one fit runs at a time — both
@@ -825,6 +891,51 @@ class ThermalModel:
         # single attribute assignment, so a concurrent predict() sees either the
         # old model or the new one, never a half-built state.
         await asyncio.to_thread(self.fit_and_gate)
+
+    async def _backfill_hires(self, budget_s: float) -> None:
+        """
+        Read the full-resolution terrain columns into rows that predate them.
+
+        Each row's lat/lon is its grid cell's centre, so this computes exactly
+        what the live grid computes for that cell.  Bounded by budget_s per call
+        and resumed next cycle; a read failure pauses it rather than marking
+        rows done.  A row whose ground has no published tile stays NaN (unknown)
+        and is not retried.  When nothing is left, fits resume.
+        """
+        if not self._hires_backfill:
+            return
+        from data.terrain_client import hires_at_points
+        todo = [r for r in self._buffer_X
+                if np.isnan(r[COL_HIRES]) and id(r) not in self._hires_tried]
+        # By area, so consecutive rows share Copernicus blocks instead of
+        # evicting each other from dem_client's small LRU.
+        todo.sort(key=lambda r: (np.floor(r[0] * 4), np.floor(r[1] * 4)))
+        deadline = time.monotonic() + budget_s
+        done = 0
+        for s in range(0, len(todo), _BACKFILL_CHUNK):
+            if time.monotonic() > deadline:
+                break
+            chunk = todo[s:s + _BACKFILL_CHUNK]
+            try:
+                h = await hires_at_points(np.array([r[0] for r in chunk]),
+                                          np.array([r[1] for r in chunk]))
+            except Exception as exc:
+                log.warning(f"[model] terrain fill-in paused ({exc}) — the next cycle resumes it")
+                break
+            for r, v in zip(chunk, h):
+                r[COL_HIRES:COL_HIRES + HIRES_COUNT] = v
+                self._hires_tried.add(id(r))
+            done += len(chunk)
+            self._hires_filled += int(np.isfinite(h[:, 0]).sum())
+        left = len(todo) - done
+        if done:
+            self._save_buffer()
+            log.info(f"[model] full-resolution terrain filled into {done} buffer rows, "
+                     f"{left} left")
+        if left == 0:
+            self._hires_backfill = False
+            log.info(f"[model] terrain fill-in complete ({self._hires_filled} rows with "
+                     f"values) — fits resume")
 
     def fit_and_gate(self) -> None:
         """
@@ -837,6 +948,17 @@ class ThermalModel:
         made those tests slow and indirect.
         """
         n = len(self._buffer_X)
+        if self._hires_backfill:
+            # A wider model fitted on rows whose new columns are still unknown
+            # would be judged on the old columns alone, and could be accepted
+            # or rejected for reasons that have nothing to do with the new ones.
+            # The serving model keeps serving meanwhile.
+            status = self.hires_status()
+            log.info(f"[model] full-resolution terrain still being filled in "
+                     f"({status['rows_remaining']} rows left) — holding the fit")
+            self._note_fit("filling_in_terrain", samples=n,
+                           remaining=status["rows_remaining"])
+            return
         if n < _MIN_SAMPLES:
             log.info(f"[model] buffer {n}/{_MIN_SAMPLES} samples — skipping fit")
             self._note_fit("too_few_samples", samples=n, need=_MIN_SAMPLES)
@@ -952,6 +1074,7 @@ class ThermalModel:
                 return
 
             baseline = self._saved_bench_score()
+            delta = None
             if baseline is not None:
                 # Both models scored on the *same* rows, so the comparison is
                 # paired: shared sampling noise cancels in the difference, which
@@ -979,6 +1102,8 @@ class ThermalModel:
                             delta=[round(delta["lo"], 4), round(delta["point"], 4),
                                    round(delta["hi"], 4)],
                             skips=self._skipped_fits, max_skips=_MAX_CONSECUTIVE_SKIPS,
+                            width=int(getattr(clf, "n_features_in_", X.shape[1])),
+                            serving_width=getattr(self.model, "n_features_in_", None),
                         )
                         self._save_buffer()   # samples are still worth keeping
                         return
@@ -991,10 +1116,17 @@ class ThermalModel:
                     )
             rebaselined = self._skipped_fits >= _MAX_CONSECUTIVE_SKIPS
             self._skipped_fits = 0
+            # The paired delta on these rows, and the width each side was fitted
+            # on: the 22 -> 30 column switch is decided here, and it should be
+            # readable on the status panel rather than only in the log.
             self._note_fit("rebaselined" if rebaselined else "accepted",
                            samples=n, positives=pos, groups=bench["groups"],
                            score=round(score, 4),
-                           serving=None if baseline is None else round(baseline, 4))
+                           serving=None if baseline is None else round(baseline, 4),
+                           delta=None if delta is None else
+                           [round(delta["lo"], 4), round(delta["point"], 4), round(delta["hi"], 4)],
+                           width=int(getattr(clf, "n_features_in_", X.shape[1])),
+                           serving_width=getattr(self.model, "n_features_in_", None))
             clf.get_booster().set_attr(**{_BENCH_ATTR: f"{score:.6f}"})
             log.info(
                 f"[model] retrained on {len(yf)} samples ({fit_pos} positives), "
@@ -1038,7 +1170,7 @@ class ThermalModel:
         from datetime import datetime, timezone, timedelta
         import sqlite3
         from data.meteo_client import fetch_meteo_historical
-        from data.terrain_client import fetch_elevation_grid, snap_grid_centre
+        from data.terrain_client import fetch_elevation_grid, fetch_hires_grid, snap_grid_centre
         from data.ogn_client import SOARING_AC_TYPES
         from pipeline.feature_engineering import (build_feature_matrix, cyclic,
                                                   COL_ALT_AGL, COL_HOUR_SIN,
@@ -1284,12 +1416,17 @@ class ThermalModel:
                         if elev is None:
                             no_terrain += 1
                             continue
+                        hires = await fetch_hires_grid(lat, lon, strict=True, shape=elev.shape)
+                        if hires is None:
+                            no_terrain += 1
+                            continue
                         base = build_feature_matrix(
                             meteo, elev, dt=dt,
                             lat_bounds=lat_bounds,
                             lon_bounds=lon_bounds,
                             alt_amsl=None,
                             land_use_props=await _land_props(lat, lon, elev.shape),
+                            hires=hires,
                         )
                         if len(grid_cache) >= _SEED_GRID_CACHE:
                             grid_cache.clear()
@@ -1371,7 +1508,7 @@ class ThermalModel:
         # applies it internally, so it is not re-applied there.
         terrain = self._terrain_multiplier(features)
         scorer = (
-            (lambda f: self.model.predict_proba(f)[:, 1] * terrain)
+            (lambda f: self.model.predict_proba(_model_view(self.model, f))[:, 1] * terrain)
             if self.model
             else (lambda f: np.array(self._physics_fallback(f)))
         )

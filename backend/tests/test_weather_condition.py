@@ -175,7 +175,7 @@ def test_display_fields_do_not_reach_the_feature_matrix():
     a = build_feature_matrix(base, elev, **kw)
     b = build_feature_matrix(extra, elev, **kw)
     assert a.shape[1] == b.shape[1] == FEATURE_COUNT
-    assert np.array_equal(a, b)
+    assert np.array_equal(a, b, equal_nan=True)   # unsupplied terrain columns are NaN in both
 
 
 # ---------------------------------------------------------------------------

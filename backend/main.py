@@ -446,6 +446,7 @@ async def training_status():
             "benchmark_score": model._saved_bench_score(),
             "last_fit": model.last_fit,
             "retrain_interval_s": UPDATE_INTERVAL,
+            "full_resolution_terrain": model.hires_status(),
         },
         "buffer": await section(model.training_summary),
         "last_seed": model.last_seed,
@@ -569,10 +570,18 @@ async def compute_prediction(lat: float, lon: float, alt: int | float | None,
     """
     issued_at = datetime.now(timezone.utc)
     grid_lat, grid_lon = snap_grid_centre(lat, lon)
-    meteo, terrain = await asyncio.gather(
+    meteo, terrain, hires = await asyncio.gather(
         fetch_meteo_features(lat, lon, forecast_h),
         fetch_elevation_grid(lat, lon),
+        terrain_client.fetch_hires_grid(lat, lon),
     )
+    # Fetched alongside the elevation grid, so it assumes that grid's usual
+    # shape.  They always agree in production; if they ever did not, unknown
+    # terrain is a degraded map where a shape error would be an empty one.
+    if hires.shape[0] != terrain.size:
+        log.warning(f"[predict] full-resolution grid {hires.shape[0]} cells vs elevation "
+                    f"{terrain.shape} — columns left unknown")
+        hires = None
     # The fallback is invented weather (a summer afternoon in southern England)
     # that used to reach the map without a word.  Say so on the wire.
     meteo_fallback = meteo_client.is_synthetic(meteo)
@@ -595,6 +604,7 @@ async def compute_prediction(lat: float, lon: float, alt: int | float | None,
         lon_bounds=(grid_lon - radius, grid_lon + radius),
         alt_amsl=alt_amsl,
         land_use_props=land_props,
+        hires=hires,
     )
     grid_rows, grid_cols = terrain.shape
     # to_thread, not inline: predict() runs _MC_SAMPLES synchronous passes

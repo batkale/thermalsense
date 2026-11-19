@@ -112,8 +112,23 @@ def test_land_use_heat_column():
 
 
 def test_no_nan_in_output():
+    """Everything computed here is a number; only terrain nobody supplied is unknown."""
+    from pipeline.feature_engineering import COL_HIRES
     mat = build_feature_matrix(METEO, ELEV, dt=DT)
-    assert not np.any(np.isnan(mat))
+    assert not np.any(np.isnan(mat[:, :COL_HIRES]))
+    assert np.isnan(mat[:, COL_HIRES:]).all()       # unknown, never a made-up zero
+
+
+def test_full_resolution_terrain_lands_in_the_last_eight_columns():
+    from pipeline.feature_engineering import COL_HIRES, HIRES_COUNT
+    n = ELEV.size
+    hires = np.arange(n * HIRES_COUNT, dtype=float).reshape(n, HIRES_COUNT)
+    mat = build_feature_matrix(METEO, ELEV, dt=DT, hires=hires)
+    assert mat.shape[1] == COL_HIRES + HIRES_COUNT == FEATURE_COUNT
+    assert np.array_equal(mat[:, COL_HIRES:], hires)
+    assert np.array_equal(mat[:, :COL_HIRES], build_feature_matrix(METEO, ELEV, dt=DT)[:, :COL_HIRES])
+    with pytest.raises(ValueError):
+        build_feature_matrix(METEO, ELEV, dt=DT, hires=hires[:-1])
 
 
 def test_lat_lon_bounds_applied():

@@ -7,7 +7,17 @@ _CELL_SIZE_M = GRID_RES * 111_320  # metres per degree (latitude direction, ~55 
 # Width of one feature row. Buffers written under a different width describe a
 # different feature space and cannot be mixed, so ThermalModel.load() checks
 # against this rather than a literal that would silently drift.
-FEATURE_COUNT = 22
+FEATURE_COUNT = 30
+
+# The eight full-resolution terrain columns (pipeline/hires_terrain.py) sit at
+# the END, 22-29, so a row of the old 22-column layout is exactly a prefix of a
+# row today.  That is what lets the switch to 30 columns happen without a dark
+# period: ThermalModel keeps serving a 22-column model on the first 22 columns,
+# and keeps a 22-column buffer by appending the new columns and filling them in.
+# Any future column must be appended the same way, and its old width added here.
+COL_HIRES = 22
+HIRES_COUNT = 8
+LEGACY_WIDTHS = (22,)
 
 # The three columns that depend on the individual observation rather than on the
 # grid it sits in: everything else in a row is a property of the patch of ground
@@ -77,7 +87,8 @@ def build_feature_matrix(meteo: dict, elev_grid: np.ndarray,
                          lat_bounds: tuple[float, float] | None = None,
                          lon_bounds: tuple[float, float] | None = None,
                          alt_amsl: float | None = None,
-                         land_use_props: tuple[np.ndarray, np.ndarray] | None = None) -> np.ndarray:
+                         land_use_props: tuple[np.ndarray, np.ndarray] | None = None,
+                         hires: np.ndarray | None = None) -> np.ndarray:
     """
     Build a flat (N, FEATURE_COUNT) feature matrix — one row per grid cell.
 
@@ -104,6 +115,13 @@ def build_feature_matrix(meteo: dict, elev_grid: np.ndarray,
         19 pbl_height
         20 soil_temp
         21 alt_agl
+        22-29 slope_hr, northness_hr, eastness_hr, rugged,
+              tpi_150, tpi_400, tpi_1000, tpi_2500   (full-resolution terrain)
+
+    hires is those eight columns per cell, (N, 8) in this function's cell order,
+    from data.terrain_client.fetch_hires_grid.  Without it they are NaN —
+    unknown, which the model handles — never zero, which would be a claim about
+    the ground.
 
     Pass lat_bounds=(south, north) and lon_bounds=(west, east) to embed real
     geographic coordinates; otherwise row/column indices are used as placeholders.
@@ -165,6 +183,12 @@ def build_feature_matrix(meteo: dict, elev_grid: np.ndarray,
     )
 
     n = rows * cols
+    if hires is None:
+        hires = np.full((n, HIRES_COUNT), np.nan)
+    elif np.shape(hires) != (n, HIRES_COUNT):
+        # A grid of another size, or another order, would put one patch of
+        # ground's terrain on a different patch's row — refuse rather than guess.
+        raise ValueError(f"hires is {np.shape(hires)}, expected {(n, HIRES_COUNT)}")
     mat = np.column_stack([
         lat_grid.ravel(),                       # 0  lat
         lon_grid.ravel(),                       # 1  lon
@@ -188,5 +212,6 @@ def build_feature_matrix(meteo: dict, elev_grid: np.ndarray,
         np.full(n, meteo["pbl_height"]),        # 19 pbl_height
         np.full(n, meteo["soil_temp"]),         # 20 soil_temp
         alt_agl.ravel(),                        # 21 alt_agl
+        hires,                                  # 22-29 full-resolution terrain
     ])
     return mat
