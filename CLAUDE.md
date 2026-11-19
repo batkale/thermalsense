@@ -26,7 +26,7 @@ All backend commands run from `backend/`. A Windows venv exists at
 `backend/.venv` with every dependency installed — prefer it.
 
 ```bash
-# Tests — 374 tests, ~15 s (needs pyarrow, or the archive tests skip)
+# Tests — ~500 tests, ~15 s (needs pyarrow, or the archive tests skip)
 cd backend && ./.venv/Scripts/python.exe -m pytest tests/ -q
 
 # Single test file
@@ -202,6 +202,12 @@ Breaking any of these has taken the app down or silently corrupted results befor
   0.1° is not a compromise: `build_feature_matrix` already spreads one point
   sample across the whole 11 km grid. The synthetic fallback is never cached —
   pinning invented weather for an hour would feed it straight into the buffer.
+- **The counter counts billed calls, not requests** (since 19 Nov 2026).
+  Open-Meteo bills a request over 10 variables or two weeks as a fraction
+  more (`_call_weight`): the live request carries 13 variables, so it is 1.3
+  calls, and an archive hour 1.1. `live_usage()["total"]` — what every budget
+  checks — used to add 1 per request and read up to 30% low. Add a variable to
+  `HOURLY_VARS` or `DISPLAY_VARS` and every request costs another 0.1.
 - **The solar floor is checked before the feature matrix is built.** At night
   every candidate is dropped there, and building first spent ~7 MB and a terrain
   read to discard the result.
@@ -730,6 +736,35 @@ added at full strength at every horizon), and the response carries
 and model-only maps side by side, which is how the fusion constants should be
 tuned.
 
+**Cumulus outlook** (`weather.cumulus` in `/predict`, `meteo_client.cumulus_outlook`):
+`cumulus` / `blue` / `none` and a cloud base from values the request already
+carries — dew point by Magnus from 2 m temperature and humidity, base ≈ 125 m
+per °C of spread (Lawrence 2005), cumulus where `boundary_layer_height` clears
+it. Display only, no variable and no call added, `None` under the fallback.
+**It disagrees with "thermal base"** (`cape_base`): on 19 Nov at İnönü noon it
+gave a 900 m base under a 1,000 m layer while `cape_base` said 2,273 m AGL.
+`cape_base` comes from a temperature-only formula with no humidity and no
+layer height in it, and it is not display-only — `_above_thermal_base` rejects
+training samples with it. Replacing it changes the training filter, so measure
+before switching.
+
+**Satellite clouds** (`components/SatelliteLayer.jsx`, toggle or `?clouds=1`):
+Meteosat MTG GeoColour from EUMETSAT's public WMS, fetched by the browser — no
+backend memory, no Open-Meteo calls, no key, CORS open. Observed, never
+forecast; the sidebar says so when the slider is ahead. Three traps:
+- **Always send `time=`.** Without it the server answers "latest" with
+  `max-age=604800`, and a test request came back a sunlit scene during the
+  Turkish night — a cached render, not the current frame. The newest time is
+  the `default` of the per-layer capabilities document (~6 KB), ~30 min behind.
+- **Ask for native pixels, not screen pixels** (`SATELLITE_NATIVE_M`). The server
+  upsamples nearest-neighbour and ignores `interpolations`, so zoomed in to a
+  scan a full-size request drew hard 2 km squares.
+- **z-index 400, not below.** Leaflet's map pane is `z-index: 400` and opaque,
+  so a canvas portalled into the container below that is invisible.
+  `OgnHeatmapCanvas` (the "live activity layer", 398) is exactly that: a solid
+  red test fill on it did not show on 19 Nov 2026. It has been hidden under the
+  base imagery, and is left so until someone decides it should be seen.
+
 ## Resource budget
 
 The deployment target is 2 vCPU / 896 MB, and most odd-looking choices come from it.
@@ -802,8 +837,9 @@ The deployment target is 2 vCPU / 896 MB, and most odd-looking choices come from
 **Upstream ceilings:** Copernicus DEM has no key and no quota (the terrain
 default); OpenTopoData 1000 calls/day and 1 req/s, now only the fallback — as
 the primary source a training node spent the whole day's quota in its first 40
-minutes; Open-Meteo 10k/day; ESA WorldCover needs no key and has no published
-limit.
+minutes; Open-Meteo 10k/day, billed in calls (see the counter note above); ESA
+WorldCover needs no key and has no published limit; EUMETSAT's WMS lists no
+fees and no access constraints.
 
 **Copernicus vs SRTM** (36 grids, after the production upsample): elevation
 4.4 m mean difference, slope 0.26° (r = 0.92), aspect 3.2°. The features barely

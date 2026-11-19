@@ -83,6 +83,37 @@ export const FORECAST_STEPS = [
   ...Array.from({ length: 21 }, (_, i) => 3 + i),      // 3, 4 … 23
 ];
 
+// --- Satellite clouds -----------------------------------------------------------
+// EUMETSAT's public WMS (EUMETView): no key, no fee, CORS open. Requested straight
+// from the browser, so the backend never holds an image. GeoColour is true colour
+// by day (cumulus show as white puffs over the ground) and infrared cloud over a
+// static night-lights background after dark. Meteosat MTG-I, every 10 minutes,
+// ~1 km at nadir and coarser over Türkiye, which it sees ~48° off the
+// sub-satellite point. The newest frame was ~30 minutes old when measured.
+//
+// Every image request names its frame time. Without one the server answers
+// "latest" with Cache-Control: max-age=604800, and on 19 Nov 2026 such a request
+// came back a sunlit scene at 07:20 local in November — someone else's cached
+// render — where the 04:20 UTC frame named explicitly was the night it was.
+export const SATELLITE_WMS   = 'https://view.eumetsat.int/geoserver/wms';
+export const SATELLITE_LAYER = 'mtg_fd:rgb_geocolour';
+// The per-layer capabilities document (~6 KB, not the 280 KB global one): its
+// time dimension's default is the newest frame.
+export const SATELLITE_CAPS  = 'https://view.eumetsat.int/geoserver/mtg_fd/rgb_geocolour/ows'
+                             + '?service=WMS&request=GetCapabilities&version=1.3.0';
+export const SATELLITE_REFRESH_MS = 5 * 60 * 1000;
+// Opaque imagery: enough of the base map shows through to keep roads and ridges
+// legible, while white cloud still reads as cloud.
+export const SATELLITE_OPACITY = 0.8;
+// One GetMap image per view, at most this many pixels on a side.
+export const SATELLITE_MAX_PX = 2048;
+// Nor finer than this many metres of ground per pixel. The data is ~1 km at
+// nadir, and the server upsamples nearest-neighbour (its `interpolations`
+// parameter changed nothing, 19 Nov 2026), so zoomed in to a scan a full-size
+// request drew 2 km squares. Asking for native pixels and letting the canvas
+// smooth them shows the same information without inventing hard edges.
+export const SATELLITE_NATIVE_M = 1000;
+
 // Must match backend fetch_elevation_grid default radius (config.py GRID_RADIUS).
 // The grid spans centre ± this on both axes, inclusive of both edges, so it is
 // 201 × 201 sample points at exactly GRID_RES apart — use rows-1/cols-1 when

@@ -59,6 +59,7 @@ export default function WeatherBar({ weather, forecastH = 0, onForecastChange, l
               <WxChip label="CAPE"       tip={t('capeTip')}        value={`${Math.round(weather.cape)} J/kg`} />
               <WxChip label="CIN"        tip={t('cinTip')}         value={`${Math.round(weather.cin)} J/kg`} />
               <WxChip label={t('tBase')} tip={t('thermalBaseTip')} value={t('metresAgl', { n: weather.thermal_base })} />
+              {weather.cumulus && <CumulusChip cumulus={weather.cumulus} pbl={weather.pbl_height} />}
             </>
           ) : (
             <span className="wx-hint">—</span>
@@ -141,6 +142,24 @@ function SkyChips({ weather, forecastH }) {
                 value={formatLocalTime(shifted, locale, !live)} />
       )}
     </>
+  );
+}
+
+// Cumulus or blue thermals at the forecast moment, from the backend's
+// cumulus_outlook. Absent under the synthetic fallback and from an older
+// backend, and then the chip is simply not drawn.
+function CumulusChip({ cumulus, pbl }) {
+  const { t, locale } = useLang();
+  const { kind, base_agl: base } = cumulus;
+  if (!['cumulus', 'blue', 'none'].includes(kind)) return null;
+  const n   = base.toLocaleString(locale);
+  const top = pbl != null ? Math.round(pbl).toLocaleString(locale) : '—';
+  return (
+    <WxChip
+      label={t('cumulus')}
+      tip={t(`cumulusTip_${kind}`, { n, top })}
+      value={t(`cumulus_${kind}`, { n })}
+    />
   );
 }
 
