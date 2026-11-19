@@ -51,6 +51,10 @@ docker compose up -d --build
 
 There is no lint or typecheck step configured. `pytest.ini` sets
 `asyncio_mode = auto`, so async tests need no decorator.
+`test_meteo_client.py::test_hour_index_falls_back_when_stamp_absent` fails
+whenever the suite runs between 00:00 and 03:00 UTC: it drops the first
+three hours of a day's array and then looks for the current hour in it. That
+is the test, not a regression.
 
 `tests/conftest.py` points the model, buffer, beacon DB, archive and terrain
 cache paths at each test's `tmp_path` (autouse). Keep it that way: before it, a
@@ -386,6 +390,36 @@ Breaking any of these has taken the app down or silently corrupted results befor
   radiation, so a dry run is cheaper per cell; chaos needs an ensemble of
   ~10 (×10); it needs boundary conditions from a regional forecast.
   Whiffle has run LES forecasts operationally on GPUs since 2016 at ~100 m.
+- **3D thermal blocks are the second lever that holds, measured 18 Nov 2026**
+  (`evaluation/thermal_blocks.py`; 6 Nov buffer, 2,009 units, by hour,
+  seeds 0–2, against hires terrain). thermal.kk7.ch's 3D method on our own
+  OGN archive: ~100 × 100 × 100 m blocks, each counting the aircraft that
+  passed through and those circling in a climb (≥ 1 m/s fully, weaker
+  partly), once per aircraft per block per day; soaring types only, untowed.
+  As columns it is read from other days only — `past` (days before the
+  row's) and `loo` (all but its own) — summed over the 3 × 3 × 3 blocks
+  around the row, with a 2D twin (3 × 3 columns, no height) beside it. From
+  the local 52-day archive (17 Aug–5 Nov), 67% of rows have any history.
+  Served deltas, past: 3D +0.014 / +0.009 / +0.009, 2D +0.011 / +0.002 /
+  +0.011; loo: 3D +0.017 / +0.010 / +0.007. **Read the single column with
+  care:** `b3_share` alone scores 0.649, but hires already scores 0.640 on
+  the same rows — busy places are easier; the fair gain there is +0.009 to
+  +0.017, and rows without history gain nothing. **The airfield leak was
+  checked and is not it** (`--airports`, OurAirports): `b3_share` alone is
+  0.662 at ≥ 3 and ≥ 5 km from any field; the 3D delta at ≥ 5 km is +0.016 /
+  +0.011 / +0.011 and at ≥ 8 km +0.021 / +0.010 / +0.013 — holding or
+  growing with distance, though only seed 0 stays clear of zero as units
+  thin out. Away from fields 3D beats 2D in every seed (+0.013 vs +0.007
+  averaged at ≥ 5 km); near them the two tie, so height earns its place
+  where thermals lean, not where gliders fly circuits. **Coverage is the
+  limit:** blocks with ≥ 20 aircraft-days cover ~120 km² each of the Alps
+  and Germany, and Türkiye has 10. That archive saw 129 paragliders over
+  Türkiye but 188 circling-and-climbing beacons in 52 days, against 7.3M
+  worldwide; thermal.kk7.ch covers Türkiye from paraglider IGC logs
+  (XContest, Leonardo, …) under CC BY-NC-SA, which needs a separate
+  agreement for commercial use. **Not in production;** re-measure once the
+  archive holds a flying season. `build --bbox` writes the layer itself as
+  Parquet (Alps: 174,114 blocks with ≥ 5 aircraft-days, 1.2 MB).
 - **Quality gate:** the challenger and the serving model are scored on identical
   rows from a *frozen, group-disjoint* benchmark (`evaluation/holdout.py`), and
   the challenger is rejected unless a paired bootstrap CI (`paired_delta_ci`)
