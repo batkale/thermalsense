@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from evaluation import hires_terrain as ht
+from evaluation import drift_terrain as dt
 from evaluation import evaluate as ev
 from evaluation.archive_prior import FastPrior
 from data.circling_prior import ClimbPrior, build_index
@@ -114,3 +115,104 @@ def test_fast_prior_agrees_with_climb_prior(tmp_path):
                 assert math.isnan(b)
             else:
                 assert b == pytest.approx(a, rel=1e-9)
+
+
+def _metres(X, name):
+    """(north_m, east_m) of one SHIFTS entry from the row's own position."""
+    la, lo = dt.shifted(X, name)[0]
+    return ((la - X[0, 0]) * 111_320.0,
+            (lo - X[0, 1]) * 111_320.0 * math.cos(math.radians(X[0, 0])))
+
+
+def _row(wind_kmh, wind_from_deg, agl):
+    from pipeline.feature_engineering import _wind_components
+    X = np.zeros((1, 22))
+    X[0, 0], X[0, 1] = 46.0, 10.0
+    X[0, 7], X[0, 8] = _wind_components(wind_kmh, wind_from_deg)
+    X[0, 21] = agl
+    return X
+
+
+def test_upwind_reads_the_ground_the_wind_comes_from():
+    # 36 km/h = 10 m/s from the west, 600 m up, rising at 3 m/s: 2 km to the west
+    X = _row(36.0, 270.0, 600.0)
+    n, e = _metres(X, "up3")
+    assert e == pytest.approx(-2000.0, abs=1.0) and abs(n) < 1.0
+    n, e = _metres(X, "down1.5")
+    assert e == pytest.approx(4000.0, abs=1.0) and abs(n) < 1.0
+    n, e = _metres(X, "cross1.5")
+    assert math.hypot(n, e) == pytest.approx(4000.0, abs=1.0) and abs(e) < 1.0
+    assert _metres(X, "under") == (0.0, 0.0)
+
+
+def test_drift_is_capped_and_vanishes_without_wind():
+    assert math.hypot(*_metres(_row(80.0, 0.0, 3000.0), "up0.75")) == pytest.approx(dt.MAX_DRIFT_M, abs=1.0)
+    assert math.hypot(*_metres(_row(0.0, 0.0, 3000.0), "up0.75")) < 1e-6
+
+
+async def test_block_cache_answers_a_repeat_read_from_disk(tmp_path):
+    calls = []
+
+    class Inner:
+        async def get(self, url, headers=None):
+            calls.append(url)
+            return dt._DiskCachedClient._Resp(206, b"block-bytes")
+
+        async def aclose(self):
+            pass
+
+    c = dt._DiskCachedClient(Inner(), tmp_path)
+    for _ in range(2):
+        r = await c.get("https://x/tile.tif", headers={"Range": "bytes=0-9"})
+        assert r.content == b"block-bytes"
+    assert calls == ["https://x/tile.tif"]
+
+
+def test_a_ridge_toward_the_sun_shades_only_a_low_sun():
+    from evaluation import energy_budget as eb
+    # 200 m of ridge 500 m away toward the sun: 21.8 deg above the cell
+    ray = np.full((2, len(eb.SHADOW_DIST_M)), 1000.0)
+    ray[:, eb.SHADOW_DIST_M.index(500.0)] = 1200.0
+    zc = np.array([1000.0, 1000.0])
+    assert eb.in_shadow(ray, zc, np.array([15.0, 30.0])).tolist() == [True, False]
+    # a missing sample is no obstacle, and a sun below the horizon casts nothing
+    gap = np.full((1, len(eb.SHADOW_DIST_M)), np.nan)
+    assert not eb.in_shadow(gap, zc[:1], np.array([5.0]))[0]
+    assert not eb.in_shadow(ray[:1], zc[:1], np.array([-3.0]))[0]
+
+
+def test_bare_ground_heats_the_air_more_than_forest_and_forest_more_than_water():
+    from evaluation import energy_budget as eb
+    codes = np.array([60, 10, 80, eb._NO_TILE, eb._FAILED])
+    a, g, ef = eb.surface(codes)
+    h = eb.heat_flux(600.0, a, g, ef)
+    assert h[0] > h[1] > h[2] > 0
+    assert h[3] == pytest.approx(h[2])          # no tile published: open sea
+    assert np.isnan(h[4])                       # a failed read is not a surface
+    assert eb.heat_flux(0.0, a[:1], g[:1], ef[:1])[0] == 0.0   # night: nothing to hand over
+
+
+def test_layer_wind_averages_the_column_between_ground_and_glider():
+    from evaluation import energy_budget as eb
+    X = np.zeros((1, 22))
+    X[0, 2] = 0.0                                # ground at sea level
+    X[0, 21] = 1460.0                            # glider at the 850 hPa height
+    wind = np.zeros((1, 3, 2))
+    wind[0, :, 0] = [4.0, 8.0, 20.0]             # u at 925, 850, 700 hPa; 10 m calm
+    u, v = eb.layer_wind(X, wind, n_sample=2001)[0]
+    # piecewise linear 0 -> 4 over 10..760 m, 4 -> 8 over 760..1460 m
+    expect = (2.0 * 750 + 6.0 * 700) / 1450
+    assert u == pytest.approx(expect, abs=0.01) and v == pytest.approx(0.0)
+    # no profile fetched: the 10 m wind stands in
+    X[0, 7] = 36.0
+    assert eb.layer_wind(X, np.full((1, 3, 2), np.nan))[0][0] == pytest.approx(10.0)
+
+
+def test_aloft_shift_follows_the_layer_wind_not_the_surface_wind():
+    X = _row(36.0, 270.0, 600.0)                 # 10 m wind from the west
+    wind_ms = np.array([[0.0, -5.0]])            # aloft: from the north, 5 m/s
+    la, lo = dt.shifted(X, "a_up2", wind_ms)[0]
+    north = (la - X[0, 0]) * 111_320.0
+    assert north == pytest.approx(5.0 * 600.0 / 2.0, abs=1.0) and abs(lo - X[0, 1]) < 1e-9
+    with pytest.raises(ValueError):
+        dt.shifted(X, "a_up2")

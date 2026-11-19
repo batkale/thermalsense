@@ -54,6 +54,10 @@ docker compose up -d --build
 
 There is no lint or typecheck step configured. `pytest.ini` sets
 `asyncio_mode = auto`, so async tests need no decorator.
+`test_meteo_client.py::test_hour_index_falls_back_when_stamp_absent` fails
+whenever the suite runs between 00:00 and 03:00 UTC: it drops the first
+three hours of a day's array and then looks for the current hour in it. That
+is the test, not a regression.
 
 `tests/conftest.py` points the model, buffer, beacon DB, archive and terrain
 cache paths at each test's `tmp_path` (autouse). Keep it that way: before it, a
@@ -319,6 +323,106 @@ Breaking any of these has taken the app down or silently corrupted results befor
   `aspectcyc`, `insolation`): −0.003, +0.001, −0.002, all spanning zero.
   **The fold seed alone moves the base score 0.557–0.594**, so a single run of
   this harness is not a measurement; `--seed` exists for that.
+- **Drift-corrected terrain is ruled out, measured 17 Nov 2026** on the 6 Nov
+  buffer (47,419 rows, 2,009 mixed-label units, by hour, seeds 0–2). A glider
+  circling at height sits downwind of the ground that triggered its thermal,
+  so `evaluation/drift_terrain.py` reads the hires columns at a point shifted
+  by wind × AGL / w — for *every* row, positive and negative, with labels left
+  where they were observed. Shifting positives alone would move the goalposts,
+  and with lat/lon among the columns it would teach "upwind edge of the
+  traffic = lift". Against terrain read under the glider, averaged over seeds:
+  upwind at w = 3 / 1.5 / 0.75 m/s (median shift 431 m / 861 m / 1.7 km)
+  −0.005 / −0.014 / −0.020, the last two with every interval below zero;
+  placebos of 861 m downwind −0.017 and crosswind −0.018. `tpi_2500` alone:
+  0.603 under, 0.565 upwind, 0.576 downwind. **Every shift loses, more with
+  distance, and upwind is no better than the wrong direction.** Above 800 m
+  AGL the shortest shift gained +0.012 / +0.003 / +0.009, each interval
+  spanning zero; giving the model both positions, +0.002. Likely why: the
+  median row is 483 m AGL, and the buffer holds only Open-Meteo's 10 m wind
+  (km/h — no unit is requested), weaker than and often veered from the wind
+  aloft. Revisit only with wind at height in the buffer.
+- **The same run reproduced hires terrain** on the 6 Nov buffer: served 0.593
+  / 0.596 / 0.590 against base 0.570 / 0.569 / 0.567, deltas +0.023 to
+  +0.027 with every interval clear of zero. Its days largely overlap the
+  30 Oct export, so this is more rows, not an independent check — the live
+  buffer still is. **A failed DEM fetch does not fail the run:** the first
+  attempt lost DNS halfway, left 52% of rows NaN and showed hires at only
+  +0.005–0.010. `drift_terrain score` refuses above 2% missing, and `compute`
+  retries dropped connections and keeps range reads on disk (`--block-cache`,
+  ~2,900 blocks for this buffer). `hires_terrain.py` has neither guard.
+- **A per-cell surface energy budget adds nothing, measured 17 Nov 2026**
+  (same buffer, units and seeds; `evaluation/energy_budget.py`). Per row:
+  sunlight on the 30 m slope (direct × cos incidence, unless terrain within
+  4 km is above the sun; plus diffuse sky and ground reflection), then
+  albedo, ground storage and evaporative fraction by WorldCover class at
+  ~40 m (literature-typical constants in `_SURFACE`, not site measurements),
+  giving the sensible heat handed to the air — now and weighted over the
+  previous 3 h, and its excess over flat-ground rings at 400 m and 1 km.
+  Alone: `h_3h` 0.555, `h_now` 0.552, excess over 1 km 0.553 — the same as
+  `cos_incidence` alone (0.551). Land cover alone 0.490, terrain shadow
+  0.499. On top of hires terrain: +0.004 / −0.002 / +0.001. **All of its
+  skill is the sun angle on the slope.** Land cover barely varies under the
+  aircraft (median and p90 of the heat factor both 0.40), and shadow is rare
+  at the hours gliders fly. The budget says how hot the ground should be;
+  what is still missing is a measurement of how hot it is (satellite LST).
+- **Wind at height does not rescue drift either, measured 17 Nov 2026.**
+  `energy_budget aloft` fetches 925/850/700 hPa wind plus direct and diffuse
+  radiation for every row from the historical forecast API: 3,170 requests
+  for this buffer (one per 0.25° cell per ≤14-day window), none failed,
+  cached on disk. `layer_wind` averages the profile from the ground to the
+  glider, and `drift_terrain compute --aloft` drives the shifts with it at a
+  true rise rate w. Averaged over seeds, against terrain under the glider:
+  upwind at w = 3 / 2 / 1.2 m/s (median 487 m / 731 m / 1.2 km) 0.000 /
+  −0.011 / −0.017; placebos at 731 m downwind −0.019, crosswind −0.014.
+  Still no shift beats reading under the glider, but upwind now loses less
+  than downwind in all three seeds, where with 10 m wind they tied — the
+  direction is right, the effect is below the label noise. The layer and
+  850 hPa wind as model columns, with slope-weighted windwardness:
+  +0.006 / −0.004 / +0.011, one interval clear of zero — unproven.
+- **What a thermal-resolving simulation would cost (for the pitch).** A
+  site at 50 m, 11 × 11 km × 3 km, is 2.9M cells; a 12 h flying day at a
+  1–2 s step is 21,600–43,200 steps. Scaled from the DALES GPU port
+  (arXiv:2502.20412, whole timestep, per node per million cells: 192-core
+  Genoa 9,712 µs, 4×A100 2,444 µs, 4×H100 846 µs): one H100 4–7 min,
+  $0.15–0.47; one A100 10–20 min, $0.22–0.85; CPU 32–65 core-hours. A
+  100 × 100 km region: $0.76–2.44 a day at 100 m, $12–39 at 50 m (H100).
+  Prices are 2026 specialist-cloud on-demand (H100 $2.50–4, A100
+  $1.30–2.50 per GPU-hour; hyperscalers 2–4× more). Caveats that go with
+  the number: the benchmark ran ~46M cells per GPU, so a 2.9M-cell site
+  underuses one (budget up to 3×); its case carries clouds, rain and
+  radiation, so a dry run is cheaper per cell; chaos needs an ensemble of
+  ~10 (×10); it needs boundary conditions from a regional forecast.
+  Whiffle has run LES forecasts operationally on GPUs since 2016 at ~100 m.
+- **3D thermal blocks are the second lever that holds, measured 18 Nov 2026**
+  (`evaluation/thermal_blocks.py`; 6 Nov buffer, 2,009 units, by hour,
+  seeds 0–2, against hires terrain). thermal.kk7.ch's 3D method on our own
+  OGN archive: ~100 × 100 × 100 m blocks, each counting the aircraft that
+  passed through and those circling in a climb (≥ 1 m/s fully, weaker
+  partly), once per aircraft per block per day; soaring types only, untowed.
+  As columns it is read from other days only — `past` (days before the
+  row's) and `loo` (all but its own) — summed over the 3 × 3 × 3 blocks
+  around the row, with a 2D twin (3 × 3 columns, no height) beside it. From
+  the local 52-day archive (17 Aug–5 Nov), 67% of rows have any history.
+  Served deltas, past: 3D +0.014 / +0.009 / +0.009, 2D +0.011 / +0.002 /
+  +0.011; loo: 3D +0.017 / +0.010 / +0.007. **Read the single column with
+  care:** `b3_share` alone scores 0.649, but hires already scores 0.640 on
+  the same rows — busy places are easier; the fair gain there is +0.009 to
+  +0.017, and rows without history gain nothing. **The airfield leak was
+  checked and is not it** (`--airports`, OurAirports): `b3_share` alone is
+  0.662 at ≥ 3 and ≥ 5 km from any field; the 3D delta at ≥ 5 km is +0.016 /
+  +0.011 / +0.011 and at ≥ 8 km +0.021 / +0.010 / +0.013 — holding or
+  growing with distance, though only seed 0 stays clear of zero as units
+  thin out. Away from fields 3D beats 2D in every seed (+0.013 vs +0.007
+  averaged at ≥ 5 km); near them the two tie, so height earns its place
+  where thermals lean, not where gliders fly circuits. **Coverage is the
+  limit:** blocks with ≥ 20 aircraft-days cover ~120 km² each of the Alps
+  and Germany, and Türkiye has 10. That archive saw 129 paragliders over
+  Türkiye but 188 circling-and-climbing beacons in 52 days, against 7.3M
+  worldwide; thermal.kk7.ch covers Türkiye from paraglider IGC logs
+  (XContest, Leonardo, …) under CC BY-NC-SA, which needs a separate
+  agreement for commercial use. **Not in production;** re-measure once the
+  archive holds a flying season. `build --bbox` writes the layer itself as
+  Parquet (Alps: 174,114 blocks with ≥ 5 aircraft-days, 1.2 MB).
 - **Quality gate:** the challenger and the serving model are scored on identical
   rows from a *frozen, group-disjoint* benchmark (`evaluation/holdout.py`), and
   the challenger is rejected unless a paired bootstrap CI (`paired_delta_ci`)
