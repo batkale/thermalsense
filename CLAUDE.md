@@ -448,6 +448,34 @@ Breaking any of these has taken the app down or silently corrupted results befor
   agreement for commercial use. **Not in production;** re-measure once the
   archive holds a flying season. `build --bbox` writes the layer itself as
   Parquet (Alps: 174,114 blocks with ≥ 5 aircraft-days, 1.2 MB).
+- **Satellite land-surface temperature from MODIS adds nothing, measured
+  19 Nov 2026** (`evaluation/lst.py`; 6 Nov buffer, 2,009 units, by hour,
+  seeds 0–2, 1,500 resamples, against hires terrain from the drift cache).
+  MOD11A1 / MYD11A1 v6.1 came from Planetary Computer: anonymous STAC and SAS
+  token, COG range reads, 395 tile-days, none failed. QC-masked to an LST
+  error ≤ 2 K, 1 km. Per row: LST at the pixel, its anomaly against the
+  ±0.05° grid box, and LST − T2m. Coverage was 74% of rows on either platform
+  (Aqua 45%, Terra 61%) and 85% of mixed-label units. Both orbits have
+  drifted: Aqua's median pass is now **15:00** local solar time, not 13:30,
+  and Terra's 09:18. **Raw LST ranks lift below chance** (0.432–0.471 alone)
+  because it is an altimeter: skin temperature falls 5.6 K/km (Aqua) and
+  4.4 K/km (Terra) inside a unit, and elevation alone scores 0.605 on the
+  same rows. With that lapse taken out (`lapse_adjusted`, fitted without
+  labels), Terra scores 0.505 and Aqua 0.544, about what the sun angle
+  scores. Served deltas against hires: raw +0.001 / −0.004 / +0.004,
+  lapse-adjusted −0.001 / −0.004 / −0.003, every interval spanning zero. On
+  the 1,710 covered units only: +0.000 / −0.005 / +0.004. A daily pass hours
+  from the row's own hour cannot say which ground is hot *now*. That is
+  the case for the geostationary product, and this does not rule it out.
+  **MTG/FCI MTLST (LSA-007) is not yet measured.** The LSA SAF archive needs
+  a free login. `lst need` lists the 527 hourly slots the buffer needs (HH:00
+  for every unit, plus the morning back to sunrise for `rise` / `rate`;
+  ~5.5 GB), and `lst geo` reads them once downloaded. 84% of rows are in
+  view of 0°. The effective FCI pixel there is 2.1 × 3.7 km in the Alps,
+  2.2 × 4.3 Germany, 2.1 × 2.9 Iberia and 2.1 × 3.5 Türkiye (SEVIRI
+  3.2 × 5.5 Alps). The 2 km figure holds only at nadir. Oct–Nov has the
+  weakest surface contrasts of the year, so a null here does not rule out
+  summer.
 - **Quality gate:** the challenger and the serving model are scored on identical
   rows from a *frozen, group-disjoint* benchmark (`evaluation/holdout.py`), and
   the challenger is rejected unless a paired bootstrap CI (`paired_delta_ci`)
