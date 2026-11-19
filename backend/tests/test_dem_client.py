@@ -179,6 +179,20 @@ async def test_each_block_is_downloaded_once(s3):
     assert first == 2 and served["requests"] == first
 
 
+async def test_array_reader_matches_the_point_reader(s3):
+    """sample_elevations is the vectorised twin of fetch_elevations: same pixels,
+    same blocks, NaN exactly where the point reader says None."""
+    pts = [(39.99, 30.01), (39.30, 30.70), (39.01, 30.99), (39.5, 30.5),
+           (39.875, 30.125), (10.5, 10.5)]
+    want = await dc.fetch_elevations(pts)
+    lats = np.array([[p[0] for p in pts[:3]], [p[0] for p in pts[3:]]])
+    lons = np.array([[p[1] for p in pts[:3]], [p[1] for p in pts[3:]]])
+    got = await dc.sample_elevations(lats, lons)
+    assert got.shape == (2, 3)
+    for p, v in zip(pts, got.ravel()):
+        assert (np.isnan(v) and want[p] is None) or v == want[p], p
+
+
 async def test_unpublished_tile_is_none_not_sea_level(s3):
     """A missing tile must not become 0 m: a withheld land tile read as sea
     level would be a fabricated value with a real label on it."""

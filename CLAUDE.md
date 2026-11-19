@@ -73,7 +73,8 @@ local `cache/terrain-copernicus/points.json` held 200 entries, all
 |---|---|
 | [backend/main.py](backend/main.py) | FastAPI app: all endpoints, WebSocket, APScheduler jobs, disk guard, static SPA mount |
 | [backend/config.py](backend/config.py) | Every tunable. Read this before changing behaviour — the comments carry the reasoning |
-| [backend/pipeline/feature_engineering.py](backend/pipeline/feature_engineering.py) | `build_feature_matrix` and `FEATURE_COUNT` (22 columns) |
+| [backend/pipeline/feature_engineering.py](backend/pipeline/feature_engineering.py) | `build_feature_matrix` and `FEATURE_COUNT` (30 columns: the original 22, then 8 full-resolution terrain columns at 22–29) |
+| [backend/pipeline/hires_terrain.py](backend/pipeline/hires_terrain.py) | The 8 full-resolution terrain columns (slope, northness, eastness, ruggedness, TPI at 150/400/1000/2500 m), vectorised. `evaluation/hires_terrain.py` stays the scalar reference they were measured with; a test pins the two together |
 | [backend/pipeline/solar.py](backend/pipeline/solar.py) | Sun position, per-cell cos(incidence). Candidate feature, evaluation-only so far |
 | [backend/models/thermal_model.py](backend/models/thermal_model.py) | `ThermalModel`: load/save, MC-dropout predict, online retrain + quality gate, physics fallback |
 | [backend/data/ogn_client.py](backend/data/ogn_client.py) | APRS TCP client, beacon parser, plausibility gate (`_admit`), SQLite history, retention purge |
@@ -103,10 +104,16 @@ Breaking any of these has taken the app down or silently corrupted results befor
    duplicate upstream connection and serves divergent data. This also rules out
    serverless entirely.
 
-2. **`FEATURE_COUNT` and the saved model must agree.** Change the width of the
-   feature matrix and you must retrain (`POST /train` or `POST /seed`), or the
-   app runs physics-only. `ThermalModel.load()` refuses a stale model rather than
-   crashing, and the buffer is set aside as `.vN`.
+2. **`FEATURE_COUNT` and the saved model must agree — or be a listed prefix.**
+   New columns are *appended*, and the old width goes into `LEGACY_WIDTHS`
+   (`feature_engineering.py`). Then a model of that width keeps serving on the
+   leading columns (`_model_view`), and a buffer of that width is widened with
+   NaN and filled in rather than set aside, so there is no physics-only dark
+   period. Any other width: `load()` refuses the model (physics fallback until a
+   retrain) and sets the buffer aside as `.vN`. Inserting a column in the
+   middle breaks the prefix and puts you back in that case. **A rollback past a
+   widening is not free:** the older code refuses the wider model and buffer,
+   so back both up before deploying one.
 
 3. **`GRID_RADIUS` (backend config) and `PREDICT_RADIUS` (frontend config) are
    separate copies of one number.** They must stay equal — training features and
@@ -136,10 +143,13 @@ Breaking any of these has taken the app down or silently corrupted results befor
    Bypass it and shared ids come back as one icon crossing three countries
    every few seconds — see "The feed carries ids that are not one aircraft".
 
-10. **Anything that trains passes `strict=True` to all three fetchers**
-    (`fetch_meteo_features`, `fetch_meteo_historical`, `fetch_elevation_grid`)
-    and skips the sample on `None`. The non-strict return is a stand-in made
-    for a display request; with a real label attached it is a fabrication.
+10. **Anything that trains passes `strict=True` to all four fetchers**
+    (`fetch_meteo_features`, `fetch_meteo_historical`, `fetch_elevation_grid`,
+    `fetch_hires_grid`) and skips the sample on `None`. The non-strict return is
+    a stand-in made for a display request; with a real label attached it is a
+    fabrication. `fetch_hires_grid`'s stand-in is all-NaN, and so is its answer
+    whenever the source is not Copernicus (nothing else reads at that
+    resolution): unknown, never a number.
 
 ## Model and training loop
 
@@ -311,10 +321,25 @@ Breaking any of these has taken the app down or silently corrupted results befor
   negatives (4.4 vs 5.1 km median); the served delta holds at ≥5 km
   (+0.026 [+0.005, +0.049], +0.041 [+0.016, +0.067]). It does fade above
   ~800 m AGL (297 units, interval spans chance) — fewer units, and thermals
-  drift off their trigger with height. **Not in production:** serving it
-  means reading terrain at full resolution in `fetch_elevation_grid` (or a
-  second fine read), widening the feature matrix, and a reseed. Confirm on a
-  fresh buffer first.
+  drift off their trigger with height.
+- **Shipped to the live model 19 Nov 2026** as columns 22–29
+  (`pipeline/hires_terrain.py`, `terrain_client.fetch_hires_grid`), with the
+  live gate as the "fresh buffer" check. The switch: the 22-column model keeps
+  serving on columns 0–21; the 22-column buffer is widened, and
+  `_backfill_hires` reads each row's columns at its own cell (the cell the
+  live grid computes them for), `HIRES_BACKFILL_BUDGET_S` (60 s) per retrain
+  cycle, sorted by area so rows share blocks; **fits are held until it is
+  done**, so the first 30-column model is judged on complete rows. The gate
+  then scores it against the 22-column model on the same benchmark rows, and
+  `/training/status` shows `model.full_resolution_terrain` (rows left, model
+  width) and `last_fit.width / serving_width / delta` for that decision.
+  Measured locally on real Copernicus: one grid 0.3–0.9 s warm, 0.9–2.3 s cold
+  (1–4 blocks), event loop never blocked over 80 ms (the arithmetic runs in a
+  thread on blocks `dem_client.load_window` fetched first), peak 33–50 MB.
+  Filling in a 48k-row buffer is ~2,600 distinct blocks, ~16 min of reading
+  at home-connection speed, so ~17 cycles. **The first version took 4.3 s a
+  grid:** `np.unique(axis=0)` over (lat, lon) pairs sorted every one of 400k
+  points per chunk; one integer key per tile fixed it.
 - **Also measured 17 Nov 2026, same export and seeds:** `prior` from the
   export's 43-day Parquet archive (`evaluation/archive_prior.py`, `--prior-db`)
   +0.008 / +0.016 / +0.016 served — consistent sign, one interval clear of
@@ -741,7 +766,10 @@ The deployment target is 2 vCPU / 896 MB, and most odd-looking choices come from
   records and the file is rewritten only when it passes twice the bound.
   Measured on a copy of the node's cache: point cache 196 → 56 MB, a flush
   1.0 s → 0.13 ms, start-up load 0.95 → 0.18 s. Sizes are under
-  `terrain.cached` in `/training/status`. The old `points.json` is imported
+  `terrain.cached` in `/training/status`. The full-resolution grids
+  (`_hires_cache`, `TERRAIN_HIRES_CACHE` 16 × ~1.3 MB) are bounded and
+  reported there too, and memory-only on purpose: one per centre on disk would
+  be ~2 GB a day. The old `points.json` is imported
   once and then left alone, because the previous image still reads it.
 - **The 896 MB figures in this file no longer describe the node.** `free -m`
   there reported 3,905 MB total on 15 Nov 2026, with `mem_limit` at 700m (not
@@ -810,6 +838,6 @@ separate x and y pixel sizes.
   protection existed when it did not. Nothing had leaked — verified across
   the whole history — but the VM's SSH key and the `ADMIN_TOKEN` env file
   live in the working tree, so it had been luck.
-- The 22-column feature list goes stale often. Read `FEATURE_COUNT` and the
+- The 30-column feature list goes stale often. Read `FEATURE_COUNT` and the
   `np.column_stack` block in `feature_engineering.py` rather than trusting any
   written list, including the one in `docs/ARCHITECTURE.md`.
