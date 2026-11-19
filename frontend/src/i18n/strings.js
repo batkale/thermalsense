@@ -75,7 +75,9 @@ const STRINGS = {
                       + 'altında. Model bu koşulda hiç eğitilmedi, o yüzden '
                       + 'tahmin üretmek yerine üretmediğini söylüyor.',
     thermalBaseTip:     'Termallerin tepe yaptığı tahmini yükseklik, yerden '
-                      + '(AGL) ölçülür. Bunun üzerinde tırmanış beklemeyin.',
+                      + '(AGL): sınır tabakasının tepesi ya da, kümülüs daha '
+                      + 'alçakta oluşuyorsa, bulut tabanı. Bunun üzerinde '
+                      + 'tırmanış beklemeyin.',
     capeTip:            'Konvektif potansiyel enerji. Yüksek değer güçlü '
                       + 'yükseliş, çok yüksek değer fırtına riski demektir.',
     predictionAlt:      'Tahmin yüksekliği',
@@ -298,8 +300,10 @@ const STRINGS = {
     noInsolationTip:    'Surface heating is below the level any thermal needs. '
                       + 'The model was never trained in this regime, so it says '
                       + 'it has no forecast rather than inventing one.',
-    thermalBaseTip:     'Estimated height where thermals top out, measured '
-                      + 'above ground (AGL). Expect no climb above it.',
+    thermalBaseTip:     'Estimated height where thermals top out, above '
+                      + 'ground (AGL): the top of the boundary layer, or '
+                      + 'the cloud base where cumulus forms lower down. '
+                      + 'Expect no climb above it.',
     capeTip:            'Convective available potential energy. Higher means '
                       + 'stronger lift; very high means storm risk.',
     predictionAlt:      'Prediction altitude',
