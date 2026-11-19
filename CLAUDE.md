@@ -11,7 +11,8 @@ traffic. The model trains itself online from the Open Glider Network (OGN) APRS
 feed — every circling, climbing glider is a positive label.
 
 Live deployment: `https://thermalsense-tr.polandcentral.cloudapp.azure.com`
-(Azure VM, 2 vCPU / 896 MB usable RAM — see [DEPLOY.md](DEPLOY.md)).
+(Azure VM, 2 vCPU / 3.9 GB RAM, app container capped at 1.5 GB — see
+[DEPLOY.md](DEPLOY.md); the limits below were first set for an 896 MB box).
 **Merging to `main` deploys it:** cron on the VM runs
 [deploy/auto-deploy.sh](deploy/auto-deploy.sh) every five minutes, with a
 health-checked rollback. A merged PR is live within minutes.
@@ -728,8 +729,9 @@ The deployment target is 2 vCPU / 896 MB, and most odd-looking choices come from
   `min(32, cpu_count+4)` threads, each spawning its own OpenMP pool.
 - `XGB_FIT_THREADS=1` (the background job yields cores), `XGB_PREDICT_THREADS`
   takes all of them.
-- `mem_limit: 700m` on the app service — a blast radius, not a target (steady
-  state is ~135–190 MB).
+- `mem_limit: 1536m` on the app service — a blast radius, not a target. It
+  was 700m from the 896 MB box until 19 Nov 2026; see the note at the end of
+  this section.
 - **Retention is now eviction, not deletion.** `_archive_job` writes every
   completed day to `ARCHIVE_DIR` as Parquet before `_purge_job` deletes it, and
   `purge_old_beacons` refuses to delete past the unbroken archived prefix — an
@@ -772,11 +774,20 @@ The deployment target is 2 vCPU / 896 MB, and most odd-looking choices come from
   be ~2 GB a day. The old `points.json` is imported
   once and then left alone, because the previous image still reads it.
 - **The 896 MB figures in this file no longer describe the node.** `free -m`
-  there reported 3,905 MB total on 15 Nov 2026, with `mem_limit` at 700m (not
-  the 600m the nightly-seed note above records) and `BEACON_RETENTION_DAYS`
-  at 2 in `docker-compose.yml`. Nobody has re-derived the limits for the
-  larger box; raising `mem_limit` would have hidden the cache growth, not
-  fixed it.
+  there reports 3,905 MB total (15 and 19 Nov 2026), with
+  `BEACON_RETENTION_DAYS` at 2 in `docker-compose.yml`. `mem_limit` stayed at
+  700m (not the 600m the nightly-seed note above records) while the terrain
+  caches leaked, because raising it then would have hidden the growth, not
+  fixed it. **Raised to 1536m on 19 Nov 2026**, once the kernel log showed no
+  OOM kill since 12:39 UTC on 16 Nov — every earlier one was this cgroup's
+  limit (`CONSTRAINT_MEMCG`), never the host. Measured before the change, with
+  the 30-column switch running: app 449 MB anon at rest (309 MB just after a
+  restart), 593 MB cgroup peak during the terrain fill-in, Caddy 23 MB, the
+  host's own processes ~750 MB, page cache 2.6 GB. At the new cap ≥ 1.6 GB of
+  page cache is left for the beacon DB. Do not lift the cap entirely: the
+  18 Sep outage was the host starving, not the container. The other limits
+  (`_MAX_BUFFER`, retention, `PREDICT_CONCURRENCY`) have still not been
+  re-derived for the larger box.
 
 **Upstream ceilings:** Copernicus DEM has no key and no quota (the terrain
 default); OpenTopoData 1000 calls/day and 1 req/s, now only the fallback — as
