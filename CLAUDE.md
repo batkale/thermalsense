@@ -451,9 +451,19 @@ Breaking any of these has taken the app down or silently corrupted results befor
   Parquet (Alps: 174,114 blocks with ≥ 5 aircraft-days, 1.2 MB).
 - **Quality gate:** the challenger and the serving model are scored on identical
   rows from a *frozen, group-disjoint* benchmark (`evaluation/holdout.py`), and
-  the challenger is rejected unless a paired bootstrap CI (`paired_delta_ci`)
-  lies entirely above zero. After `_MAX_CONSECUTIVE_SKIPS = 12` rejections it
-  accepts and re-baselines, so a lucky score cannot freeze the model forever.
+  the challenger is **rejected only when the paired bootstrap CI
+  (`paired_delta_ci`) lies entirely below zero** — reliably worse. One the
+  benchmark cannot tell apart from the serving model is promoted. So the gate
+  stops regressions; it does not pick improvements, and because every cycle
+  refits from scratch, a fresh model can be promoted every cycle. **"Accepted"
+  is not evidence that a change helped:** the 22 → 30 column switch was
+  accepted on 19 Nov 2026 at −0.009 [−0.022, +0.009] over 199 groups. Judge a
+  change by the paired delta in `last_fit`, the offline harness and the
+  forecast ledger. Until 19 Nov 2026 this entry said a challenger needed the
+  whole interval *above* zero; the code (`fit_and_gate`, `delta["hi"] < 0`)
+  has never done that, from the gate's first commit on 16 Aug 2026. After
+  `_MAX_CONSECUTIVE_SKIPS = 12` consecutive rejections it accepts and
+  re-baselines, so a lucky score cannot freeze the model forever.
   **Do not report the split or a missing gate as bugs — both were fixed.**
 - **XGBoost thread trap:** `fit_and_gate` promotes the challenger object
   directly, and a booster keeps the `nthread` it was *fitted* under.

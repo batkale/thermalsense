@@ -298,11 +298,22 @@ validation AUC wandered across a 0.07 band with nothing real behind it.
 
 ### The gate
 
-A challenger is promoted only when a **paired bootstrap confidence interval**
-(`paired_delta_ci`) for its improvement over the serving model, scored on
-identical benchmark rows, lies entirely above zero. Pairing means shared sampling
-noise cancels, which is why the old fixed AUC tolerance could be deleted rather
-than retuned.
+A challenger is rejected only when a **paired bootstrap confidence interval**
+(`paired_delta_ci`) for its difference from the serving model, scored on
+identical benchmark rows, lies entirely below zero: it is reliably worse. Any
+challenger the benchmark cannot tell apart is promoted. Pairing means shared
+sampling noise cancels, which is why the old fixed AUC tolerance could be
+deleted rather than retuned.
+
+The gate therefore guards against regressions; it does not select
+improvements. Every cycle refits from scratch, so a fresh, statistically
+indistinguishable model can be promoted every cycle, and an `accepted` outcome
+says only "not reliably worse". The 22 → 30 column switch on 19 Nov 2026 is
+the example: accepted at −0.009 [−0.022, +0.009] over 199 groups. Whether a
+change helped is read from the paired delta in `last_fit`, the offline
+harness (`evaluation/evaluate.py`) and the forecast ledger. (Until 19 Nov 2026
+this section said the interval had to lie entirely *above* zero. The code has
+never done that.)
 
 The benchmark abstains below `_MIN_BENCH_GROUPS = 30` mixed-label groups —
 measured across fold seeds the score moved by ±0.05 on about 20 groups, as much
