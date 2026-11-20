@@ -75,7 +75,24 @@ const STRINGS = {
                       + 'altında. Model bu koşulda hiç eğitilmedi, o yüzden '
                       + 'tahmin üretmek yerine üretmediğini söylüyor.',
     thermalBaseTip:     'Termallerin tepe yaptığı tahmini yükseklik, yerden '
-                      + '(AGL) ölçülür. Bunun üzerinde tırmanış beklemeyin.',
+                      + '(AGL): sınır tabakasının tepesi ya da, kümülüs daha '
+                      + 'alçakta oluşuyorsa, bulut tabanı. Bunun üzerinde '
+                      + 'tırmanış beklemeyin.',
+    // Cumulus outlook — kinds come from the backend (cumulus_outlook).
+    cumulus:            'Kümülüs',
+    cumulus_cumulus:    'Taban ≈ {n} m AGL',
+    cumulus_blue:       'Mavi termal',
+    cumulus_none:       'Termal yok',
+    cumulusTip_cumulus: 'Termaller yoğuşma seviyesine ulaşıyor; kümülüs '
+                      + 'bulutları onları işaretlemeli. Taban, 2 m çiğ noktası '
+                      + 'farkından tahmin edildi (°C başına ~125 m). Tüm tarama '
+                      + 'için tek bir değer — bulutların gerçekte nerede '
+                      + 'olduğunu bulut katmanı gösterir.',
+    cumulusTip_blue:    'Sınır tabakası ≈ {top} m AGL’de bitiyor; bulutun '
+                      + 'oluşacağı ≈ {n} m AGL’nin altında. Termaller mavi '
+                      + 'kalır, onları işaretleyen kümülüs olmaz.',
+    cumulusTip_none:    'Bu saatte termal oluşturacak kadar güneş yok, '
+                      + 'dolayısıyla termal kümülüsü de yok.',
     capeTip:            'Konvektif potansiyel enerji. Yüksek değer güçlü '
                       + 'yükseliş, çok yüksek değer fırtına riski demektir.',
     predictionAlt:      'Tahmin yüksekliği',
@@ -102,6 +119,20 @@ const STRINGS = {
     ognDensityHint:     '(termal telemetrisi)',
     retrainModel:       'Modeli yeniden eğit',
     retrainTitle:       'Modeli en güncel OGN verisiyle yeniden eğit',
+    cloudsToggle:       'Bulutlar (şimdi)',
+    cloudsHint:         '(Meteosat bulut maskesi, 15 dk)',
+    cloudsLoading:      'Bulutlar yükleniyor…',
+    cloudsFailed:       'Bulut verisi alınamadı',
+    cloudsFrame:        'Gözlem: {time} UTC · {n} dk önce',
+    cloudsKeyLow:       'alçak',
+    cloudsKeyMid:       'orta',
+    cloudsKeyHigh:      'yüksek',
+    cloudsKeyTip:       'Bulut tepesi deniz seviyesinden. Kabarık: {low} km altı '
+                      + 'alçak bulut (kümülüs, stratokümülüs ya da sis). Düz: '
+                      + '{low}–{high} km orta katman. Tüy: {high} km üstü sirrüs '
+                      + 'ya da fırtına bulutu tepesi.',
+    cloudsNotForecast:  'Bulutlar şimdiki gözlem; ısı haritası ileri bir saat '
+                      + 'için tahmin.',
 
     // raw data / product comparison (before/after divider on the map)
     compareToggle:      'Ham veri ↔ ThermalSense AI',
@@ -232,6 +263,7 @@ const STRINGS = {
     copernicusValue:    '{p} nokta · {b} blok · {mb} MB',
     apiFallbackToday:   'Yedek API isteği',
     requestsToday:      'İstek',
+    billedCallsToday:   'Faturalanan çağrı',
     rateLimited:        '{n} istek hız sınırına takıldı',
     agoSeconds:         '{n} sn önce',
     agoMinutes:         '{n} dk önce',
@@ -298,8 +330,24 @@ const STRINGS = {
     noInsolationTip:    'Surface heating is below the level any thermal needs. '
                       + 'The model was never trained in this regime, so it says '
                       + 'it has no forecast rather than inventing one.',
-    thermalBaseTip:     'Estimated height where thermals top out, measured '
-                      + 'above ground (AGL). Expect no climb above it.',
+    thermalBaseTip:     'Estimated height where thermals top out, above '
+                      + 'ground (AGL): the top of the boundary layer, or '
+                      + 'the cloud base where cumulus forms lower down. '
+                      + 'Expect no climb above it.',
+    cumulus:            'Cumulus',
+    cumulus_cumulus:    'Base ≈ {n} m AGL',
+    cumulus_blue:       'Blue thermals',
+    cumulus_none:       'No thermals',
+    cumulusTip_cumulus: 'Thermals reach the condensation level, so cumulus '
+                      + 'should mark them. The base is estimated from the 2 m '
+                      + 'dew-point spread (~125 m per °C). One value for the '
+                      + 'whole scan — the cloud layer shows where clouds '
+                      + 'actually are.',
+    cumulusTip_blue:    'The boundary layer tops out near {top} m AGL, below the '
+                      + '≈ {n} m AGL where cloud would form. Thermals stay blue, '
+                      + 'with no cumulus to mark them.',
+    cumulusTip_none:    'Too little sun for thermals at this hour, so no '
+                      + 'cumulus from them either.',
     capeTip:            'Convective available potential energy. Higher means '
                       + 'stronger lift; very high means storm risk.',
     predictionAlt:      'Prediction altitude',
@@ -322,6 +370,20 @@ const STRINGS = {
     ognDensityHint:     '(thermal telemetry)',
     retrainModel:       'Retrain model',
     retrainTitle:       'Trigger model retraining on latest OGN data',
+    cloudsToggle:       'Clouds now',
+    cloudsHint:         '(Meteosat cloud mask, 15 min)',
+    cloudsLoading:      'Loading clouds…',
+    cloudsFailed:       'Cloud data unavailable',
+    cloudsFrame:        'Observed {time} UTC · {n} min ago',
+    cloudsKeyLow:       'low',
+    cloudsKeyMid:       'mid',
+    cloudsKeyHigh:      'high',
+    cloudsKeyTip:       'Cloud top above sea level. Puffy: low cloud under {low} km '
+                      + '(cumulus, stratocumulus or fog). Flat: a mid layer, '
+                      + '{low}–{high} km. Streaks: cirrus or a storm top above '
+                      + '{high} km.',
+    cloudsNotForecast:  'Clouds are observed now; the heatmap is a forecast '
+                      + 'for later.',
 
     compareToggle:      'Raw data ↔ ThermalSense AI',
     compareHint:        '(AI off / on)',
@@ -447,6 +509,7 @@ const STRINGS = {
     copernicusValue:    '{p} points · {b} blocks · {mb} MB',
     apiFallbackToday:   'Fallback API requests',
     requestsToday:      'Requests',
+    billedCallsToday:   'Billed calls',
     rateLimited:        '{n} requests hit the rate limit',
     agoSeconds:         '{n} s ago',
     agoMinutes:         '{n} min ago',

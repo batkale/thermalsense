@@ -1157,3 +1157,72 @@ html { scroll-padding-top: 72px; }
   .demo-call { padding: 20px 16px; }
 }
 .alt-ref { margin-top: 18px; max-width: 86ch; }
+
+/* ── 08 chronology ──
+   One line down the page, a marker per publication. The four tracks differ by
+   the marker's shape and fill, not by hue, so warm stays reserved: only the
+   ThermalSense row carries --lift, as the "us" column does in the matrix. */
+.timeline { margin: 0; padding: 0; list-style: none; }
+.tl-item {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 0 24px;
+}
+.tl-year {
+  margin: 0;
+  padding-top: 15px;
+  color: var(--ink);
+  font-weight: 660;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.tl-body {
+  position: relative;
+  max-width: 80ch;
+  padding: 14px 0 18px 26px;
+  border-left: 1px solid var(--rule);
+}
+.tl-body::before {
+  content: '';
+  position: absolute;
+  top: 22px;
+  left: -6px;
+  width: 11px;
+  height: 11px;
+  border: 2px solid var(--ink-3);
+  border-radius: 50%;
+  background: var(--page);
+}
+.tl-item.onboard .tl-body::before { border-color: var(--sink); }
+.tl-item.weather .tl-body::before { border-radius: 2px; transform: rotate(45deg); }
+.tl-item.data    .tl-body::before { border-color: var(--ink-2); background: var(--ink-2); }
+.tl-item.us      .tl-body::before { border-color: var(--lift); background: var(--lift); }
+.tl-track {
+  margin: 0 0 2px;
+  color: var(--ink-3);
+  font-size: 0.74rem;
+  font-weight: 640;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.tl-body h3 { margin: 0 0 4px; color: var(--ink); font-size: 1.05rem; }
+.tl-body > p:not(.tl-track):not(.tl-src) { margin-bottom: 6px; font-size: 0.95rem; }
+.tl-src { display: flex; flex-wrap: wrap; gap: 2px 18px; margin: 0; font-size: 0.84rem; }
+.tl-src a { text-decoration: none; }
+.tl-src a:hover { text-decoration: underline; }
+.tl-item.us .tl-year,
+.tl-item.us .tl-track { color: var(--lift); }
+.tl-item.us .tl-body {
+  padding-right: 20px;
+  border-radius: 0 6px 6px 0;
+  background: color-mix(in srgb, var(--lift) 10%, transparent);
+}
+.notes.frontier { margin-top: 8px; }
+.tl-meta { margin-top: 24px; }
+
+@media (max-width: 720px) {
+  .tl-item { grid-template-columns: 40px minmax(0, 1fr); gap: 0 14px; }
+  .tl-year { font-size: 0.86rem; padding-top: 16px; }
+  .tl-body { padding-left: 18px; }
+  .tl-item.us .tl-body { padding-right: 14px; }
+}

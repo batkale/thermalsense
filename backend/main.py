@@ -731,7 +731,10 @@ async def predict(lat: float, lon: float, alt: int | None = None,
             "elevation_cols": int(raw_elev.shape[1]),
             "feature_count":  int(features.shape[1]),
         },
-        "thermal_base": meteo["cape_base"],
+        # How high thermals reach, metres AGL: min(boundary layer, cloud base)
+        # -- see meteo_client.thermal_top_agl.  The key keeps its old name so an
+        # older bundle still reads it; until 19 Nov 2026 this was `cape_base`.
+        "thermal_base": _thermal_top_display(meteo),
         "cape":         meteo["cape"],
         "weather": {
             "temp_2m":     round(meteo["temp_2m"], 1),
@@ -742,12 +745,27 @@ async def predict(lat: float, lon: float, alt: int | None = None,
             "cin":         round(meteo["cin"]),
             "solar_ghi":   round(meteo["solar_ghi"]),
             "lapse_rate":  round(meteo["lapse_rate"], 1),
-            "thermal_base": meteo["cape_base"],
+            "thermal_base": _thermal_top_display(meteo),
             "pbl_height":  round(meteo["pbl_height"]),
             "soil_temp":   round(meteo["soil_temp"], 1),
+            # Cumulus or blue thermals, and the cloud base — derived from the
+            # values above, display only (see meteo_client.cumulus_outlook).
+            # None under the synthetic fallback; an older bundle ignores it.
+            "cumulus":     meteo_client.cumulus_outlook(meteo, _MIN_SOLAR_GHI),
             **_sky_and_clock(meteo),
         },
     }
+
+
+def _thermal_top_display(meteo: dict) -> int | None:
+    """The thermal top in 50 m steps, or None when there is no estimate.
+
+    125 m per degree of dew-point spread is good to a few hundred metres, and
+    "1,637 m" would claim more than that.  Under cumulus this is the same
+    number, rounded the same way, as the cloud base.
+    """
+    top = meteo_client.thermal_top_agl(meteo)
+    return None if top is None else int(round(top / 50) * 50)
 
 
 def _sky_and_clock(meteo: dict) -> dict:
@@ -1321,6 +1339,13 @@ async def websocket_live(ws: WebSocket):
         pass  # client navigated away — normal teardown
     finally:
         reader.cancel()
+
+
+# --- Shared to-do list --------------------------------------------------------
+# Read by /to-do-list (frontend/public/to-do-list.html). Registered before the
+# SPA catch-all below, which would otherwise answer /todo with the map app.
+from data import todo_store
+app.include_router(todo_store.make_router(_require_admin))
 
 
 # --- Static frontend ----------------------------------------------------------

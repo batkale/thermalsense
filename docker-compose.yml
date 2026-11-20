@@ -14,14 +14,23 @@ services:
       BEACON_RETENTION_DAYS: ${BEACON_RETENTION_DAYS:-2}
     volumes:
       - thermalsense-data:/data
-    # The VM has 896 MB of RAM total. Unbounded, a leak or a runaway /seed takes
-    # the whole box with it — Caddy, sshd and the only way back in. A limit turns
-    # that into a container the restart policy brings straight back.
-    # Generous on purpose: steady state is ~135 MB, so this is a blast radius,
-    # not a target. memswap_limit == mem_limit denies the container swap it
-    # cannot use productively anyway; the host's 2 GB stays for the build.
-    mem_limit: 700m
-    memswap_limit: 700m
+    # Unbounded, a leak or a runaway /seed takes the whole box with it — Caddy,
+    # sshd and the only way back in. A limit turns that into a container the
+    # restart policy brings straight back. memswap_limit == mem_limit denies the
+    # container swap it cannot use productively anyway; the host's 2 GB stays
+    # for the build.
+    #
+    # Sized for the VM as it is now: 3,905 MB (free -m, 19 Nov 2026), not the
+    # 896 MB the 700m was set for. At the cap the app takes 1.5 GB, the host's
+    # own processes ~750 MB and Caddy ~25 MB, which still leaves >= 1.6 GB of
+    # page cache for the 5 GB beacon DB — the thing that ran out on 18 Sep.
+    # Raised only once the cause of the last OOM kills was gone (the unbounded
+    # terrain caches, fixed 16 Nov; no kill since). With 30 columns the app
+    # sat at ~450 MB anon at rest and peaked at 593 MB during the fill-in. The
+    # DB pages the app reads are charged to this cgroup too, so the cap is also
+    # how much of the DB it may keep cached.
+    mem_limit: 1536m
+    memswap_limit: 1536m
     # Deliberately not published to the host: all traffic goes through Caddy,
     # so there is no plaintext path that bypasses TLS. --forwarded-allow-ips in
     # the Dockerfile depends on this staying `expose` and never becoming `ports`.

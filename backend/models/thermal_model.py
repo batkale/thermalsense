@@ -68,17 +68,57 @@ async def _land_props(lat: float, lon: float, shape):
         return None
 
 
-def _above_thermal_base(alt_amsl: float, ground_elev: float, thermal_base_agl: float) -> bool:
+def _above_thermal_base(alt_amsl: float, ground_elev: float,
+                        top_agl: float | None) -> bool:
     """
-    True when the aircraft was flying above the estimated thermal base.
+    True when the aircraft was flying above the estimated thermal top.
 
-    alt_amsl comes from APRS (metres above sea level); thermal_base_agl is
-    meteo["cape_base"], a height above ground.  They must be compared in the
-    same frame, hence subtracting the ground elevation under the aircraft.
+    alt_amsl comes from APRS (metres above sea level); top_agl is
+    meteo_client.thermal_top_agl(meteo), a height above ground.  They must be
+    compared in the same frame, hence subtracting the ground elevation under
+    the aircraft.
+
+    Only None means "no estimate".  The old cape_base used 0 for that, because
+    its formula went to 0 below 8 degC; the thermal top is 0 only in saturated
+    air, and then it is a real estimate.
     """
-    if not thermal_base_agl or thermal_base_agl <= 0:
+    if top_agl is None:
         return False        # no usable estimate — do not discard on a guess
-    return (alt_amsl - ground_elev) > (thermal_base_agl + _THERMAL_BASE_MARGIN_M)
+    return (alt_amsl - ground_elev) > (top_agl + _THERMAL_BASE_MARGIN_M)
+
+
+def _above_thermal_top_rows(X: np.ndarray) -> np.ndarray:
+    """
+    _above_thermal_base over buffer rows, from each row's own columns.
+
+    Column 21 is the height above the ground under the aircraft, and columns 5,
+    6 and 19 carry the weather the top is computed from (thermal_top_columns),
+    so a row needs nothing from outside itself.  A NaN top is "no estimate" and
+    keeps the row, as None does at collection.
+    """
+    from data.meteo_client import thermal_top_columns
+    X = np.asarray(X)
+    with np.errstate(invalid="ignore"):
+        return X[:, 21] > thermal_top_columns(X) + _THERMAL_BASE_MARGIN_M
+
+
+def _fit_rows(X: np.ndarray) -> np.ndarray:
+    """
+    Which buffer rows a fit may train on, and so what the gate's benchmark holds.
+
+    Both collection rules are applied again here, because the buffer holds rows
+    collected before each existed.  The ground floor: buffers written before
+    _MIN_SAMPLE_AGL.  The thermal top: everything collected before 19 Nov 2026,
+    and every row rebuilt from the archive before then, was filtered on the old
+    cape_base, which was 0 (filter off) below 8 degC and reached 27 km where
+    2 m and 850 hPa were close.  On the live buffer of 20 Nov 2026 the new top
+    excluded 7,440 of 78,416 rows (635 positives, 3.6% of them), and none of
+    the 691 collected after the switch — the recomputation agrees with
+    collection.  Masked rather than deleted: the rows cost nothing on disk at
+    this size, and a revised rule should not need a backup to undo.
+    """
+    X = np.asarray(X)
+    return (X[:, 21] >= _MIN_SAMPLE_AGL) & ~_above_thermal_top_rows(X)
 
 
 def _plausible_coords(X: np.ndarray) -> np.ndarray:
@@ -151,11 +191,12 @@ log = logging.getLogger(__name__)
 # (confirmed thermal), 0 = glider was present but not thermalling.
 # At 176 bytes per sample (21 × float64 + 1 × int64) the full buffer is ~3.5 GB on disk.
 # Sized for 10 years of continuous collection (20 samples × 12 cycles/hr × 24 hr × 365 days × 10 yr).
-# A thermal cannot exist above the convective condensation level, so an aircraft
-# circling higher than the estimated thermal base is climbing on something else —
-# wave, ridge lift, or an engine.  Its position says nothing reliable about lift
-# over the ground cell below, so the sample is dropped rather than labelled.
-# cape_base is an estimate, hence the margin.
+# A thermal stops at the top of the boundary layer, or at cloud base where that is
+# lower, so an aircraft circling higher than the estimated thermal top is climbing
+# on something else — wave, ridge lift, or an engine.  Its position says nothing
+# reliable about lift over the ground cell below, so the sample is dropped rather
+# than labelled.  The top (meteo_client.thermal_top_agl) is an estimate, hence
+# the margin.
 _THERMAL_BASE_MARGIN_M = 300
 
 # Below this there is no meaningful surface heating, so no thermal can exist and
@@ -257,6 +298,9 @@ _MAX_BUFFER  = 200_000
 # the seed holds: 4 is ~29 MB, which the container has, and a dict with no
 # ceiling is what it does not.  (30 columns made each matrix ~9.7 MB: ~39 MB.)
 _SEED_GRID_CACHE = 4
+
+# Pause between the seed's archive requests, and after each bucket.
+_SEED_PACE_S = 0.3
 
 # Buffer rows per full-resolution read during the fill-in (~50k sample points).
 _BACKFILL_CHUNK = 512
@@ -391,6 +435,14 @@ class ThermalModel:
         self.model = None
         self._buffer_X: list[np.ndarray] = []
         self._buffer_y: list[int] = []
+        # Has the buffer changed since retrain() last fitted it?  The fit is
+        # deterministic (random_state=42), so refitting an unchanged buffer —
+        # every five minutes all night, when the solar floor drops every
+        # candidate — rebuilds the challenger the gate already judged.  If that
+        # one lost, each repeat loses again and spends one of
+        # _MAX_CONSECUTIVE_SKIPS, so an hour of night promoted it by repetition
+        # alone.  True at start so the first cycle after a restart always fits.
+        self._buffer_changed = True
         self._skipped_fits = 0
         # Outcome of the most recent fit_and_gate call, for /training/status.
         # The log already says this, but a training node is watched through a
@@ -446,7 +498,7 @@ class ThermalModel:
 
         # Same population fit_and_gate trains on, so the group count shown is
         # the one the gate will actually see.
-        keep = X[:, 21] >= _MIN_SAMPLE_AGL
+        keep = _fit_rows(X)
         Xu, yu = X[keep], y[keep]
         groups = 0
         if len(yu):
@@ -639,6 +691,7 @@ class ThermalModel:
             X, y = X[~fake], y[~fake]
         self._buffer_X = list(X)
         self._buffer_y = list(y)
+        self._buffer_changed = True
         log.info(f"[model] buffer restored: {len(self._buffer_X)} samples from disk")
 
     def _save_buffer(self) -> None:
@@ -700,7 +753,8 @@ class ThermalModel:
         samples are collected.
         """
         from data.ogn_client import fetch_ogn_gliders, is_thermal_evidence
-        from data.meteo_client import fetch_meteo_features, live_usage as meteo_live_usage
+        from data.meteo_client import (fetch_meteo_features, thermal_top_agl,
+                                       live_usage as meteo_live_usage)
         from data.terrain_client import fetch_elevation_grid, fetch_hires_grid, snap_grid_centre
         from pipeline.feature_engineering import build_feature_matrix
 
@@ -738,6 +792,7 @@ class ThermalModel:
         sampled: set[str] = set()
         offset_samples = 0
         considered = 0        # aircraft examined, which now exceeds len(candidates)
+        added = 0             # rows appended to the buffer this cycle
 
         for g in candidates:
             try:
@@ -823,7 +878,7 @@ class ThermalModel:
                         on_ground += 1
                         sampled.add(o["id"])   # judged and rejected; do not retry
                         continue
-                    if _above_thermal_base(o["alt"], row[2], meteo["cape_base"]):
+                    if _above_thermal_base(o["alt"], row[2], thermal_top_agl(meteo)):
                         above_base += 1
                         sampled.add(o["id"])   # judged and rejected; do not retry
                         continue
@@ -834,6 +889,7 @@ class ThermalModel:
                         continue
                     self._buffer_X.append(row)
                     self._buffer_y.append(label)
+                    added += 1
                     sampled.add(o["id"])
                     if o["id"] != g["id"]:
                         offset_samples += 1
@@ -869,20 +925,36 @@ class ThermalModel:
             log.info(f"[model] {considered - offset_samples} centre + {offset_samples} off-centre "
                      f"samples from {len(candidates)} grids (no extra API calls)")
 
-        # Cap the resident buffer, spending it on day coverage rather than recency
-        self._buffer_X, self._buffer_y, note = _evict_to_cap(
-            self._buffer_X, self._buffer_y)
-        if note:
-            log.info(f"[model] {note}")
+        # The flag, not "added == 0" alone: /seed fills the buffer and then
+        # calls this to fit it, often at night when this cycle adds nothing.
+        if added:
+            self._buffer_changed = True
 
-        # Persist before the fit-threshold check.  Collecting a sample costs two
-        # rate-limited API calls, so losing a partial buffer to a restart throws
-        # away real work; durability must not depend on reaching the fit threshold.
-        self._save_buffer()
+        # Eviction and the save have nothing to do on an unchanged buffer.
+        if self._buffer_changed:
+            # Cap the resident buffer, spending it on day coverage rather than recency
+            self._buffer_X, self._buffer_y, note = _evict_to_cap(
+                self._buffer_X, self._buffer_y)
+            if note:
+                log.info(f"[model] {note}")
+
+            # Persist before the fit-threshold check.  Collecting a sample costs two
+            # rate-limited API calls, so losing a partial buffer to a restart throws
+            # away real work; durability must not depend on reaching the fit threshold.
+            self._save_buffer()
 
         # Rows from before the full-resolution columns get them filled in, a
         # bounded slice per cycle; fit_and_gate waits until none are left.
+        # Every cycle, changed or not — quiet hours are when it has the network
+        # to itself — and ahead of the check below, because filling rows in
+        # changes the buffer (it sets _buffer_changed).
         await self._backfill_hires(HIRES_BACKFILL_BUDGET_S)
+
+        # Nothing new since the last fit: the fit would rebuild the same model
+        # (see _buffer_changed).
+        if not self._buffer_changed:
+            log.info("[model] no new samples since the last fit — skipping fit")
+            return
 
         # to_thread for the same reason as predict(): the fit is pure CPU and the
         # app runs a single worker, so calling it inline froze every request for
@@ -891,6 +963,10 @@ class ThermalModel:
         # single attribute assignment, so a concurrent predict() sees either the
         # old model or the new one, never a half-built state.
         await asyncio.to_thread(self.fit_and_gate)
+        # Cleared only once the fit has returned, so a fit that raised or was
+        # cut off by the cycle timeout runs again next cycle.  Nothing appends
+        # meanwhile: every caller holds _training_lock.
+        self._buffer_changed = False
 
     async def _backfill_hires(self, budget_s: float) -> None:
         """
@@ -929,10 +1005,14 @@ class ThermalModel:
             self._hires_filled += int(np.isfinite(h[:, 0]).sum())
         left = len(todo) - done
         if done:
+            self._buffer_changed = True       # rows changed in place
             self._save_buffer()
             log.info(f"[model] full-resolution terrain filled into {done} buffer rows, "
                      f"{left} left")
         if left == 0:
+            # The fits held while this ran are owed now, even if this call
+            # filled nothing (the last rows were evicted, say).
+            self._buffer_changed = True
             self._hires_backfill = False
             log.info(f"[model] terrain fill-in complete ({self._hires_filled} rows with "
                      f"values) — fits resume")
@@ -967,21 +1047,25 @@ class ThermalModel:
         X = np.array(self._buffer_X)
         y = np.array(self._buffer_y)
 
-        # Apply the ground floor here as well as at collection.  Buffers written
-        # before _MIN_SAMPLE_AGL existed are full of the rows it excludes, and a
-        # rebuild costs two rate-limited API calls per sample — far too expensive
-        # to demand before the fix takes effect.  Filtering at fit time cleans an
-        # old buffer on the next cycle and costs one boolean mask.  Collection
-        # still drops them so they stop consuming the rolling window.
-        keep = X[:, 21] >= _MIN_SAMPLE_AGL
+        # Apply the ground floor and the thermal top here as well as at
+        # collection (see _fit_rows).  Buffers written before either rule existed
+        # are full of the rows it excludes, and a rebuild costs two rate-limited
+        # API calls per sample — far too expensive to demand before the fix takes
+        # effect.  Filtering at fit time cleans an old buffer on the next cycle
+        # and costs one boolean mask.  Collection still drops them so they stop
+        # consuming the rolling window.
+        keep = _fit_rows(X)
         if not keep.all():
-            log.info(f"[model] {int((~keep).sum())}/{len(y)} buffer rows below "
-                     f"{_MIN_SAMPLE_AGL:.0f} m AGL excluded from this fit")
+            low = int((X[:, 21] < _MIN_SAMPLE_AGL).sum())
+            log.info(f"[model] {len(y) - int(keep.sum())}/{len(y)} buffer rows excluded "
+                     f"from this fit: {low} below {_MIN_SAMPLE_AGL:.0f} m AGL, "
+                     f"{len(y) - int(keep.sum()) - low} above the thermal top "
+                     f"+ {_THERMAL_BASE_MARGIN_M} m")
             X, y = X[keep], y[keep]
             n = len(y)
             if n < _MIN_SAMPLES:
-                log.info(f"[model] {n}/{_MIN_SAMPLES} samples after the AGL floor — "
-                         f"skipping fit")
+                log.info(f"[model] {n}/{_MIN_SAMPLES} samples after the AGL floor and "
+                         f"thermal top — skipping fit")
                 self._note_fit("too_few_samples", samples=n, need=_MIN_SAMPLES)
                 return
 
@@ -1169,7 +1253,9 @@ class ThermalModel:
         from collections import defaultdict
         from datetime import datetime, timezone, timedelta
         import sqlite3
-        from data.meteo_client import fetch_meteo_historical
+        from data.meteo_client import (fetch_meteo_historical, fetch_meteo_historical_range,
+                                       flush_historical_cache, historical_cached,
+                                       plan_historical_ranges, thermal_top_agl)
         from data.terrain_client import fetch_elevation_grid, fetch_hires_grid, snap_grid_centre
         from data.ogn_client import SOARING_AC_TYPES
         from pipeline.feature_engineering import (build_feature_matrix, cyclic,
@@ -1184,6 +1270,7 @@ class ThermalModel:
             discarded = len(self._buffer_X)
             self._buffer_X = []
             self._buffer_y = []
+            self._buffer_changed = True
             log.info(f"[seed] reset — discarded {discarded} existing buffer samples")
 
         # Retention decides what actually exists, so it is the ceiling here.  A
@@ -1333,24 +1420,58 @@ class ThermalModel:
         # never came near 6,000 calls, so nothing ever stopped the run.
         deadline = time.monotonic() + SEED_TIME_BUDGET_S
 
+        def _over_meteo_budget() -> bool:
+            # One Open-Meteo allowance covers this job and the live sampler, and
+            # the live one has to keep working tomorrow morning: stop at the
+            # budget rather than at the hard quota.
+            u = _meteo_usage()
+            return u["total"] >= min(SEED_METEO_BUDGET, u["quota"])
+
+        # Weather for the whole run first: one request per 0.5 deg cell per
+        # fortnight rather than one per bucket (see _HIST_RANGE_DAYS in
+        # meteo_client), and the loop below then finds its buckets in the cache.
+        # Night buckets come along free, where each used to cost a call just to
+        # learn it was dark.  Whatever this does not reach — the budget, the
+        # clock, a failed request — the loop fetches hour by hour as before.
+        plan = plan_historical_ranges(
+            (lat_b, lon_b, datetime.fromisoformat(f"{d}T{h:02d}:00:00+00:00"))
+            for lat_b, lon_b, d, h in buckets)
+        range_requests = prefetched = 0
+        for la, lo, dts in plan:
+            if time.monotonic() >= deadline or _over_meteo_budget():
+                break
+            prefetched += await fetch_meteo_historical_range(la, lo, dts)
+            range_requests += 1
+            await asyncio.sleep(_SEED_PACE_S)
+        if plan:
+            # On disk before the loop: it is the part of the seed that has been
+            # OOM-killed, and the cache otherwise writes only every 50 entries.
+            flush_historical_cache(force=True)
+            log.info(f"[seed] weather prefetch: {prefetched} of "
+                     f"{sum(len(p[2]) for p in plan)} uncached hour(s) "
+                     f"in {range_requests} of {len(plan)} request(s)")
+
+        meteo_deferred = 0
         for (lat_b, lon_b, date_str, hour), beacons in buckets.items():
             if time.monotonic() >= deadline:
                 time_stopped = True
                 log.warning(f"[seed] stopping at the {SEED_TIME_BUDGET_S:.0f}s time budget — "
                             f"{len(buckets) - done_buckets} buckets left for next time")
                 break
-            # One Open-Meteo allowance covers this job and the live sampler, and
-            # the live one has to keep working tomorrow morning: stop at the
-            # budget rather than at the hard quota.
-            u = _meteo_usage()
-            if u["total"] >= min(SEED_METEO_BUDGET, u["quota"]):
+            dt_b = datetime.fromisoformat(f"{date_str}T{hour:02d}:00:00+00:00")
+            # Only a bucket that would cost a call waits for the next run.  A
+            # cached one is free, and after the prefetch most of them are: the
+            # budget it ran into must not stop the loop at the first bucket.
+            if not historical_cached(lat_b, lon_b, dt_b) and _over_meteo_budget():
+                if not quota_stopped:
+                    u = _meteo_usage()
+                    log.warning(f"[seed] reached the meteo budget "
+                                f"({u['total']}/{SEED_METEO_BUDGET}) — buckets not "
+                                f"already cached are left for next time")
                 quota_stopped = True
-                log.warning(f"[seed] stopping at the meteo budget "
-                            f"({u['total']}/{SEED_METEO_BUDGET}) — "
-                            f"{len(buckets) - done_buckets} buckets left for next time")
-                break
+                meteo_deferred += 1
+                continue
             try:
-                dt_b  = datetime.fromisoformat(f"{date_str}T{hour:02d}:00:00+00:00")
                 # strict: a failed fetch returns None rather than synthetic
                 # constants, so we drop the bucket instead of training on invented weather
                 meteo = await fetch_meteo_historical(lat_b, lon_b, dt_b, strict=True)
@@ -1452,7 +1573,7 @@ class ThermalModel:
                     if row[COL_ALT_AGL] < _MIN_SAMPLE_AGL:
                         on_ground += 1
                         continue
-                    if _above_thermal_base(alt, row[2], meteo["cape_base"]):
+                    if _above_thermal_base(alt, row[2], thermal_top_agl(meteo)):
                         above_base += 1
                         continue
                     label = _label_for(bool(circling), float(vario))
@@ -1463,12 +1584,13 @@ class ThermalModel:
                     # retain the whole cached matrix.  See retrain().
                     self._buffer_X.append(row)
                     self._buffer_y.append(label)
+                    self._buffer_changed = True
                     added += 1
                 except Exception as exc:
                     log.warning(f"[seed] feature failed at ({lat:.3f},{lon:.3f}): {exc}")
                     errors += 1
 
-            await asyncio.sleep(0.3)  # polite pacing for the Open-Meteo archive API
+            await asyncio.sleep(_SEED_PACE_S)  # polite pacing for the Open-Meteo archive API
 
         # Same day-stratified eviction as the live path — a /seed rebuild is
         # exactly the case where one long stretch could otherwise crowd out
@@ -1493,7 +1615,10 @@ class ThermalModel:
             "skipped_ambiguous":    ambiguous,
             "skipped_no_terrain":   no_terrain,
             "stopped_at_meteo_budget": quota_stopped,
+            "meteo_deferred_buckets":  meteo_deferred,
             "stopped_at_time_budget":  time_stopped,
+            "meteo_range_requests":    range_requests,
+            "meteo_hours_prefetched":  prefetched,
             "buffer_total":     len(self._buffer_X),
         }
         log.info(f"[seed] complete: {result}")

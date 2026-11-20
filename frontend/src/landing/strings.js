@@ -33,10 +33,20 @@
 //        1.73 B in 2026, 53.65% fixed-wing of 2025 revenue). Prices: SkySight
 //        USD 89/yr (Cumulus Soaring store), TopMeteo EUR 67.90–139.90/yr
 //        (topmeteo.eu). Checked 17 Nov 2026.
+//      - The chronology (section 08, `tl*` keys): every figure in it is the
+//        cited publication's own, read from its abstract or page on 20 Nov
+//        2026 — e.g. Hernández-Aguayo et al. (arXiv:2608.00241) 123.6 m/°C
+//        for warm-season midday low mountains, not for all of France; SOARNET's
+//        0.98 F1 is on its training/validation sets. Sources are TIMELINE in
+//        Landing.jsx. The `fr*` frontier lines summarise those rows and claim
+//        only what was not found in that search, never that nobody does it.
 //   2. ThermalSense's own measurements: the offline score is copied from
 //      CLAUDE.md (16 Nov 2026, `--variant base --by-hour`; Landing.jsx SCORES);
 //      the horizon table is /verification/summary?days=30 on the live node,
-//      read 17 Nov 2026 (Landing.jsx HORIZONS). Re-measure there, change here.
+//      read 19 Nov 2026 (Landing.jsx HORIZONS); the roadmap's full-resolution
+//      terrain gain (m2Text) is the 17 Nov paired delta on the 6 Nov buffer,
+//      +0.023 to +0.027 over three fold seeds (CLAUDE.md). Re-measure there,
+//      change here.
 //   3. Assumptions, labelled as such on the page: the 1 / (1 − f) calculator
 //      and the SOM line.
 //
@@ -54,6 +64,7 @@ const STRINGS = {
     navProduct:   'Ürün',
     navArch:      'Mimari',
     navHorizon:   'Tahmin ufku',
+    navField:     'Kronoloji',
     navCompete:   'Rakipler',
     navMarket:    'Pazar',
     navGain:      'Verim',
@@ -282,26 +293,164 @@ const STRINGS = {
     hzMin:        '{n} dk',
     hzHour:       '{n} sa',
     hzPendingRow: 'Ölçülüyor',
-    hzPending:    '6 saatlik ufuk 17 Kasım 2026’da deftere eklendi; ilk sonuçlar '
-                + 'birikiyor. Ölçülmemiş bir ufuk için rakam yazmıyoruz.',
+    hzPending:    '6 saatlik ufuk 17 Kasım 2026’da deftere eklendi; 19 Kasım’da '
+                + 'trafikle puanlanabilen yalnızca 8 tahmini vardı, okumak için '
+                + 'çok az. Ölçülmemiş bir ufuk için rakam yazmıyoruz.',
     hzReadTitle:  'Okuma',
-    hzRead:       'Model, termalin hangi bölgede ve hangi saatte olacağını 3 saat '
-                + 'ileriye kadar 0,67–0,71 AUC ile ayırt ediyor ve bu ayrım '
-                + 'ufukla belirgin biçimde düşmüyor. Harita içindeki sıcak '
-                + 'noktaların isabeti ise yalnızca 15 dakikada şansın (%20) '
-                + 'açıkça üzerinde; 30 dakika–1 saatte nokta tahmini üstte ama '
-                + 'aralık şansı kapsıyor, 2 saatten sonra nokta tahmini şansın '
-                + 'altında. Bugünkü dürüst iddiamız: uçuş öncesi planlamada '
+    hzRead:       'Model, termalin hangi bölgede ve hangi saatte olacağını 2 saat '
+                + 'ileriye kadar 0,69–0,72 AUC ile ayırt ediyor ve bu ayrım '
+                + 'ufukla düşmüyor. 3 saatte 0,58’e iniyor: yazı-turanın hâlâ '
+                + 'üzerinde, ama aralığı geniş. Harita içindeki sıcak noktaların '
+                + 'isabeti 15 ve 30 dakikada şansın (%20) açıkça üzerinde; 1 '
+                + 'saatten itibaren nokta tahmini şans düzeyinde ya da hemen '
+                + 'altında (%18–20) ve aralık şansı kapsıyor. Bugünkü dürüst '
+                + 'iddiamız: uçuş öncesi planlamada 2 saat ileriye kadar '
                 + '“nerede ve ne zaman termal var” sorusuna güvenilir yanıt; '
-                + 'hücre ölçeğinde konum için ise kısa ufuk. Hücre ölçeğindeki '
+                + 'hücre ölçeğinde konum için ise yarım saat. Hücre ölçeğindeki '
                 + 'isabeti uzatmak, yol haritasının ikinci kilometre taşıdır.',
-    hzMeta:       'Doğrulama defteri, son 30 gün, 17 Kasım 2026. Köşeli '
+    hzMeta:       'Doğrulama defteri, son 30 gün, 19 Kasım 2026. Köşeli '
                 + 'parantezler %95 bootstrap güven aralığıdır. Sıcak nokta: '
                 + 'haritanın en yüksek olasılıklı %20’lik hücreleri. AUC 0,50 '
                 + 'yazı-turadır. Tahminlerin çoğu, puanlanacak trafik olmadığı '
                 + 'için “doğrulanamaz” sayılır ve hesaba katılmaz.',
 
-    // 08 competition
+    // 08 field chronology
+    tlTitle:      'Termal tahmini bugüne nasıl geldi?',
+    tlIntro:      'Termalin yerini bilmek için dört yol denendi: fiziğini '
+                + 'hesaplamak, hava tahminini yapay zekâyla yapmak, aracın '
+                + 'termali uçarken kendisinin bulması ve gözlenen uçuşlardan '
+                + 'harita çıkarmak. Aşağıda her adım yayınıyla birlikte, yayın '
+                + 'yılına göre sıralı. Son satır dışındaki hiçbir sonuç '
+                + 'ThermalSense ile elde edilmedi.',
+    tlTrackPhysics: 'Fizik ve simülasyon',
+    tlTrackOnboard: 'Uçuşta bulma',
+    tlTrackData:  'Uçuş verisinden harita',
+    tlTrackWeather: 'Yapay zekâ ile hava tahmini',
+    tlTrackUs:    'ThermalSense',
+    tlLenschowT:  'Termal, ölçülen bir nesne oluyor',
+    tlLenschow:   'Araştırma uçağı ölçümleriyle konvektif sınır tabakasındaki '
+                + 'termallerin yapısı ve bu katmandaki taşınımdaki rolü '
+                + 'incelendi. Sonraki termal modellerinin fiziksel zemini.',
+    tlWharingtonT:'Pekiştirmeli öğrenme süzülmeye giriyor',
+    tlWharington: 'Melbourne’de (RMIT) bir çalışma, süzülen bir hava aracının '
+                + 'termali merkezlemesini pekiştirmeli öğrenmeyle denedi. '
+                + 'Yalnızca simülasyonda.',
+    tlNasaT:      'Sahada kanıt: +60 dakika',
+    tlNasa:       'NASA Dryden’de küçük sabit kanatlı bir İHA, 17 uçuşta '
+                + 'termalleri otonom olarak kullanıp havada kalış süresine 60 '
+                + 'dakika ekledi. Termali, içine girdiğinde ölçerek buluyordu.',
+    tlRl2016T:    'Türbülanslı termalde öğrenen süzülme',
+    tlRl2016:     'Konvektif türbülans simülasyonunda eğitilen pekiştirmeli '
+                + 'öğrenme ajanları termalde tırmanmayı öğrendi ve süzülmeyi '
+                + 'yönlendirmeye yeten algılayıcı ipuçlarını belirledi.',
+    tlRl2018T:    'Öğrenilen politika gerçek planörde',
+    tlRl2018:     '2 m kanat açıklıklı bir planör, sahada birkaç günlük kendi '
+                + 'uçuş deneyiminden termalde tırmanmayı öğrendi. Kullandığı '
+                + 'ipuçları: dikey rüzgâr ivmesi ve yatış eksenindeki tork.',
+    tlAutopilotT: 'Otonom süzülme açık kaynak otopilotta',
+    tlAutopilot:  'ArduSoar, termal tespitini yaygın bir açık kaynak otopilota '
+                + 'taşıdı. Microsoft Research’ün POMDP tabanlı denetleyicisi, '
+                + 'aynı anda termal kullanan iki küçük sabit kanatlı İHA ile '
+                + 'uçuş testinden geçti. Penn State AutoSOAR, 7,8 saatlik '
+                + 'uçuşun yaklaşık 3 saatini termalde tırmanarak geçirdi. Üçü '
+                + 'de termali uçarken buluyor.',
+    tlStorksT:    'Kuş izlerinden Avrupa yükselme haritası',
+    tlStorks:     'Ak leylek GPS izleri ve yalnızca durağan arazi özellikleriyle '
+                + '(topoğrafya, arazi örtüsü) eğitilen rastgele orman '
+                + 'modelleri, Avrupa ölçeğinde yükselen hava olasılığı haritası '
+                + 'çıkardı. Hava verisi kullanılmadı; belirli bir gün için '
+                + 'tahmin değil.',
+    tlSoarnetT:   'Pilot kayıtlarından sinir ağı',
+    tlSoarnet:    'Bir yüksek lisans tezi, pilotların yayımladığı uçuş '
+                + 'kayıtlarındaki termalleri etiket, hava ve araziyi girdi '
+                + 'yaparak bir sinir ağı eğitti. Bildirilen 0,98 F1 skoru '
+                + 'eğitim ve doğrulama kümesine ait; bağımsız bir test sonucu '
+                + 'verilmiyor.',
+    tlXcT:        'İlerlemek mi, tırmanmak mı?',
+    tlXc:         'Stuttgart Üniversitesi’nin hiyerarşik pekiştirmeli öğrenme '
+                + 'politikası, kros-kantri uçuşta mesafe almak ile termalde '
+                + 'tırmanmak arasında karar veriyor. Simülasyonda eğitildi, '
+                + 'otonom bir planörün gömülü donanımında uçuş testinden geçti.',
+    tlGraphcastT: 'Yapay zekâ küresel hava tahmininde',
+    tlGraphcast:  'GraphCast 10 günlük küresel tahmini bir dakikadan kısa sürede '
+                + 'üretti ve ECMWF’nin deterministik modelini 1.380 doğrulama '
+                + 'hedefinin %90’ında geçti. Izgarası 0,25° (yaklaşık 28 km); '
+                + 'bir termal birkaç yüz metredir.',
+    tlDayclassT:  'Gün düzeyinde: bugün termal olur mu?',
+    tlDayclass:   'İngiltere’deki planör kulüplerinin on yıllık uçuşlarıyla '
+                + 'eğitilen rastgele orman, bir günde en az bir uçuşun termalde '
+                + 'süzülüp süzülmeyeceğini %81,2 doğrulukla tahmin etti. Cevap '
+                + 'gün için; “nerede” sorusu yok.',
+    tlHotspotsT:  'Kalabalık kaynaklı termal klimatolojisi',
+    tlHotspots:   'WeGlide, kullanıcılarının yüklediği on milyonu aşkın '
+                + 'termalden Orta Avrupa için 25 sıcak nokta haritası çıkardı: '
+                + 'beş zaman dilimi × beş rüzgâr yönü. thermal.kk7.ch de '
+                + 'haritalarını IGC uçuş kayıtlarından üretir. İkisi de '
+                + '“genelde nerede” der, “bugün bu saatte nerede” demez.',
+    tlVultureT:   'Rüzgârda sürüklenen termal, akbabadan ilhamla',
+    tlVulture:    'Derin pekiştirmeli öğrenme, 0–6 m/s yatay rüzgârda '
+                + 'sürüklenen bir termalde tırmanmayı öğrendi; öğrenilen '
+                + 'davranış akbabalarınkiyle karşılaştırıldı. Basitleştirilmiş '
+                + 'simülasyonda, uçuş testi yok.',
+    tlStormcastT: 'Yapay zekâ kilometre ölçeğine iniyor',
+    tlStormcast:  'NVIDIA’nın StormCast’i, NOAA’nın 3 km’lik konveksiyona izin '
+                + 'veren modelini (HRRR) bir difüzyon modeliyle taklit ediyor: '
+                + 'saatlik adım, sınır tabakasında sık dikey çözünürlük. '
+                + 'Konvektif bulut kümeleri görünür hâle geliyor; tek tek '
+                + 'termaller hâlâ ızgara aralığının altında.',
+    tlAifsT:      'Yapay zekâ hava modeli operasyonda',
+    tlAifs:       'ECMWF, yapay zekâ tahmin sistemi AIFS’i 25 Şubat 2025’te '
+                + 'fizik tabanlı modelinin yanında operasyona aldı; topluluk '
+                + '(ensemble) sürümü 1 Temmuz 2025’te izledi. Izgara aralığı '
+                + '28 km.',
+    tlLesT:       'Termalleri çözen simülasyon GPU’da',
+    tlLes:        'Termalleri tek tek çözebilen Hollanda büyük girdap '
+                + 'simülasyonu (LES) modeli DALES, A100 ve H100 GPU’lara '
+                + 'taşındı. Termali fizikten hesaplamak hızlanıyor; ama her '
+                + 'saha ve her gün için ayrı ve pahalı bir koşu olarak kalıyor.',
+    tlParaglidersT: 'Yamaç paraşütçüleri konveksiyon algılayıcısı',
+    tlParagliders:'Fransa’da 2017–2024 arasındaki 110.730 yamaç paraşütü '
+                + 'uçuşundan 1,47 milyon tırmanış ayrıştırıldı. Sıcak mevsimde, '
+                + 'öğle saatlerinde ve alçak dağlarda termal tavanı, sıcaklık '
+                + 'ile çiy noktası farkının 123,6 m/°C katı çıktı: kuramsal '
+                + 'yoğuşma seviyesine (125 m/°C) %1 yakın. Makine öğrenmesi ve '
+                + 'tahmin skoru yok; amaç belirleyicileri bulmak.',
+    tlUsT:        'Gözlenen tırmanışlardan sürekli öğrenen, kendini puanlayan '
+                + 'harita',
+    tlUs:         'Belirli bir saat için 50 m hücrede termal olasılığı veren, '
+                + 'dünya genelindeki termal telemetrisinden her beş dakikada '
+                + 'yeniden eğitilen ve her tahmini zamanından önce deftere '
+                + 'yazıp sonra gerçek uçuşlarla puanlayan model. Skoru ve '
+                + 'doğrulanmış ufku yukarıda, güven aralıklarıyla.',
+    frTitle:      'Bugün sınır nerede?',
+    fr1:          'Hava modelleri termal gününü görür',
+    fr1Text:      'Yapay zekâ ile hava tahmini artık operasyonel, ama ızgarası '
+                + '28 km (AIFS) ile 3 km (StormCast) arasında. Bir termal '
+                + 'birkaç yüz metredir: bu modeller termalin değil, termal '
+                + 'gününün tahminini verir.',
+    fr2:          'Uçuşta öğrenme termali içinde bulur',
+    fr2Text:      'Pekiştirmeli öğrenme gerçek uçuşlarda çalışıyor (2018, '
+                + '2023). Ama araç termali ancak içine girince tanıyor; '
+                + 'nereye bakacağını söyleyen bir önsel haritası yok.',
+    fr3:          'Veriden haritalar ya ortalama ya gün',
+    fr3Text:      'Uçuş verisinden çıkan sonuçlar ya iklimsel ortalama '
+                + '(genelde nerede), ya gün düzeyinde evet/hayır (%81,2), ya '
+                + 'da tahmin skoru olmayan bir belirleyici çalışması. Yüksek '
+                + 'skor bildiren tek sinir ağı bağımsız testle doğrulanmadı.',
+    frGapTitle:   'Boşluk',
+    frGap:        'Belirli bir saat için hücre ölçeğinde termal olasılığı '
+                + 'veren, gözlenen tırmanışlardan sürekli öğrenen ve '
+                + 'tahminlerini önceden kaydedip sonra gerçek uçuşlarla '
+                + 'puanlayan yayımlanmış bir sistem bulamadık. ThermalSense bu '
+                + 'boşlukta duruyor. Skoru mütevazı (harita içi sıralamada '
+                + '0,57 AUC) ve öyle raporlanıyor: boşluğun var olması, onu '
+                + 'doldurmanın kolay olduğu anlamına gelmiyor.',
+    tlMeta:       'Yalnızca bağlantısı açılabilen yayınlar alındı; her bağlantı '
+                + '20 Kasım 2026’da açıldı. Liste kapsamlı değil, bir tarama. '
+                + 'Pilotlara yönelik süzülme tahmin servisleri (SkySight, '
+                + 'TopMeteo) rakip analizinde. Yıl, yayın yılıdır.',
+
+    // 09 competition
     cmpTitle:     'Rakip analizi',
     cmpIntro:     'Termal bilgisi bugün iki yoldan geliyor: pilotlara yönelik, '
                 + 'kilometre ölçekli süzülme tahmin servisleri ve aracın termali '
@@ -348,7 +497,7 @@ const STRINGS = {
                 + 'Fiyatlar satıcı sayfalarından, Kasım 2026; bu servislerin '
                 + 'gelirleri kamuya açık değil.',
 
-    // 09 market
+    // 10 market
     mktTitle:     'Pazar büyüklüğü',
     mktIntro:     'ThermalSense bir platform değil, platformlara eklenen bir '
                 + 'yazılım ve veri katmanıdır. İlk iki rakam platform pazarıdır; '
@@ -381,7 +530,7 @@ const STRINGS = {
                 + '14 Mr $ arasında veriliyor. Tanımlar tutarlı olsun diye tek bir '
                 + 'yayıncının iki raporu kullanıldı.',
 
-    // 10 gain
+    // 11 gain
     gainTitle:    'Uçuş süresi ne kadar uzar?',
     gainIntro:    'Hesap basit: motor kapalı geçen süre bataryadan düşmez. '
                 + 'Uçuşun f kadarı motorsuz geçerse, aynı batarya ile havada '
@@ -408,7 +557,7 @@ const STRINGS = {
                 + 'kanatlı bir platformda ölçmek, uçuş testi kilometre taşının '
                 + 'işidir.',
 
-    // 11 why
+    // 12 why
     whyTitle:     'Neden biz.',
     why1:         'Kendiliğinden büyüyen veri',
     why1Text:     'Dünyada her gün milyonlarca termal telemetrisi kaydı '
@@ -428,7 +577,7 @@ const STRINGS = {
     why4Text:     'Bütün sistem bugün 2 çekirdekli tek bir sunucuda çalışıyor; '
                 + 'bir harita yaklaşık yarım saniyede üretiliyor.',
 
-    // 12 roadmap & ask
+    // 13 roadmap & ask
     roadTitle:    'Yol haritası ve kilometre taşları',
     roadDone:     'tamamlandı',
     m0When:       'Kasım 2026',
@@ -441,7 +590,7 @@ const STRINGS = {
                 + 'defterde ölçülmüş olur.',
     m2When:       '2027 · 2. çeyrek',
     m2:           'Hücre ölçeğinde isabet',
-    m2Text:       'Tam çözünürlüklü arazi (çevrimdışı +0,03–0,05 AUC ölçüldü) ve '
+    m2Text:       'Tam çözünürlüklü arazi (çevrimdışı +0,02–0,03 AUC ölçüldü) ve '
                 + 'uydu yüzey sıcaklığı üretimde; sıcak nokta isabeti 3 saatte '
                 + 'şansın üzerinde.',
     m3When:       '2027 · 3. çeyrek',
@@ -462,10 +611,10 @@ const STRINGS = {
                 + 'artışı.',
     askCta:       'Canlı sistemi inceleyin',
 
-    // 13 references
+    // 14 references
     refTitle:     'Kaynakça',
-    refIntro:     'Sunumdaki üçüncü taraf sonuçlarının ve termal modelinin '
-                + 'dayandığı yayınlar.',
+    refIntro:     'Sunumdaki üçüncü taraf sonuçlarının, termal modelinin ve '
+                + 'kronolojinin dayandığı yayınlar.',
 
     disclaimer:   'Üçüncü taraf sonuçları belirtilen yayınlardan alınmıştır ve '
                 + 'ThermalSense ile elde edilmemiştir. ThermalSense bir uçuş '
@@ -480,6 +629,7 @@ const STRINGS = {
     navProduct:   'Product',
     navArch:      'Architecture',
     navHorizon:   'Forecast horizon',
+    navField:     'Timeline',
     navCompete:   'Competition',
     navMarket:    'Market',
     navGain:      'Gain',
@@ -704,25 +854,162 @@ const STRINGS = {
     hzHour:       '{n} h',
     hzPendingRow: 'Being measured',
     hzPending:    'The 6-hour horizon was added to the ledger on 17 November '
-                + '2026; its first results are accumulating. We do not write a '
-                + 'number for a horizon we have not measured.',
+                + '2026; by 19 November it had only 8 forecasts with traffic to '
+                + 'score, too few to read. We do not write a number for a '
+                + 'horizon we have not measured.',
     hzReadTitle:  'Reading',
-    hzRead:       'Out to 3 hours, the model tells apart where and when '
-                + 'thermals will be with an AUC of 0.67–0.71, and that does not '
-                + 'fall clearly with the horizon. Hits on the hotspot cells '
-                + 'inside one map are clearly above chance (20%) only at 15 '
-                + 'minutes; at 30 minutes to 1 hour the point estimate is above '
-                + 'but the interval spans chance, and from 2 hours the point '
-                + 'estimate is below it. Our honest claim today: a reliable '
-                + 'answer for pre-flight planning to “where and when are there '
-                + 'thermals”, and a short horizon for cell-scale position. '
-                + 'Extending cell-scale accuracy is the second milestone on '
-                + 'the roadmap.',
-    hzMeta:       'Verification ledger, last 30 days, 17 November 2026. Square '
+    hzRead:       'Out to 2 hours, the model tells apart where and when '
+                + 'thermals will be with an AUC of 0.69–0.72, and that does not '
+                + 'fall with the horizon. At 3 hours it drops to 0.58: still '
+                + 'above a coin toss, but with a wide interval. Hits on the '
+                + 'hotspot cells inside one map are clearly above chance (20%) '
+                + 'at 15 and 30 minutes; from 1 hour the point estimate is at '
+                + 'or just below chance (18–20%) and the interval spans it. Our '
+                + 'honest claim today: a reliable answer for pre-flight '
+                + 'planning to “where and when are there thermals” out to 2 '
+                + 'hours, and half an hour for cell-scale position. Extending '
+                + 'cell-scale accuracy is the second milestone on the roadmap.',
+    hzMeta:       'Verification ledger, last 30 days, 19 November 2026. Square '
                 + 'brackets are 95% bootstrap intervals. Hotspot: the 20% of '
                 + 'cells with the highest probability on the map. AUC 0.50 is '
                 + 'a coin toss. Most forecasts have no traffic to score them '
                 + 'against; they count as “unverifiable” and are left out.',
+
+    tlTitle:      'How thermal prediction got here.',
+    tlIntro:      'Four routes have been tried to know where a thermal is: '
+                + 'compute its physics, forecast the weather with AI, let the '
+                + 'aircraft find it in flight, and build maps from observed '
+                + 'flights. Below, each step with its publication, in order of '
+                + 'publication year. No result here except the last row was '
+                + 'obtained with ThermalSense.',
+    tlTrackPhysics: 'Physics and simulation',
+    tlTrackOnboard: 'Finding it in flight',
+    tlTrackData:  'Maps from flight data',
+    tlTrackWeather: 'AI weather forecasting',
+    tlTrackUs:    'ThermalSense',
+    tlLenschowT:  'The thermal becomes something measured',
+    tlLenschow:   'Research-aircraft measurements examined the structure of '
+                + 'thermals in the convective boundary layer and their role in '
+                + 'its transport. The physical footing for later thermal models.',
+    tlWharingtonT:'Reinforcement learning meets soaring',
+    tlWharington: 'Work in Melbourne (RMIT) tried reinforcement learning for '
+                + 'centring a soaring aircraft in a thermal. In simulation only.',
+    tlNasaT:      'Field evidence: +60 minutes',
+    tlNasa:       'At NASA Dryden a small fixed-wing UAV used thermals '
+                + 'autonomously over 17 flights and added 60 minutes to its '
+                + 'time aloft. It found each thermal by measuring it once inside.',
+    tlRl2016T:    'Learning to soar in turbulent thermals',
+    tlRl2016:     'Reinforcement-learning agents trained in a simulation of '
+                + 'convective turbulence learned to climb in thermals, and '
+                + 'identified the sensory cues that suffice to guide soaring.',
+    tlRl2018T:    'A learned policy on a real glider',
+    tlRl2018:     'A glider with a 2 m wingspan learned to climb in thermals '
+                + 'from its own pooled flight experience over several days in '
+                + 'the field. Its cues: vertical wind acceleration and roll-wise '
+                + 'torque.',
+    tlAutopilotT: 'Autonomous soaring in an open-source autopilot',
+    tlAutopilot:  'ArduSoar brought thermal detection to a widely used '
+                + 'open-source autopilot. Microsoft Research’s POMDP-based '
+                + 'controller was flight-tested on two small fixed-wing UAVs '
+                + 'thermalling at once. Penn State’s AutoSOAR spent about 3 of '
+                + '7.8 flight hours climbing in thermals. All three find the '
+                + 'thermal in flight.',
+    tlStorksT:    'A European uplift map from bird tracks',
+    tlStorks:     'Random forests trained on white stork GPS tracks and static '
+                + 'landscape features alone (topography, land cover) produced '
+                + 'a Europe-wide map of uplift probability. No weather data '
+                + 'was used; it is not a forecast for any given day.',
+    tlSoarnetT:   'A neural network from pilots’ logs',
+    tlSoarnet:    'A master’s thesis trained a neural network with thermals '
+                + 'from pilots’ published flight logs as labels and weather '
+                + 'and terrain as inputs. The reported 0.98 F1 is on the '
+                + 'training and validation sets; no independent test result '
+                + 'is given.',
+    tlXcT:        'Press on, or climb?',
+    tlXc:         'The University of Stuttgart’s hierarchical '
+                + 'reinforcement-learning policy decides between covering '
+                + 'distance and climbing in a thermal on a cross-country '
+                + 'flight. Trained in simulation, it was flight-tested on '
+                + 'embedded hardware aboard an autonomous glider.',
+    tlGraphcastT: 'AI in global weather forecasting',
+    tlGraphcast:  'GraphCast produced a 10-day global forecast in under a '
+                + 'minute and beat ECMWF’s deterministic model on 90% of 1,380 '
+                + 'verification targets. Its grid is 0.25° (about 28 km); a '
+                + 'thermal is a few hundred metres across.',
+    tlDayclassT:  'Day level: will there be thermals today?',
+    tlDayclass:   'A random forest trained on ten years of flights at UK '
+                + 'gliding clubs predicted, with 81.2% accuracy, whether at '
+                + 'least one flight on a day would soar in thermals. The answer '
+                + 'is per day; there is no “where”.',
+    tlHotspotsT:  'Crowd-sourced thermal climatology',
+    tlHotspots:   'WeGlide turned over ten million thermals uploaded by its '
+                + 'users into 25 hotspot maps of Central Europe: five times of '
+                + 'day × five wind directions. thermal.kk7.ch likewise builds '
+                + 'its maps from IGC flight logs. Both say “where, usually”, '
+                + 'not “where, today at this hour”.',
+    tlVultureT:   'A drifting thermal, vulture-inspired',
+    tlVulture:    'Deep reinforcement learning learned to climb in a thermal '
+                + 'drifting in 0–6 m/s of horizontal wind, and the learned '
+                + 'behaviour was compared with vultures’. In a simplified '
+                + 'simulation; no flight test.',
+    tlStormcastT: 'AI reaches the kilometre scale',
+    tlStormcast:  'NVIDIA’s StormCast emulates NOAA’s 3 km '
+                + 'convection-allowing model (HRRR) with a diffusion model: an '
+                + 'hourly step and dense vertical levels in the boundary layer. '
+                + 'Convective cloud clusters become visible; individual thermals '
+                + 'are still below the grid spacing.',
+    tlAifsT:      'An AI weather model goes operational',
+    tlAifs:       'ECMWF took its AI forecasting system, AIFS, into operations '
+                + 'beside its physics-based model on 25 February 2025; the '
+                + 'ensemble version followed on 1 July 2025. Grid spacing 28 km.',
+    tlLesT:       'Thermal-resolving simulation on GPUs',
+    tlLes:        'DALES, the Dutch large-eddy simulation (LES) model that can '
+                + 'resolve individual thermals, was ported to A100 and H100 '
+                + 'GPUs. Computing thermals from physics is getting faster, but '
+                + 'it remains a separate, costly run for every site and day.',
+    tlParaglidersT: 'Paragliders as convection sensors',
+    tlParagliders:'1.47 million climbs were extracted from 110,730 paragliding '
+                + 'flights in France, 2017–2024. In the warm season, at midday '
+                + 'over low mountains, thermal ceiling came out at 123.6 m per '
+                + '°C of temperature–dew point spread: within 1% of the '
+                + 'theoretical condensation level (125 m/°C). No machine '
+                + 'learning and no forecast score; the aim is to find the '
+                + 'predictors.',
+    tlUsT:        'A map that learns from observed climbs and scores itself',
+    tlUs:         'A model that gives a thermal probability per 50 m cell for '
+                + 'a given hour, retrains every five minutes on thermal '
+                + 'telemetry from worldwide, and writes every forecast to a '
+                + 'ledger before its time, scoring it afterwards against real '
+                + 'flights. Its score and verified horizon are above, with '
+                + 'confidence intervals.',
+    frTitle:      'Where the frontier is today',
+    fr1:          'Weather models see the thermal day',
+    fr1Text:      'AI weather forecasting is now operational, but its grid runs '
+                + 'from 28 km (AIFS) to 3 km (StormCast). A thermal is a few '
+                + 'hundred metres across: these models forecast the thermal '
+                + 'day, not the thermal.',
+    fr2:          'Learning in flight finds it from inside',
+    fr2Text:      'Reinforcement learning works on real flights (2018, 2023). '
+                + 'But the aircraft recognises a thermal only once inside it; '
+                + 'it has no prior map telling it where to look.',
+    fr3:          'Data-driven maps give an average or a day',
+    fr3Text:      'Results from flight data are either a climatology (where, '
+                + 'usually), a per-day yes/no (81.2%), or a study of '
+                + 'predictors with no forecast score. The one neural network '
+                + 'reporting a high score was not checked on an independent test.',
+    frGapTitle:   'The gap',
+    frGap:        'We found no published system that gives a cell-scale '
+                + 'thermal probability for a given hour, learns continuously '
+                + 'from observed climbs, and records its forecasts in advance '
+                + 'to score them later against real flights. ThermalSense sits '
+                + 'in that gap. Its score is modest (0.57 AUC ranking within a '
+                + 'map) and reported as such: that a gap exists does not mean '
+                + 'it is easy to fill.',
+    tlMeta:       'Only publications with a resolvable link were taken; every '
+                + 'link was opened on 20 November 2026. The list is a survey, '
+                + 'not exhaustive. Soaring forecast services for pilots '
+                + '(SkySight, TopMeteo) are under Competition. The year is the '
+                + 'year of publication.',
 
     cmpTitle:     'Competitive analysis',
     cmpIntro:     'Thermal information comes from two places today: '
@@ -859,7 +1146,7 @@ const STRINGS = {
                 + '6-hour horizon measured in the ledger.',
     m2When:       '2027 · Q2',
     m2:           'Cell-scale accuracy',
-    m2Text:       'Full-resolution terrain (+0.03–0.05 AUC measured offline) and '
+    m2Text:       'Full-resolution terrain (+0.02–0.03 AUC measured offline) and '
                 + 'satellite land surface temperature in production; hotspot '
                 + 'hits above chance at 3 hours.',
     m3When:       '2027 · Q3',
@@ -882,7 +1169,7 @@ const STRINGS = {
 
     refTitle:     'References',
     refIntro:     'The publications behind the third-party results in this '
-                + 'presentation and behind the thermal model.',
+                + 'presentation, the thermal model and the timeline.',
 
     disclaimer:   'Third-party results are taken from the publications cited '
                 + 'and were not obtained with ThermalSense. ThermalSense is '

@@ -548,3 +548,92 @@ async def test_nightly_seed_reads_yesterday(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "_seed_job", fake_seed_job)
     await main._nightly_seed_job()
     assert calls == {"days_back": 1, "limit": main.NIGHTLY_SEED_LIMIT, "reset": False}
+
+
+# ---------------------------------------------------------------------------
+# A cycle that adds nothing does not refit
+# ---------------------------------------------------------------------------
+
+async def _dark(lat, lon, h, strict=False):
+    return {"temp_2m": 8.0, "humidity": 0.8, "wind_speed": 3.0, "wind_dir": 0.0,
+            "cape": 0.0, "cin": 5.0, "solar_ghi": 0.0, "temp_850": 4.0,
+            "temp_500": -20.0, "lapse_rate": 6.0, "cape_base": 0,
+            "pbl_height": 200.0, "soil_temp": 10.0}
+
+
+def _counting(m, monkeypatch):
+    n = {"fits": 0, "saves": 0}
+    monkeypatch.setattr(m, "fit_and_gate", lambda: n.__setitem__("fits", n["fits"] + 1))
+    monkeypatch.setattr(m, "_save_buffer", lambda: n.__setitem__("saves", n["saves"] + 1))
+    return n
+
+
+async def test_a_night_cycle_after_a_fit_does_not_refit(cycle, monkeypatch):
+    """The fit is deterministic, so refitting an unchanged buffer rebuilt the
+    challenger the gate had already judged — every five minutes all night, and
+    twelve losses in a row promote it by repetition alone."""
+    monkeypatch.setattr(tm, "MAX_SAMPLE_GRIDS", 2)
+    m = tm.ThermalModel()
+    n = _counting(m, monkeypatch)
+    await m.retrain()                                   # daylight: adds rows, fits
+    assert len(m._buffer_X) > 0 and n == {"fits": 1, "saves": 1}
+
+    monkeypatch.setattr(mc, "fetch_meteo_features", _dark)
+    await m.retrain()
+    await m.retrain()
+    assert n == {"fits": 1, "saves": 1}, "nothing new: no fit, and no rewrite of the buffer"
+
+
+async def test_the_first_cycle_after_a_start_fits_even_with_nothing_new(cycle, monkeypatch):
+    """The buffer on disk may never have met a fit — a restart between the
+    save and the fit, or rows load() dropped — so the first cycle fits."""
+    monkeypatch.setattr(mc, "fetch_meteo_features", _dark)
+    monkeypatch.setattr(tm, "MAX_SAMPLE_GRIDS", 2)
+    m = tm.ThermalModel()
+    n = _counting(m, monkeypatch)
+    await m.retrain()
+    await m.retrain()
+    assert n["fits"] == 1
+
+
+async def test_a_fit_that_raised_runs_again_next_cycle(cycle, monkeypatch):
+    monkeypatch.setattr(mc, "fetch_meteo_features", _dark)
+    monkeypatch.setattr(tm, "MAX_SAMPLE_GRIDS", 2)
+    m = tm.ThermalModel()
+    calls = []
+
+    def boom():
+        calls.append(1)
+        raise RuntimeError("fit failed")
+
+    monkeypatch.setattr(m, "fit_and_gate", boom)
+    with pytest.raises(RuntimeError):
+        await m.retrain()
+    monkeypatch.setattr(m, "fit_and_gate", lambda: calls.append(2))
+    await m.retrain()
+    assert calls == [1, 2]
+
+
+async def test_rows_from_a_seed_are_fitted_by_a_night_cycle(cycle, monkeypatch, tmp_path):
+    """/seed fills the buffer and then calls retrain() to fit it, at 02:00 UTC
+    for the nightly run — when the cycle itself adds nothing."""
+    import sqlite3
+    db = tmp_path / "beacons.db"
+    con = sqlite3.connect(db)
+    con.execute("""CREATE TABLE beacons (ts TEXT, id TEXT, lat REAL, lon REAL,
+                   alt REAL, vario REAL, circling INT, is_tow INT,
+                   ac_type INT, under_tow INT)""")
+    con.commit()
+    con.close()
+    monkeypatch.setattr("config.DB_PATH", db, raising=False)
+
+    monkeypatch.setattr(mc, "fetch_meteo_features", _dark)
+    monkeypatch.setattr(tm, "MAX_SAMPLE_GRIDS", 2)
+    m = tm.ThermalModel()
+    n = _counting(m, monkeypatch)
+    await m.retrain()                                   # start-up fit
+    await m.seed_from_history(days_back=1, limit=10, reset=True)
+    await m.retrain()
+    assert n["fits"] == 2, "the seed changed the buffer, so the next cycle must fit it"
+    await m.retrain()
+    assert n["fits"] == 2

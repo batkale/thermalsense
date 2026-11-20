@@ -130,7 +130,6 @@ _FALLBACK: dict = {
     "temp_850":      5.0,
     "temp_500":    -12.0,
     "lapse_rate":    4.9,
-    "cape_base":    1200,
     "pbl_height":  1500.0,
     "soil_temp":     20.0,
 }
@@ -219,11 +218,32 @@ _LIVE_SNAP = 0.1
 _live_cache: dict[tuple, dict] = {}
 _live_hour = ""
 _live_usage = {"day": "", "requests": 0, "cache_hits": 0,
-               "historical_requests": 0, "historical_cache_hits": 0}
+               "historical_requests": 0, "historical_cache_hits": 0,
+               "calls": 0.0, "historical_calls": 0.0}
 # Open-Meteo's published free-tier ceiling.  Forecast and archive calls come out
 # of the same budget, which is why both are counted here: the nightly seed and
 # the live sampler are spending one allowance between them.
 LIVE_DAILY_QUOTA = 10000
+
+
+def _call_weight(n_vars: int, days: float = 1) -> float:
+    """What Open-Meteo bills one request as, in calls.
+
+    Its pricing page counts a request for more than 10 weather variables, or
+    more than two weeks of one location, as a fraction more: "a request for 2
+    weeks of data with 15 weather variables will be calculated as 1.5 API
+    calls", and four weeks of the same as 3.0 — so the two factors multiply.
+    The quota is in these calls, not in requests.  Until 19 Nov 2026 the counter
+    added 1 per request while the live one carried 13 variables (HOURLY_VARS +
+    DISPLAY_VARS): every forecast was 1.3 calls, every archive hour 1.1, and the
+    budgets checked against `total` were up to 30% short of what was spent.
+    """
+    return max(1.0, n_vars / 10) * max(1.0, days / 14)
+
+
+# The live request asks for 2 forecast days, the archive request for one.
+_LIVE_CALL_WEIGHT = _call_weight(len(HOURLY_VARS) + len(DISPLAY_VARS), 2)
+_HIST_CALL_WEIGHT = _call_weight(len(HOURLY_VARS), 1)
 
 
 def _live_key(lat: float, lon: float, forecast_h: float) -> tuple:
@@ -243,18 +263,27 @@ def live_usage() -> dict:
     base = ({"day": today, "requests": 0, "cache_hits": 0,
              "historical_requests": 0, "historical_cache_hits": 0}
             if _live_usage["day"] != today else dict(_live_usage))
-    base["total"] = base["requests"] + base["historical_requests"]
+    # `requests` counts what was sent; `total` is what Open-Meteo bills for it
+    # (see _call_weight), and is the figure the quota is checked against.
+    base["calls"] = round(base.get("calls", 0.0), 1)
+    base["historical_calls"] = round(base.get("historical_calls", 0.0), 1)
+    base["total"] = round(base["calls"] + base["historical_calls"], 1)
     base["quota"] = LIVE_DAILY_QUOTA
     return base
 
 
-def _count_live(hit: bool, historical: bool = False) -> None:
+def _count_live(hit: bool, historical: bool = False, weight: float = 1.0) -> None:
     today = datetime.now(timezone.utc).date().isoformat()
     if _live_usage["day"] != today:
         _live_usage.update(day=today, requests=0, cache_hits=0,
-                           historical_requests=0, historical_cache_hits=0)
+                           historical_requests=0, historical_cache_hits=0,
+                           calls=0.0, historical_calls=0.0)
     prefix = "historical_" if historical else ""
-    _live_usage[f"{prefix}cache_hits" if hit else f"{prefix}requests"] += 1
+    if hit:
+        _live_usage[f"{prefix}cache_hits"] += 1
+        return
+    _live_usage[f"{prefix}requests"] += 1
+    _live_usage[f"{prefix}calls"] = _live_usage.get(f"{prefix}calls", 0.0) + weight
 
 
 async def fetch_meteo_features(lat: float, lon: float, forecast_h: float,
@@ -314,13 +343,13 @@ async def fetch_meteo_features(lat: float, lon: float, forecast_h: float,
             return _interp(hourly[key][i0], hourly[key][i1], w,
                            _FALLBACK[fb_key], circular)
 
-        # The derived values below (lapse rate, cloud base) are computed from
-        # the interpolated temperatures, not interpolated themselves, so they
-        # stay consistent with the three numbers they are built from.
+        # The lapse rate below is computed from the interpolated temperatures,
+        # not interpolated itself, so it stays consistent with the numbers it
+        # is built from.  The thermal top is too, by thermal_top_agl at use.
         t2m  = _v("temperature_2m",     "temp_2m")
         t850 = _v("temperature_850hPa", "temp_850")
         t500 = _v("temperature_500hPa", "temp_500")
-        _count_live(hit=False)
+        _count_live(hit=False, weight=_LIVE_CALL_WEIGHT)
         out = {
             "temp_2m":    t2m,
             "humidity":   _v("relativehumidity_2m", "humidity_pct") / 100,
@@ -332,7 +361,6 @@ async def fetch_meteo_features(lat: float, lon: float, forecast_h: float,
             "temp_850":   t850,
             "temp_500":   t500,
             "lapse_rate": (t850 - t500) / 3.5,
-            "cape_base":  max(0, int(((t2m - 8) / max(1, (t2m - t850) / 1.5)) * 1000)),
             "pbl_height": _v("boundary_layer_height",     "pbl_height"),
             "soil_temp":  _v("soil_temperature_0_to_7cm", "soil_temp"),
             # Display only — see DISPLAY_VARS.  .get: a slot or a whole
@@ -371,6 +399,139 @@ def is_synthetic(meteo: dict) -> bool:
     fallback to _FALLBACK directly and it would break every one of them.
     """
     return meteo == _FALLBACK
+
+
+# --- thermal top ---------------------------------------------------------------
+#
+# How high thermals reach, in metres above the ground.  Dry thermals stop at the
+# top of the convective boundary layer; where the layer clears the condensation
+# level they stop at cloud base instead, because that is where cumulus forms and
+# where a glider has to leave the climb.  So the top is the lower of the two.
+#
+# Cloud base is the lifting condensation level of a surface parcel: about 125 m
+# per degree C of dew-point spread (Lawrence 2005, BAMS 86:225 -- the pilot's
+# "400 ft per degree").  The layer height is Open-Meteo's boundary_layer_height,
+# already in every request.
+#
+# It replaced `cape_base`, (t2m - 8) / max(1, (t2m - t850) / 1.5) * 1000, on
+# 19 Nov 2026.  That formula read no humidity and no layer height: 0 m (filter
+# off) on every hour under 8 degC, tens of kilometres wherever 2 m and 850 hPa
+# were within 1.5 degC of each other, and 2,273 m at Inonu that noon against a
+# 900 m cloud base.  Measured against how high thermalling aircraft actually
+# climbed in 978 (0.5 deg, hour) buckets of the archive, Spearman 0.73 and a
+# median miss of 229 m here against 0.55 and 715 m there -- see CLAUDE.md.
+_LCL_M_PER_C = 125.0
+# Magnus coefficients over water (Alduchov & Eskridge 1996).
+_MAGNUS_A, _MAGNUS_B = 17.625, 243.04
+
+
+def dew_point_c(temp_c: float, rh_frac: float) -> float | None:
+    """Dew point in degrees C from air temperature and relative humidity (0-1)."""
+    if temp_c is None or rh_frac is None or rh_frac <= 0:
+        return None
+    rh = min(float(rh_frac), 1.0)
+    g = math.log(rh) + _MAGNUS_A * temp_c / (_MAGNUS_B + temp_c)
+    return _MAGNUS_B * g / (_MAGNUS_A - g)
+
+
+def lcl_agl(temp_c: float, rh_frac: float) -> float | None:
+    """Condensation level of a surface parcel, metres above ground — the cumulus base."""
+    td = dew_point_c(temp_c, rh_frac)
+    if td is None:
+        return None
+    return max(0.0, (temp_c - td) * _LCL_M_PER_C)
+
+
+def thermal_top_agl(meteo: dict) -> float | None:
+    """How high thermals reach, metres above ground: min(boundary layer, cloud base).
+
+    Reads only temp_2m, humidity and pbl_height, which every meteo dict carries
+    -- including historical-cache entries written before this function existed,
+    so nothing on disk needs rewriting.  None when one of the three is missing:
+    that is "no estimate", and callers must not filter on it.  0 is an estimate
+    (saturated air at 2 m: fog or stratus on the ground), not a missing value.
+    """
+    lcl = lcl_agl(meteo.get("temp_2m"), meteo.get("humidity"))
+    pbl = meteo.get("pbl_height")
+    if lcl is None or pbl is None:
+        return None
+    return min(max(float(pbl), 0.0), lcl)
+
+
+def thermal_top_columns(X):
+    """thermal_top_agl over feature rows (temp_2m, humidity, pbl_height columns).
+
+    The three inputs are columns 5, 6 and 19 of build_feature_matrix, so a
+    buffer row carries everything needed to recompute its own thermal top.
+    NaN where humidity is not positive (no dew point).
+    """
+    import numpy as np
+    X = np.asarray(X, dtype=float)
+    t, rh, pbl = X[:, 5], X[:, 6], X[:, 19]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        g = np.log(np.clip(rh, None, 1.0)) + _MAGNUS_A * t / (_MAGNUS_B + t)
+        td = _MAGNUS_B * g / (_MAGNUS_A - g)
+    lcl = np.maximum((t - td) * _LCL_M_PER_C, 0.0)
+    top = np.minimum(np.maximum(pbl, 0.0), lcl)
+    return np.where(rh > 0, top, np.nan)
+
+
+def _with_legacy_base(meteo: dict) -> dict:
+    """Write the thermal top under the old `cape_base` key too, for a rollback.
+
+    Nothing in this code reads `cape_base` any more -- it recomputes the top
+    from the fields, so cache entries written under the old formula are read
+    correctly.  But the historical cache is permanent and an older image reads
+    `meteo["cape_base"]` from every entry: without the key its /seed would fail
+    each beacon of every bucket cached after the switch.  It gets the new value,
+    which is the better one for it as well.
+    """
+    top = thermal_top_agl(meteo)
+    meteo["cape_base"] = 0 if top is None else int(round(top))
+    return meteo
+
+
+# --- cumulus outlook (display only) -------------------------------------------
+#
+# Whether thermals mark themselves with cumulus, from the same two levels as the
+# thermal top above: cumulus where the boundary layer clears the condensation
+# level (the top is then the cloud base), "blue" where it stops short — dry,
+# unmarked thermals topping out at the layer.  That is the cumulus-potential
+# test soaring forecasts use.  Display only: nothing here reaches the meteo dict
+# build_feature_matrix reads.  It is a point estimate for one 0.1 degree cell
+# from 2 m values and says nothing about where inside the cell the clouds stand;
+# the satellite layer on the map is what shows that.
+
+def cumulus_outlook(meteo: dict, min_solar_ghi: float) -> dict | None:
+    """Cumulus or blue thermals at the forecast moment, and the cloud base.
+
+    kind is a translation key on the frontend (cumulus_<kind>), so it is part of
+    the wire contract:
+      cumulus — thermals reach the condensation level; base_agl is the cloud base
+      blue    — the boundary layer stops below it; thermals stay unmarked
+      none    — too little sun for thermals at all (the night guard's floor)
+    None for the synthetic fallback: an invented 60% humidity would draw an
+    invented cloud base.
+    """
+    if is_synthetic(meteo):
+        return None
+    t2m, rh, pbl = meteo.get("temp_2m"), meteo.get("humidity"), meteo.get("pbl_height")
+    td, lcl = dew_point_c(t2m, rh), lcl_agl(t2m, rh)
+    if td is None or pbl is None:
+        return None
+    if meteo.get("solar_ghi", 0) < min_solar_ghi:
+        kind = "none"
+    else:
+        kind = "cumulus" if pbl >= lcl else "blue"
+    return {
+        "kind":      kind,
+        # 50 m steps: the 125 m/degC rule is good to a few hundred metres, and
+        # "1,637 m" would claim more than that.
+        "base_agl":  int(round(lcl / 50) * 50),
+        "dew_point": round(td, 1),
+        # How far the layer top clears the base (+) or falls short of it (-).
+        "margin_m":  int(round((pbl - lcl) / 50) * 50),
+    }
 
 
 # The feature columns _FALLBACK lands in, with the value each one takes.  A real
@@ -421,9 +582,13 @@ def _hist_path():
     return Path(DATA_DIR) / "cache" / "meteo_historical.jsonl"
 
 
+def _hist_cell(lat: float, lon: float) -> tuple[float, float]:
+    return (round(round(lat / _HIST_SNAP) * _HIST_SNAP, 2),
+            round(round(lon / _HIST_SNAP) * _HIST_SNAP, 2))
+
+
 def _hist_key(lat: float, lon: float, dt: datetime) -> str:
-    la = round(round(lat / _HIST_SNAP) * _HIST_SNAP, 2)
-    lo = round(round(lon / _HIST_SNAP) * _HIST_SNAP, 2)
+    la, lo = _hist_cell(lat, lon)
     return f"{la}|{lo}|{dt.strftime('%Y-%m-%dT%H')}"
 
 
@@ -478,6 +643,40 @@ def _hist_cache_put(key: str, value: dict) -> dict:
     return value
 
 
+def historical_cached(lat: float, lon: float, dt: datetime) -> bool:
+    """Whether fetch_meteo_historical would answer this hour without a call."""
+    return _hist_cache_get(_hist_key(lat, lon, dt)) is not None
+
+
+def _hist_record(hourly: dict, i: int) -> dict:
+    """
+    The cache entry for slot i of an archive response.
+
+    Both fetches build it here — the single hour and the range — so the two can
+    never cache different weather for the same hour.
+    """
+    def _v(key, fb_key):
+        val = hourly[key][i]
+        return val if val is not None else _FALLBACK[fb_key]
+
+    t850 = _v("temperature_850hPa", "temp_850")
+    t500 = _v("temperature_500hPa", "temp_500")
+    return _with_legacy_base({
+        "temp_2m":    _v("temperature_2m",             "temp_2m"),
+        "humidity":   _v("relativehumidity_2m",        "humidity_pct") / 100,
+        "wind_speed": _v("windspeed_10m",              "wind_speed"),
+        "wind_dir":   _v("winddirection_10m",          "wind_dir"),
+        "cape":       _v("cape",                        "cape"),
+        "cin":        _v("convective_inhibition",       "cin"),
+        "solar_ghi":  _v("shortwave_radiation",         "solar_ghi"),
+        "temp_850":   t850,
+        "temp_500":   t500,
+        "lapse_rate": (t850 - t500) / 3.5,
+        "pbl_height": _v("boundary_layer_height",      "pbl_height"),
+        "soil_temp":  _v("soil_temperature_0_to_7cm",  "soil_temp"),
+    })
+
+
 async def fetch_meteo_historical(
     lat: float, lon: float, dt: datetime, strict: bool = False
 ) -> dict | None:
@@ -521,31 +720,9 @@ async def fetch_meteo_historical(
             "timezone":   "UTC",
         })
         r.raise_for_status()
-        hourly = r.json()["hourly"]
-
-        def _v(key, fb_key):
-            val = hourly[key][hour_idx]
-            return val if val is not None else _FALLBACK[fb_key]
-
-        t2m  = _v("temperature_2m",    "temp_2m")
-        t850 = _v("temperature_850hPa", "temp_850")
-        t500 = _v("temperature_500hPa", "temp_500")
-        _count_live(hit=False, historical=True)
-        return _hist_cache_put(ckey, {
-            "temp_2m":    t2m,
-            "humidity":   _v("relativehumidity_2m",        "humidity_pct") / 100,
-            "wind_speed": _v("windspeed_10m",              "wind_speed"),
-            "wind_dir":   _v("winddirection_10m",          "wind_dir"),
-            "cape":       _v("cape",                        "cape"),
-            "cin":        _v("convective_inhibition",       "cin"),
-            "solar_ghi":  _v("shortwave_radiation",         "solar_ghi"),
-            "temp_850":   t850,
-            "temp_500":   t500,
-            "lapse_rate": (t850 - t500) / 3.5,
-            "cape_base":  max(0, int(((t2m - 8) / max(1, (t2m - t850) / 1.5)) * 1000)),
-            "pbl_height": _v("boundary_layer_height",      "pbl_height"),
-            "soil_temp":  _v("soil_temperature_0_to_7cm",  "soil_temp"),
-        })
+        record = _hist_record(r.json()["hourly"], hour_idx)
+        _count_live(hit=False, historical=True, weight=_HIST_CALL_WEIGHT)
+        return _hist_cache_put(ckey, record)
     except Exception as exc:
         detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
         log.warning(
@@ -554,3 +731,103 @@ async def fetch_meteo_historical(
             f"{'skipping' if strict else 'using fallback'}"
         )
         return None if strict else _FALLBACK.copy()
+
+
+# --- many archived hours in one request ------------------------------------
+#
+# Open-Meteo bills a request by its span as well as its width: anything up to
+# two weeks costs the same as a single day (1.1 calls for the 11 HOURLY_VARS),
+# and every further fortnight costs that again.  fetch_meteo_historical asks for
+# a whole day and keeps one hour of it, so a cell flown for nine hours of one
+# day cost nine calls for one day's data.  Asking once per cell per fortnight
+# is the same data for one call.  Measured rebuilding 28 Sep-6 Nov 2026 from
+# the archive: 1,741 calls where hour-by-hour would have been ~17,000, and 477
+# of 479 hours checked came back identical to the single-day answers — the two
+# that differed were one hour Open-Meteo had revised since it was cached.
+_HIST_RANGE_DAYS = 14
+
+
+def plan_historical_ranges(points) -> list[tuple[float, float, list[datetime]]]:
+    """
+    Group archived hours into the fewest requests that bill as one.
+
+    points: (lat, lon, dt) for every hour wanted.  Hours already cached are
+    dropped; the rest are grouped by the 0.5 deg cell they are cached under and
+    cut into spans of at most _HIST_RANGE_DAYS days.  Returns one
+    (lat, lon, hours) per request, at the cell's snapped centre — where /seed
+    already asks — with the requests that cover the most hours first, so a
+    budget that runs out partway has bought as much weather as it could.
+    """
+    cells: dict[tuple[float, float], dict[str, datetime]] = {}
+    for lat, lon, dt in points:
+        key = _hist_key(lat, lon, dt)
+        if _hist_cache_get(key) is None:
+            cells.setdefault(_hist_cell(lat, lon), {})[key] = dt
+
+    plan = []
+    for (la, lo), hours in sorted(cells.items()):
+        span: list[datetime] = []
+        for dt in sorted(hours.values()):
+            if span and (dt.date() - span[0].date()).days >= _HIST_RANGE_DAYS:
+                plan.append((la, lo, span))
+                span = []
+            span.append(dt)
+        plan.append((la, lo, span))
+    plan.sort(key=lambda p: -len(p[2]))      # stable: ties stay in cell order
+    return plan
+
+
+async def fetch_meteo_historical_range(lat: float, lon: float, dts: list[datetime]) -> int:
+    """
+    Cache several archived hours of one 0.5 deg cell with a single request.
+
+    Each hour lands under exactly the key, as exactly the record,
+    fetch_meteo_historical would have written for it, which then answers it
+    from the cache.  Only the hours asked for are kept: the response carries
+    every hour of every day in the span, and the cache lives in memory whole.
+
+    Returns how many hours were cached.  A failure caches nothing and raises
+    nothing — those hours are simply still missing, and fetch_meteo_historical
+    will try each one itself, strict as ever.
+    """
+    if not dts:
+        return 0
+    first, last = min(dts).date(), max(dts).date()
+    if (last - first).days >= _HIST_RANGE_DAYS:
+        raise ValueError(f"{first}..{last} is longer than {_HIST_RANGE_DAYS} days "
+                         f"and would bill as more than one call")
+    la, lo = _hist_cell(lat, lon)
+    try:
+        r = await _get_client().get(OPEN_METEO_HIST_BASE, params={
+            "latitude":   la,
+            "longitude":  lo,
+            "hourly":     ",".join(HOURLY_VARS),
+            "start_date": first.isoformat(),
+            "end_date":   last.isoformat(),
+            "timezone":   "UTC",
+        })
+        r.raise_for_status()
+        # Billed by its span: up to 14 days is the weight of a single day.
+        _count_live(hit=False, historical=True,
+                    weight=_call_weight(len(HOURLY_VARS), (last - first).days + 1))
+        hourly = r.json()["hourly"]
+        slot = {str(t)[:13]: i for i, t in enumerate(hourly["time"])}
+    except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+        log.warning(f"[meteo] historical range failed ({la:.2f},{lo:.2f}) "
+                    f"{first}..{last} ({detail}) — {len(dts)} hour(s) left to fetch singly")
+        return 0
+
+    cached = 0
+    for dt in dts:
+        key = _hist_key(la, lo, dt)
+        i = slot.get(dt.strftime("%Y-%m-%dT%H"))
+        if i is None or _hist_cache_get(key) is not None:
+            continue
+        try:
+            record = _hist_record(hourly, i)
+        except Exception:
+            continue                 # left for the single-hour fetch to judge
+        _hist_cache_put(key, record)
+        cached += 1
+    return cached

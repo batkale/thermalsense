@@ -174,10 +174,16 @@ export default function TrainingPanel({ onClose }) {
 
         {meteo && (
           <Section title={t('sectionMeteoApi')}>
-            <Row label={t('requestsToday')} value={`${n(meteo.requests)} / ${n(meteo.quota)}`}
-                 tone={meteo.requests >= meteo.quota ? 'bad'
-                       : meteo.requests >= 0.8 * meteo.quota ? 'warn' : undefined} />
-            <Bar value={meteo.requests} max={meteo.quota} warnAt={0.8} />
+            {/* The quota is billed in calls: a request over 10 variables
+                counts as more than one, and forecast and archive requests
+                share it. An older backend sends no `calls`, and its `total`
+                is then plain requests. */}
+            <Row label={t('billedCallsToday')} value={`${n(meteo.total)} / ${n(meteo.quota)}`}
+                 tone={meteo.total >= meteo.quota ? 'bad'
+                       : meteo.total >= 0.8 * meteo.quota ? 'warn' : undefined} />
+            <Bar value={meteo.total} max={meteo.quota} warnAt={0.8} />
+            <Row label={t('requestsToday')}
+                 value={n((meteo.requests ?? 0) + (meteo.historical_requests ?? 0))} />
             <Row label={t('cacheHits')} value={n(meteo.cache_hits)} />
           </Section>
         )}
