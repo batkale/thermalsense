@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Internal page: linked from nowhere on the site and closed to search engines. -->
+<meta name="robots" content="noindex, nofollow">
+<title>ThermalSense · To-do</title>
+<script>
+  // Same keys as the map app and /about, so theme and language are one choice.
+  (function () {
+    var theme = 'dark';
+    try {
+      var saved = localStorage.getItem('thermalsense.theme');
+      if (saved === 'light' || saved === 'dark') theme = saved;
+      else if (window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches) theme = 'light';
+    } catch (e) { /* storage blocked: keep the default */ }
+    document.documentElement.dataset.theme = theme;
+  })();
+</script>
+<style>
+  :root {
+    --bg-app: #08121b; --bg-chrome: #0c1924; --bg-surface: #112231; --bg-sunken: #0a1620;
+    --border: #1f3446; --border-strong: #345067;
+    --text-title: #f2f7fb; --text-primary: #d6e2ec; --text-body: #b8c8d6; --text-muted: #8499ad;
+    --accent: #7fc1f5; --ok: #6fd39a; --warn: #f2b25c; --danger: #ff7f78; --lift: #ff9a57;
+    --btn-primary-bg: #e9f1f8; --btn-primary-fg: #0b1723;
+    --radius: 4px;
+    --sans: 'Archivo', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  }
+  :root[data-theme="light"] {
+    --bg-app: #e4ebf1; --bg-chrome: #f7f9fb; --bg-surface: #edf2f6; --bg-sunken: #dfe7ee;
+    --border: #cfdae4; --border-strong: #a9bccd;
+    --text-title: #0d2236; --text-primary: #15293d; --text-body: #2c4257; --text-muted: #536879;
+    --accent: #1b5fa6; --ok: #157347; --warn: #9c5208; --danger: #b3261e; --lift: #b93d0a;
+    --btn-primary-bg: #15293d; --btn-primary-fg: #f7f9fb;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg-app); color: var(--text-primary);
+    font: 15px/1.5 var(--sans); -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); }
+  button, input, textarea, select { font: inherit; color: inherit; }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 0 16px 48px; }
+  header {
+    background: var(--bg-chrome); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 2;
+  }
+  .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 12px 16px; }
+  .brand { display: flex; flex-direction: column; margin-right: auto; min-width: 0; }
+  .brand b { color: var(--text-title); font-size: 17px; letter-spacing: 0.01em; }
+  .brand span { color: var(--text-muted); font-size: 13px; }
+  .tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .btn {
+    border: 1px solid var(--border-strong); background: transparent; border-radius: var(--radius);
+    padding: 5px 11px; cursor: pointer; font-size: 13.5px; white-space: nowrap;
+  }
+  .btn:hover { background: var(--bg-surface); }
+  .btn.primary { background: var(--btn-primary-bg); color: var(--btn-primary-fg); border-color: transparent; }
+  .btn.primary:hover { opacity: 0.9; }
+  .btn.danger { color: var(--danger); }
+  .btn:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 1px;
+  }
+  .btn:disabled { opacity: 0.5; cursor: default; }
+  .notice { color: var(--text-muted); font-size: 13px; margin: 16px 0 4px; }
+  .meta { color: var(--text-muted); font-size: 13px; margin: 0 0 12px; }
+  .status { min-height: 22px; font-size: 13.5px; margin: 6px 0; }
+  .status.ok { color: var(--ok); } .status.warn { color: var(--warn); } .status.error { color: var(--danger); }
+  .keyform { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0 8px; }
+  input[type=text], input[type=password], input[type=search], textarea, select {
+    background: var(--bg-sunken); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 6px 9px; width: 100%;
+  }
+  .keyform input { width: auto; flex: 1 1 200px; }
+  .search { margin: 4px 0 8px; }
+  section {
+    background: var(--bg-surface); border: 1px solid var(--border); border-radius: 6px;
+    margin: 16px 0; padding: 4px 16px 12px;
+  }
+  section h2 {
+    display: flex; align-items: baseline; gap: 10px; margin: 10px 0 6px;
+    font-size: 16px; color: var(--text-title);
+  }
+  section h2 .count { color: var(--text-muted); font-weight: 400; font-size: 14px; }
+  section[data-section="todo"] h2::before, section[data-section="research"] h2::before,
+  section[data-section="done"] h2::before {
+    content: ""; width: 9px; height: 9px; border-radius: 50%; display: inline-block; align-self: center;
+  }
+  section[data-section="todo"] h2::before { background: var(--lift); }
+  section[data-section="research"] h2::before { background: var(--accent); }
+  section[data-section="done"] h2::before { background: var(--ok); }
+  ol { list-style: none; margin: 0; padding: 0; }
+  li.item {
+    display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 10px 0;
+    border-top: 1px solid var(--border);
+  }
+  li.item:first-child { border-top: 0; }
+  .item-main { flex: 1 1 320px; min-width: 0; }
+  .item-title { color: var(--text-title); font-weight: 600; overflow-wrap: anywhere; }
+  section[data-section="done"] .item-title { font-weight: 500; }
+  .item-note { color: var(--text-body); font-size: 14px; white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 2px; }
+  .item-meta { color: var(--text-muted); font-size: 12.5px; margin-top: 3px; }
+  .item-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start; }
+  .empty { color: var(--text-muted); font-size: 14px; padding: 8px 0; }
+  form.edit, form.add { display: grid; gap: 6px; padding: 10px 0; width: 100%; }
+  form.add { border-bottom: 1px solid var(--border); }
+  form .row { display: flex; flex-wrap: wrap; gap: 6px; }
+  form .row > * { flex: 1 1 160px; }
+  form .row .btn { flex: 0 0 auto; }
+  textarea { min-height: 60px; resize: vertical; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap bar">
+    <div class="brand"><b id="title"></b><span id="subtitle"></span></div>
+    <div class="tools">
+      <button class="btn" id="lang" type="button"></button>
+      <button class="btn" id="unlock" type="button"></button>
+    </div>
+  </div>
+</header>
+<main class="wrap">
+  <p class="notice" id="notice"></p>
+  <form class="keyform hidden" id="keyform">
+    <label for="key" id="keylabel"></label>
+    <input id="key" type="password" autocomplete="current-password">
+    <button class="btn primary" type="submit" id="keyok"></button>
+    <button class="btn" type="button" id="keycancel"></button>
+  </form>
+  <p class="meta" id="meta"></p>
+  <div class="status" id="status" role="status" aria-live="polite"></div>
+  <input class="search" id="search" type="search">
+  <div id="lists"></div>
+</main>
+<script>
+(function () {
+  'use strict';
+  // The Vite dev server proxies the API under /api; in production it shares the origin.
+  var API = location.port === '5173' ? '/api' : '';
+  var REPO = 'https://github.com/batkale/thermalsense';
+  var KEY_STORE = 'thermalsense.todoKey';
+  var LANG_STORE = 'thermalsense.lang';
+  var SECTIONS = ['todo', 'research', 'done'];
+
+  var T = {
+    tr: {
+      title: 'Yapılacaklar listesi', subtitle: 'ThermalSense ekibi · iç sayfa',
+      notice: 'Sitede bu sayfaya bağlantı yok ve arama motorlarına kapalı; adresi bilen herkes okuyabilir. Düzenlemek için yönetici anahtarı gerekir.',
+      todo: 'Yapılacak', research: 'Araştırılacak', done: 'Yapıldı',
+      unlock: 'Düzenlemeyi aç', lock: 'Kilitle', keyLabel: 'Yönetici anahtarı', keyOk: 'Aç', cancel: 'Vazgeç',
+      keyBad: 'Anahtar kabul edilmedi.', unlocked: 'Düzenleme açık.',
+      search: 'Ara…', updated: 'Son güncelleme', version: 'sürüm',
+      seed: 'Henüz kaydedilmedi; depodaki ilk sürüm gösteriliyor.',
+      add: 'Ekle', newTitle: 'Yeni madde', note: 'Not (isteğe bağlı)', who: 'Kim (isteğe bağlı)',
+      markDone: 'Bitti', reopen: 'Yeniden aç', edit: 'Düzenle', del: 'Sil', save: 'Kaydet', section: 'Bölüm',
+      confirmDel: 'Bu madde silinsin mi? Önceki sürümler sunucuda saklanır.',
+      conflict: 'Liste bu arada değişti ve yeniden yüklendi. Değişikliğinizi tekrar yapın.',
+      saving: 'Kaydediliyor…', saved: 'Kaydedildi.', loadFail: 'Liste yüklenemedi.', saveFail: 'Kaydedilemedi: ',
+      empty: 'Burada bir şey yok.', added: 'eklendi', doneOn: 'bitti', refreshed: 'Başka biri listeyi güncelledi; yeni hâli gösteriliyor.',
+      other: 'EN'
+    },
+    en: {
+      title: 'To-do list', subtitle: 'ThermalSense team · internal page',
+      notice: 'Not linked from the site and closed to search engines; anyone with this address can read it. Editing needs the admin key.',
+      todo: 'To do', research: 'To research', done: 'Done',
+      unlock: 'Unlock editing', lock: 'Lock', keyLabel: 'Admin key', keyOk: 'Unlock', cancel: 'Cancel',
+      keyBad: 'That key was not accepted.', unlocked: 'Editing is on.',
+      search: 'Search…', updated: 'Last updated', version: 'version',
+      seed: 'Not saved yet; showing the first version from the repo.',
+      add: 'Add', newTitle: 'New item', note: 'Note (optional)', who: 'Who (optional)',
+      markDone: 'Done', reopen: 'Reopen', edit: 'Edit', del: 'Delete', save: 'Save', section: 'Section',
+      confirmDel: 'Delete this item? Earlier versions are kept on the server.',
+      conflict: 'The list changed meanwhile and was reloaded. Please redo your change.',
+      saving: 'Saving…', saved: 'Saved.', loadFail: 'Could not load the list.', saveFail: 'Could not save: ',
+      empty: 'Nothing here.', added: 'added', doneOn: 'done', refreshed: 'Someone else updated the list; showing the new version.',
+      other: 'TR'
+    }
+  };
+
+  var state = { version: null, updated: null, items: [], key: null, lang: 'tr', filter: '', editing: null, busy: false };
+
+  function store(get, k, v) {
+    try { return get ? localStorage.getItem(k) : (v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v)); }
+    catch (e) { return null; }
+  }
+  function t(k) { return (T[state.lang] || T.tr)[k] || T.en[k] || k; }
+  function $(id) { return document.getElementById(id); }
+
+  function el(tag, attrs) {
+    var n = document.createElement(tag);
+    if (attrs) Object.keys(attrs).forEach(function (k) {
+      if (k === 'text') n.textContent = attrs[k];
+      else if (k === 'class') n.className = attrs[k];
+      else if (k.slice(0, 2) === 'on') n.addEventListener(k.slice(2), attrs[k]);
+      else n.setAttribute(k, attrs[k]);
+    });
+    for (var i = 2; i < arguments.length; i++) {
+      var c = arguments[i];
+      if (c == null) continue;
+      n.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+    }
+    return n;
+  }
+
+  // Text in, nodes out: URLs and "#26" (a PR) become links; nothing is parsed as HTML.
+  function linkified(text) {
+    var frag = document.createDocumentFragment();
+    var re = /(https?:\/\/[^\s<>"')]+)|#(\d{1,4})\b/g, last = 0, m;
+    while ((m = re.exec(text))) {
+      if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+      var href = m[1] ? m[1] : REPO + '/pull/' + m[2];
+      frag.appendChild(el('a', { href: href, target: '_blank', rel: 'noopener noreferrer', text: m[0] }));
+      last = re.lastIndex;
+    }
+    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+    return frag;
+  }
+
+  function locale() { return state.lang === 'tr' ? 'tr-TR' : 'en-GB'; }
+  function fmtDate(s) {
+    if (!s) return '';
+    var m = /^(\d{4})-(\d{2})(?:-(\d{2}))?$/.exec(s);
+    if (!m) return s;
+    var d = new Date(Date.UTC(+m[1], +m[2] - 1, m[3] ? +m[3] : 1));
+    var opts = m[3] ? { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }
+                    : { month: 'long', year: 'numeric', timeZone: 'UTC' };
+    return d.toLocaleDateString(locale(), opts);
+  }
+  function today() {
+    var d = new Date();
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  }
+  function newId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+
+  function setStatus(msg, kind) {
+    var s = $('status');
+    s.textContent = msg || '';
+    s.className = 'status' + (kind ? ' ' + kind : '');
+  }
+
+  function apply(data) {
+    state.version = data.version;
+    state.updated = data.updated_at || null;
+    state.items = Array.isArray(data.items) ? data.items : [];
+  }
+
+  function load(quiet) {
+    return fetch(API + '/todo', { cache: 'no-store' })
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(function (data) { apply(data); render(); })
+      .catch(function () { if (!quiet) setStatus(t('loadFail'), 'error'); });
+  }
+
+  function save(mutate) {
+    if (state.busy) return Promise.resolve(false);
+    var items = JSON.parse(JSON.stringify(state.items));
+    mutate(items);
+    state.busy = true;
+    setStatus(t('saving'));
+    return fetch(API + '/todo', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'X-Admin-Token': state.key || '' },
+      body: JSON.stringify({ version: state.version, items: items })
+    }).then(function (r) {
+      if (r.ok) return r.json().then(function (d) { apply(d); state.editing = null; render(); setStatus(t('saved'), 'ok'); return true; });
+      if (r.status === 409) return load().then(function () { setStatus(t('conflict'), 'warn'); return false; });
+      if (r.status === 401) { lock(); setStatus(t('keyBad'), 'error'); return false; }
+      return r.json().catch(function () { return {}; }).then(function (d) {
+        setStatus(t('saveFail') + (d.detail || r.status), 'error'); return false;
+      });
+    }).catch(function (e) {
+      setStatus(t('saveFail') + e.message, 'error'); return false;
+    }).then(function (ok) { state.busy = false; return ok; });
+  }
+
+  function checkKey(key) {
+    return fetch(API + '/todo/auth', { headers: { 'X-Admin-Token': key }, cache: 'no-store' })
+      .then(function (r) { return r.ok; }).catch(function () { return false; });
+  }
+  function lock() { state.key = null; state.editing = null; store(false, KEY_STORE, null); render(); }
+
+  function byId(items, id) { for (var i = 0; i < items.length; i++) if (items[i].id === id) return i; return -1; }
+
+  function itemView(it) {
+    if (state.editing === it.id) return editForm(it);
+    var dates = [];
+    if (it.who) dates.push(it.who);
+    if (it.section === 'done' && it.done_at) dates.push(t('doneOn') + ' ' + fmtDate(it.done_at));
+    else if (it.added) dates.push(t('added') + ' ' + fmtDate(it.added));
+    var actions = null;
+    if (state.key) {
+      actions = el('div', { class: 'item-actions' },
+        it.section === 'done'
+          ? el('button', { class: 'btn', type: 'button', text: t('reopen'), onclick: function () {
+              save(function (items) { var i = byId(items, it.id); items[i].section = 'todo'; delete items[i].done_at; });
+            } })
+          : el('button', { class: 'btn', type: 'button', text: t('markDone'), onclick: function () {
+              save(function (items) { var i = byId(items, it.id); items[i].section = 'done'; items[i].done_at = today(); });
+            } }),
+        el('button', { class: 'btn', type: 'button', text: t('edit'), onclick: function () { state.editing = it.id; render(); } }),
+        el('button', { class: 'btn danger', type: 'button', text: t('del'), onclick: function () {
+          if (!window.confirm(t('confirmDel'))) return;
+          save(function (items) { items.splice(byId(items, it.id), 1); });
+        } })
+      );
+    }
+    return el('li', { class: 'item' },
+      el('div', { class: 'item-main' },
+        el('div', { class: 'item-title' }, linkified(it.title)),
+        it.note ? el('div', { class: 'item-note' }, linkified(it.note)) : null,
+        dates.length ? el('div', { class: 'item-meta', text: dates.join(' · ') }) : null),
+      actions);
+  }
+
+  function fields(it) {
+    var title = el('input', { type: 'text', required: 'required', maxlength: '300', placeholder: t('newTitle') });
+    var note = el('textarea', { maxlength: '4000', placeholder: t('note') });
+    var who = el('input', { type: 'text', maxlength: '60', placeholder: t('who') });
+    var section = el('select', { 'aria-label': t('section') });
+    SECTIONS.forEach(function (s) { section.appendChild(el('option', { value: s, text: t(s) })); });
+    title.value = it.title || ''; note.value = it.note || ''; who.value = it.who || ''; section.value = it.section;
+    return { title: title, note: note, who: who, section: section };
+  }
+  function readFields(f, base) {
+    var out = Object.assign({}, base, {
+      title: f.title.value.trim(), note: f.note.value.trim(), who: f.who.value.trim(), section: f.section.value
+    });
+    if (out.section === 'done' && !out.done_at) out.done_at = today();
+    if (out.section !== 'done') delete out.done_at;
+    return out;
+  }
+
+  function editForm(it) {
+    var f = fields(it);
+    var form = el('form', { class: 'edit', onsubmit: function (e) {
+        e.preventDefault();
+        if (!f.title.value.trim()) return;
+        save(function (items) { items[byId(items, it.id)] = readFields(f, it); });
+      } },
+      f.title, f.note,
+      el('div', { class: 'row' }, f.who, f.section,
+        el('button', { class: 'btn primary', type: 'submit', text: t('save') }),
+        el('button', { class: 'btn', type: 'button', text: t('cancel'), onclick: function () { state.editing = null; render(); } })));
+    return el('li', { class: 'item' }, form);
+  }
+
+  function addForm(section) {
+    var f = fields({ section: section });
+    f.section.classList.add('hidden');
+    return el('form', { class: 'add', 'data-add': section, onsubmit: function (e) {
+        e.preventDefault();
+        if (!f.title.value.trim()) return;
+        var item = readFields(f, { id: newId(), added: today() });
+        save(function (items) { items.unshift(item); });
+      } },
+      f.title,
+      el('div', { class: 'row' }, f.note),
+      el('div', { class: 'row' }, f.who, f.section, el('button', { class: 'btn primary', type: 'submit', text: t('add') })));
+  }
+
+  function matches(it) {
+    if (!state.filter) return true;
+    var hay = [it.title, it.note, it.who].join(' ').toLocaleLowerCase(locale());
+    return hay.indexOf(state.filter.toLocaleLowerCase(locale())) !== -1;
+  }
+
+  function render() {
+    document.documentElement.lang = state.lang;
+    $('title').textContent = t('title');
+    $('subtitle').textContent = t('subtitle');
+    $('notice').textContent = t('notice');
+    $('lang').textContent = t('other');
+    $('unlock').textContent = state.key ? t('lock') : t('unlock');
+    $('keylabel').textContent = t('keyLabel');
+    $('keyok').textContent = t('keyOk');
+    $('keycancel').textContent = t('cancel');
+    $('search').placeholder = t('search');
+    $('search').setAttribute('aria-label', t('search'));
+    var meta = '';
+    if (state.version === 0) meta = t('seed');
+    else if (state.version != null) {
+      var when = state.updated ? new Date(state.updated).toLocaleString(locale(), { dateStyle: 'medium', timeStyle: 'short' }) : '';
+      meta = t('updated') + ': ' + when + ' · ' + t('version') + ' ' + state.version;
+    }
+    $('meta').textContent = meta;
+
+    var lists = $('lists');
+    lists.textContent = '';
+    SECTIONS.forEach(function (s) {
+      var items = state.items.filter(function (it) { return it.section === s && matches(it); });
+      if (s === 'done') items.sort(function (a, b) { return (b.done_at || '').localeCompare(a.done_at || ''); });
+      var all = state.items.filter(function (it) { return it.section === s; }).length;
+      var ol = el('ol');
+      items.forEach(function (it) { ol.appendChild(itemView(it)); });
+      lists.appendChild(el('section', { 'data-section': s },
+        el('h2', null, t(s), el('span', { class: 'count', text: state.filter ? items.length + ' / ' + all : String(all) })),
+        state.key ? addForm(s) : null,
+        items.length ? ol : el('p', { class: 'empty', text: t('empty') })));
+    });
+  }
+
+  // Someone else's change shows up without a reload, unless you are typing.
+  function busyTyping() {
+    if (state.editing) return true;
+    var forms = document.querySelectorAll('form.add');
+    for (var i = 0; i < forms.length; i++) {
+      var inputs = forms[i].querySelectorAll('input, textarea');
+      for (var j = 0; j < inputs.length; j++) if (inputs[j].value.trim()) return true;
+    }
+    return false;
+  }
+  setInterval(function () {
+    if (document.hidden || state.busy || busyTyping()) return;
+    var before = state.version;
+    fetch(API + '/todo', { cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
+      if (d && d.version !== before && !busyTyping()) { apply(d); render(); setStatus(t('refreshed'), 'ok'); }
+    }).catch(function () {});
+  }, 60000);
+
+  $('lang').addEventListener('click', function () {
+    state.lang = state.lang === 'tr' ? 'en' : 'tr';
+    store(false, LANG_STORE, state.lang);
+    render();
+  });
+  $('unlock').addEventListener('click', function () {
+    if (state.key) { lock(); setStatus(''); return; }
+    $('keyform').classList.remove('hidden');
+    $('key').focus();
+  });
+  $('keycancel').addEventListener('click', function () { $('keyform').classList.add('hidden'); $('key').value = ''; });
+  $('keyform').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var key = $('key').value;
+    checkKey(key).then(function (ok) {
+      if (!ok) { setStatus(t('keyBad'), 'error'); return; }
+      state.key = key; store(false, KEY_STORE, key);
+      $('key').value = ''; $('keyform').classList.add('hidden');
+      setStatus(t('unlocked'), 'ok');
+      render();
+    });
+  });
+  $('search').addEventListener('input', function (e) { state.filter = e.target.value.trim(); render(); });
+
+  var savedLang = store(true, LANG_STORE);
+  state.lang = savedLang === 'en' ? 'en' : 'tr';
+  render();
+  load();
+  var savedKey = store(true, KEY_STORE);
+  if (savedKey) checkKey(savedKey).then(function (ok) {
+    if (ok) { state.key = savedKey; render(); } else store(false, KEY_STORE, null);
+  });
+})();
+</script>
+</body>
+</html>

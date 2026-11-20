@@ -32,6 +32,11 @@ Thumbs.db
 .idea/
 
 # Data / DB
+# The to-do list's live copy and its history, when the app runs from a checkout
+# (DATA_DIR defaults to backend/). The repo holds only backend/todo_seed.json.
+backend/data/todo.json
+backend/data/todo.json.tmp
+backend/data/todo_history/
 backend/data/*.db
 backend/data/*.sqlite
 backend/data/*.db-journal
