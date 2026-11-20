@@ -87,7 +87,7 @@ const STRINGS = {
                       + 'bulutları onları işaretlemeli. Taban, 2 m çiğ noktası '
                       + 'farkından tahmin edildi (°C başına ~125 m). Tüm tarama '
                       + 'için tek bir değer — bulutların gerçekte nerede '
-                      + 'olduğunu uydu katmanı gösterir.',
+                      + 'olduğunu bulut katmanı gösterir.',
     cumulusTip_blue:    'Sınır tabakası ≈ {top} m AGL’de bitiyor; bulutun '
                       + 'oluşacağı ≈ {n} m AGL’nin altında. Termaller mavi '
                       + 'kalır, onları işaretleyen kümülüs olmaz.',
@@ -119,12 +119,19 @@ const STRINGS = {
     ognDensityHint:     '(termal telemetrisi)',
     retrainModel:       'Modeli yeniden eğit',
     retrainTitle:       'Modeli en güncel OGN verisiyle yeniden eğit',
-    satelliteToggle:    'Uydu bulut görüntüsü',
-    satelliteHint:      '(Meteosat, 10 dk)',
-    satelliteLoading:   'Uydu görüntüsü yükleniyor…',
-    satelliteFailed:    'Uydu görüntüsü alınamadı',
-    satelliteFrame:     'Gözlem: {time} UTC · {n} dk önce',
-    satelliteNotForecast: 'Bulutlar şimdiki gözlem; ısı haritası ileri bir saat '
+    cloudsToggle:       'Bulutlar (şimdi)',
+    cloudsHint:         '(Meteosat bulut maskesi, 15 dk)',
+    cloudsLoading:      'Bulutlar yükleniyor…',
+    cloudsFailed:       'Bulut verisi alınamadı',
+    cloudsFrame:        'Gözlem: {time} UTC · {n} dk önce',
+    cloudsKeyLow:       'alçak',
+    cloudsKeyMid:       'orta',
+    cloudsKeyHigh:      'yüksek',
+    cloudsKeyTip:       'Bulut tepesi deniz seviyesinden. Kabarık: {low} km altı '
+                      + 'alçak bulut (kümülüs, stratokümülüs ya da sis). Düz: '
+                      + '{low}–{high} km orta katman. Tüy: {high} km üstü sirrüs '
+                      + 'ya da fırtına bulutu tepesi.',
+    cloudsNotForecast:  'Bulutlar şimdiki gözlem; ısı haritası ileri bir saat '
                       + 'için tahmin.',
 
     // raw data / product comparison (before/after divider on the map)
@@ -334,7 +341,7 @@ const STRINGS = {
     cumulusTip_cumulus: 'Thermals reach the condensation level, so cumulus '
                       + 'should mark them. The base is estimated from the 2 m '
                       + 'dew-point spread (~125 m per °C). One value for the '
-                      + 'whole scan — the satellite layer shows where clouds '
+                      + 'whole scan — the cloud layer shows where clouds '
                       + 'actually are.',
     cumulusTip_blue:    'The boundary layer tops out near {top} m AGL, below the '
                       + '≈ {n} m AGL where cloud would form. Thermals stay blue, '
@@ -363,12 +370,19 @@ const STRINGS = {
     ognDensityHint:     '(thermal telemetry)',
     retrainModel:       'Retrain model',
     retrainTitle:       'Trigger model retraining on latest OGN data',
-    satelliteToggle:    'Satellite clouds',
-    satelliteHint:      '(Meteosat, 10 min)',
-    satelliteLoading:   'Loading satellite image…',
-    satelliteFailed:    'Satellite image unavailable',
-    satelliteFrame:     'Observed {time} UTC · {n} min ago',
-    satelliteNotForecast: 'Clouds are observed now; the heatmap is a forecast '
+    cloudsToggle:       'Clouds now',
+    cloudsHint:         '(Meteosat cloud mask, 15 min)',
+    cloudsLoading:      'Loading clouds…',
+    cloudsFailed:       'Cloud data unavailable',
+    cloudsFrame:        'Observed {time} UTC · {n} min ago',
+    cloudsKeyLow:       'low',
+    cloudsKeyMid:       'mid',
+    cloudsKeyHigh:      'high',
+    cloudsKeyTip:       'Cloud top above sea level. Puffy: low cloud under {low} km '
+                      + '(cumulus, stratocumulus or fog). Flat: a mid layer, '
+                      + '{low}–{high} km. Streaks: cirrus or a storm top above '
+                      + '{high} km.',
+    cloudsNotForecast:  'Clouds are observed now; the heatmap is a forecast '
                       + 'for later.',
 
     compareToggle:      'Raw data ↔ ThermalSense AI',

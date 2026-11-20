@@ -6,7 +6,7 @@ import { MAP_CENTER, MAP_ZOOM, PREDICT_RADIUS, SOARING_AC_TYPES } from '../confi
 import { displayPosition } from '../services/deadReckon.js';
 import { nearLng, unwrapNear } from '../services/worldWrap.js';
 import { RawDataCanvas, CompareControl, LAYER_BUILT } from './CompareLayer.jsx';
-import { SatelliteCanvas } from './SatelliteLayer.jsx';
+import { CloudCanvas } from './CloudLayer.jsx';
 
 // Pre-computed 256-entry RGBA palette: density 0→255 maps blue→cyan→green→yellow→red
 const _PALETTE = (() => {
@@ -815,7 +815,7 @@ function FlyToController({ target }) {
 // -----------------------------------------------------------------------------
 // Public component
 // -----------------------------------------------------------------------------
-export default function ThermalMap({ heatmap, gridMeta, pendingScan, scanFocus, gliders, activeThermals = [], showOgnHeatmap = true, onMapClick, onGliderClick, onViewportChange, pinnedId, flyTarget, gliderPathsRef, compare = false, rawInputs = null, noInsolation = false, satelliteTime = null, onSatelliteStatus }) {
+export default function ThermalMap({ heatmap, gridMeta, pendingScan, scanFocus, gliders, activeThermals = [], showOgnHeatmap = true, onMapClick, onGliderClick, onViewportChange, pinnedId, flyTarget, gliderPathsRef, compare = false, rawInputs = null, noInsolation = false, cloudTime = null, cloudTopTime = null, onCloudStatus }) {
   // Passed to HeatmapCanvas as a plain boolean rather than the glider object:
   // that layer repaints the whole grid when its props change, and an object
   // would arrive with a fresh identity on every stream frame.
@@ -862,10 +862,11 @@ export default function ThermalMap({ heatmap, gridMeta, pendingScan, scanFocus, 
         maxZoom={18}
       />
 
-      {/* Observed clouds, directly on the base imagery and under everything
-          ThermalSense draws. Mounted only while the toggle is on and a frame
-          time is known — see SatelliteLayer.jsx. */}
-      {satelliteTime && <SatelliteCanvas time={satelliteTime} onStatus={onSatelliteStatus} />}
+      {/* Observed clouds, drawn rather than photographed, directly on the
+          base imagery and under everything else ThermalSense draws. Mounted
+          only while the toggle is on and a frame time is known — see
+          CloudLayer.jsx. */}
+      {cloudTime && <CloudCanvas time={cloudTime} topTime={cloudTopTime} onStatus={onCloudStatus} />}
       {showOgnHeatmap && <OgnHeatmapCanvas gliders={gliders} />}
       <HeatmapCanvas heatmap={heatmap} gridMeta={gridMeta} pendingScan={pendingScan} pinnedIsTow={pinnedIsTow} pinnedId={pinnedId} gliderPathsRef={gliderPathsRef} />
       <ThermalBubbleCanvas activeThermals={activeThermals} />
