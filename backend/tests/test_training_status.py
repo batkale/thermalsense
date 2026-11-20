@@ -24,6 +24,7 @@ def _rows(n, lat, lon, day=200, agl=800.0, positives=0, seed=0):
     a = 2 * np.pi * day / 365
     X[:, 17], X[:, 18] = np.sin(a), np.cos(a)
     X[:, 21] = agl
+    X[:, 5], X[:, 6], X[:, 19] = 20.0, 0.3, 3000.0   # thermal top ~2,260 m, above every row
     y = np.zeros(n, dtype=int)
     y[:positives] = 1
     return list(X), list(y)

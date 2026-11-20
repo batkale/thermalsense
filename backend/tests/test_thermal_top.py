@@ -237,6 +237,77 @@ async def test_seed_drops_climbs_above_the_new_top(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Rows collected before the switch are judged again at fit time
+# ---------------------------------------------------------------------------
+#
+# Everything in the buffer before 19 Nov 2026, and every row rebuilt from the
+# archive before then, passed the old cape_base filter instead.  On the live
+# buffer of 20 Nov the new top excluded 7,440 of 78,416 rows and none of the
+# 691 collected after the switch.
+
+def test_a_buffer_row_is_judged_as_collection_judged_it():
+    """The row's own columns give the same verdict, cell by cell, as
+    _above_thermal_base on the meteo dict and the ground under the aircraft."""
+    meteo = _training_meteo(1500.0)              # top = LCL ~1,340 m < the layer
+    elev = np.linspace(400.0, 1000.0, 15 * 15).reshape(15, 15)
+    alt = 2500.0                                 # 1,500-2,100 m AGL across the grid
+    mat = build_feature_matrix(meteo, elev, dt=datetime(2026, 9, 17, 13, tzinfo=timezone.utc),
+                               lat_bounds=(46.0, 46.2), lon_bounds=(11.0, 11.2),
+                               alt_amsl=alt)
+    expected = np.array([tm._above_thermal_base(alt, e, mc.thermal_top_agl(meteo))
+                         for e in mat[:, 2]])
+    assert expected.any() and not expected.all(), "the grid must straddle the top"
+    assert np.array_equal(tm._above_thermal_top_rows(mat), expected)
+
+
+def test_no_estimate_keeps_the_row():
+    row = np.zeros((1, 30))
+    row[0, 21], row[0, 5], row[0, 6], row[0, 19] = 5000.0, 20.0, 0.0, 1500.0
+    assert not tm._above_thermal_top_rows(row)[0]
+
+
+def _old_rows(n_low_layer=150, n=600, seed=0):
+    """Gate-test rows on a high-topped day, some re-weathered with a 500 m
+    layer — the rows the old filter let through and the new one would not."""
+    from tests.test_retrain_gate import _buffer
+    X, y = _buffer(seed=seed)
+    X, y = X[:n], y[:n]
+    X[:n_low_layer, 19] = 500.0               # top 500 m; rows sit at 300-2,500 m AGL
+    above = X[:n_low_layer, 21] > 800.0
+    return X, y, int(above.sum())
+
+
+def test_fit_leaves_out_old_rows_above_the_top(tmp_path, monkeypatch, caplog):
+    X, y, n_above = _old_rows()
+    assert n_above > 0
+    m = tm.ThermalModel()
+    m._buffer_X, m._buffer_y = list(X), list(y)
+
+    seen = {}
+    real_split = tm.bench_split
+
+    def spy(Xa, ya):
+        seen["rows"] = len(ya)
+        seen["above"] = int(tm._above_thermal_top_rows(Xa).sum())
+        return real_split(Xa, ya)
+
+    monkeypatch.setattr(tm, "bench_split", spy)
+    with caplog.at_level("INFO"):
+        m.fit_and_gate()
+    assert seen == {"rows": len(y) - n_above, "above": 0}
+    assert f"{n_above} above the thermal top" in caplog.text
+    assert len(m._buffer_X) == len(y), "masked for the fit, never deleted"
+
+
+def test_summary_counts_the_rows_the_fit_uses():
+    X, y, n_above = _old_rows()
+    m = tm.ThermalModel()
+    m._buffer_X, m._buffer_y = list(X), list(y)
+    s = m.training_summary()
+    assert s["rows"] == len(y) and s["usable_rows"] == len(y) - n_above
+
+
+# ---------------------------------------------------------------------------
 # What the map shows
 # ---------------------------------------------------------------------------
 

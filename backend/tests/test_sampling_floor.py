@@ -36,6 +36,7 @@ def _buffer_with_ground_rows(n_air=400, n_ground=200, seed=0):
     X = rng.random((n_air + n_ground, FEATURE_COUNT))
     X[:n_air, 21] = rng.uniform(400, 2000, n_air)
     X[n_air:, 21] = 0.0
+    X[:, 5], X[:, 6], X[:, 19] = 20.0, 0.3, 3000.0   # thermal top ~2,260 m, above every row
     y = np.zeros(n_air + n_ground, dtype=int)
     y[:n_air] = (rng.random(n_air) < 0.3).astype(int)
     return X, y
@@ -80,6 +81,7 @@ def test_agl_floor_leaves_a_clean_buffer_untouched(tmp_path, monkeypatch):
     rng = np.random.default_rng(1)
     X = rng.random((400, FEATURE_COUNT))
     X[:, 21] = rng.uniform(400, 2000, 400)
+    X[:, 5], X[:, 6], X[:, 19] = 20.0, 0.3, 3000.0   # thermal top ~2,260 m, above every row
     y = (rng.random(400) < 0.3).astype(int)
 
     m = tm.ThermalModel()

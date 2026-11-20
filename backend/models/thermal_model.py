@@ -87,6 +87,40 @@ def _above_thermal_base(alt_amsl: float, ground_elev: float,
     return (alt_amsl - ground_elev) > (top_agl + _THERMAL_BASE_MARGIN_M)
 
 
+def _above_thermal_top_rows(X: np.ndarray) -> np.ndarray:
+    """
+    _above_thermal_base over buffer rows, from each row's own columns.
+
+    Column 21 is the height above the ground under the aircraft, and columns 5,
+    6 and 19 carry the weather the top is computed from (thermal_top_columns),
+    so a row needs nothing from outside itself.  A NaN top is "no estimate" and
+    keeps the row, as None does at collection.
+    """
+    from data.meteo_client import thermal_top_columns
+    X = np.asarray(X)
+    with np.errstate(invalid="ignore"):
+        return X[:, 21] > thermal_top_columns(X) + _THERMAL_BASE_MARGIN_M
+
+
+def _fit_rows(X: np.ndarray) -> np.ndarray:
+    """
+    Which buffer rows a fit may train on, and so what the gate's benchmark holds.
+
+    Both collection rules are applied again here, because the buffer holds rows
+    collected before each existed.  The ground floor: buffers written before
+    _MIN_SAMPLE_AGL.  The thermal top: everything collected before 19 Nov 2026,
+    and every row rebuilt from the archive before then, was filtered on the old
+    cape_base, which was 0 (filter off) below 8 degC and reached 27 km where
+    2 m and 850 hPa were close.  On the live buffer of 20 Nov 2026 the new top
+    excluded 7,440 of 78,416 rows (635 positives, 3.6% of them), and none of
+    the 691 collected after the switch — the recomputation agrees with
+    collection.  Masked rather than deleted: the rows cost nothing on disk at
+    this size, and a revised rule should not need a backup to undo.
+    """
+    X = np.asarray(X)
+    return (X[:, 21] >= _MIN_SAMPLE_AGL) & ~_above_thermal_top_rows(X)
+
+
 def _plausible_coords(X: np.ndarray) -> np.ndarray:
     """
     Boolean mask of rows whose lat/lon (cols 0,1) are real coordinates on Earth,
@@ -464,7 +498,7 @@ class ThermalModel:
 
         # Same population fit_and_gate trains on, so the group count shown is
         # the one the gate will actually see.
-        keep = X[:, 21] >= _MIN_SAMPLE_AGL
+        keep = _fit_rows(X)
         Xu, yu = X[keep], y[keep]
         groups = 0
         if len(yu):
@@ -1013,21 +1047,25 @@ class ThermalModel:
         X = np.array(self._buffer_X)
         y = np.array(self._buffer_y)
 
-        # Apply the ground floor here as well as at collection.  Buffers written
-        # before _MIN_SAMPLE_AGL existed are full of the rows it excludes, and a
-        # rebuild costs two rate-limited API calls per sample — far too expensive
-        # to demand before the fix takes effect.  Filtering at fit time cleans an
-        # old buffer on the next cycle and costs one boolean mask.  Collection
-        # still drops them so they stop consuming the rolling window.
-        keep = X[:, 21] >= _MIN_SAMPLE_AGL
+        # Apply the ground floor and the thermal top here as well as at
+        # collection (see _fit_rows).  Buffers written before either rule existed
+        # are full of the rows it excludes, and a rebuild costs two rate-limited
+        # API calls per sample — far too expensive to demand before the fix takes
+        # effect.  Filtering at fit time cleans an old buffer on the next cycle
+        # and costs one boolean mask.  Collection still drops them so they stop
+        # consuming the rolling window.
+        keep = _fit_rows(X)
         if not keep.all():
-            log.info(f"[model] {int((~keep).sum())}/{len(y)} buffer rows below "
-                     f"{_MIN_SAMPLE_AGL:.0f} m AGL excluded from this fit")
+            low = int((X[:, 21] < _MIN_SAMPLE_AGL).sum())
+            log.info(f"[model] {len(y) - int(keep.sum())}/{len(y)} buffer rows excluded "
+                     f"from this fit: {low} below {_MIN_SAMPLE_AGL:.0f} m AGL, "
+                     f"{len(y) - int(keep.sum()) - low} above the thermal top "
+                     f"+ {_THERMAL_BASE_MARGIN_M} m")
             X, y = X[keep], y[keep]
             n = len(y)
             if n < _MIN_SAMPLES:
-                log.info(f"[model] {n}/{_MIN_SAMPLES} samples after the AGL floor — "
-                         f"skipping fit")
+                log.info(f"[model] {n}/{_MIN_SAMPLES} samples after the AGL floor and "
+                         f"thermal top — skipping fit")
                 self._note_fit("too_few_samples", samples=n, need=_MIN_SAMPLES)
                 return
 
