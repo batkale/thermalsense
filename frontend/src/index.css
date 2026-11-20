@@ -721,6 +721,15 @@ button { font-family: inherit; }
   color: var(--text-muted);
   font-size: 11px;
 }
+/* A live status under a toggle: what the layer it switches is showing now. */
+.toggle-sub {
+  grid-column: 2;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+}
+.toggle-sub.warn { color: var(--warn); }
 
 /* ── Buttons ── */
 .btn-primary, .btn-secondary {

@@ -748,6 +748,10 @@ async def predict(lat: float, lon: float, alt: int | None = None,
             "thermal_base": _thermal_top_display(meteo),
             "pbl_height":  round(meteo["pbl_height"]),
             "soil_temp":   round(meteo["soil_temp"], 1),
+            # Cumulus or blue thermals, and the cloud base — derived from the
+            # values above, display only (see meteo_client.cumulus_outlook).
+            # None under the synthetic fallback; an older bundle ignores it.
+            "cumulus":     meteo_client.cumulus_outlook(meteo, _MIN_SOLAR_GHI),
             **_sky_and_clock(meteo),
         },
     }

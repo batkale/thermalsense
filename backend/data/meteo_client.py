@@ -218,11 +218,32 @@ _LIVE_SNAP = 0.1
 _live_cache: dict[tuple, dict] = {}
 _live_hour = ""
 _live_usage = {"day": "", "requests": 0, "cache_hits": 0,
-               "historical_requests": 0, "historical_cache_hits": 0}
+               "historical_requests": 0, "historical_cache_hits": 0,
+               "calls": 0.0, "historical_calls": 0.0}
 # Open-Meteo's published free-tier ceiling.  Forecast and archive calls come out
 # of the same budget, which is why both are counted here: the nightly seed and
 # the live sampler are spending one allowance between them.
 LIVE_DAILY_QUOTA = 10000
+
+
+def _call_weight(n_vars: int, days: float = 1) -> float:
+    """What Open-Meteo bills one request as, in calls.
+
+    Its pricing page counts a request for more than 10 weather variables, or
+    more than two weeks of one location, as a fraction more: "a request for 2
+    weeks of data with 15 weather variables will be calculated as 1.5 API
+    calls", and four weeks of the same as 3.0 — so the two factors multiply.
+    The quota is in these calls, not in requests.  Until 19 Nov 2026 the counter
+    added 1 per request while the live one carried 13 variables (HOURLY_VARS +
+    DISPLAY_VARS): every forecast was 1.3 calls, every archive hour 1.1, and the
+    budgets checked against `total` were up to 30% short of what was spent.
+    """
+    return max(1.0, n_vars / 10) * max(1.0, days / 14)
+
+
+# The live request asks for 2 forecast days, the archive request for one.
+_LIVE_CALL_WEIGHT = _call_weight(len(HOURLY_VARS) + len(DISPLAY_VARS), 2)
+_HIST_CALL_WEIGHT = _call_weight(len(HOURLY_VARS), 1)
 
 
 def _live_key(lat: float, lon: float, forecast_h: float) -> tuple:
@@ -242,18 +263,27 @@ def live_usage() -> dict:
     base = ({"day": today, "requests": 0, "cache_hits": 0,
              "historical_requests": 0, "historical_cache_hits": 0}
             if _live_usage["day"] != today else dict(_live_usage))
-    base["total"] = base["requests"] + base["historical_requests"]
+    # `requests` counts what was sent; `total` is what Open-Meteo bills for it
+    # (see _call_weight), and is the figure the quota is checked against.
+    base["calls"] = round(base.get("calls", 0.0), 1)
+    base["historical_calls"] = round(base.get("historical_calls", 0.0), 1)
+    base["total"] = round(base["calls"] + base["historical_calls"], 1)
     base["quota"] = LIVE_DAILY_QUOTA
     return base
 
 
-def _count_live(hit: bool, historical: bool = False) -> None:
+def _count_live(hit: bool, historical: bool = False, weight: float = 1.0) -> None:
     today = datetime.now(timezone.utc).date().isoformat()
     if _live_usage["day"] != today:
         _live_usage.update(day=today, requests=0, cache_hits=0,
-                           historical_requests=0, historical_cache_hits=0)
+                           historical_requests=0, historical_cache_hits=0,
+                           calls=0.0, historical_calls=0.0)
     prefix = "historical_" if historical else ""
-    _live_usage[f"{prefix}cache_hits" if hit else f"{prefix}requests"] += 1
+    if hit:
+        _live_usage[f"{prefix}cache_hits"] += 1
+        return
+    _live_usage[f"{prefix}requests"] += 1
+    _live_usage[f"{prefix}calls"] = _live_usage.get(f"{prefix}calls", 0.0) + weight
 
 
 async def fetch_meteo_features(lat: float, lon: float, forecast_h: float,
@@ -319,7 +349,7 @@ async def fetch_meteo_features(lat: float, lon: float, forecast_h: float,
         t2m  = _v("temperature_2m",     "temp_2m")
         t850 = _v("temperature_850hPa", "temp_850")
         t500 = _v("temperature_500hPa", "temp_500")
-        _count_live(hit=False)
+        _count_live(hit=False, weight=_LIVE_CALL_WEIGHT)
         out = {
             "temp_2m":    t2m,
             "humidity":   _v("relativehumidity_2m", "humidity_pct") / 100,
@@ -459,6 +489,49 @@ def _with_legacy_base(meteo: dict) -> dict:
     top = thermal_top_agl(meteo)
     meteo["cape_base"] = 0 if top is None else int(round(top))
     return meteo
+
+
+# --- cumulus outlook (display only) -------------------------------------------
+#
+# Whether thermals mark themselves with cumulus, from the same two levels as the
+# thermal top above: cumulus where the boundary layer clears the condensation
+# level (the top is then the cloud base), "blue" where it stops short — dry,
+# unmarked thermals topping out at the layer.  That is the cumulus-potential
+# test soaring forecasts use.  Display only: nothing here reaches the meteo dict
+# build_feature_matrix reads.  It is a point estimate for one 0.1 degree cell
+# from 2 m values and says nothing about where inside the cell the clouds stand;
+# the satellite layer on the map is what shows that.
+
+def cumulus_outlook(meteo: dict, min_solar_ghi: float) -> dict | None:
+    """Cumulus or blue thermals at the forecast moment, and the cloud base.
+
+    kind is a translation key on the frontend (cumulus_<kind>), so it is part of
+    the wire contract:
+      cumulus — thermals reach the condensation level; base_agl is the cloud base
+      blue    — the boundary layer stops below it; thermals stay unmarked
+      none    — too little sun for thermals at all (the night guard's floor)
+    None for the synthetic fallback: an invented 60% humidity would draw an
+    invented cloud base.
+    """
+    if is_synthetic(meteo):
+        return None
+    t2m, rh, pbl = meteo.get("temp_2m"), meteo.get("humidity"), meteo.get("pbl_height")
+    td, lcl = dew_point_c(t2m, rh), lcl_agl(t2m, rh)
+    if td is None or pbl is None:
+        return None
+    if meteo.get("solar_ghi", 0) < min_solar_ghi:
+        kind = "none"
+    else:
+        kind = "cumulus" if pbl >= lcl else "blue"
+    return {
+        "kind":      kind,
+        # 50 m steps: the 125 m/degC rule is good to a few hundred metres, and
+        # "1,637 m" would claim more than that.
+        "base_agl":  int(round(lcl / 50) * 50),
+        "dew_point": round(td, 1),
+        # How far the layer top clears the base (+) or falls short of it (-).
+        "margin_m":  int(round((pbl - lcl) / 50) * 50),
+    }
 
 
 # The feature columns _FALLBACK lands in, with the value each one takes.  A real
@@ -618,7 +691,7 @@ async def fetch_meteo_historical(
         t2m  = _v("temperature_2m",    "temp_2m")
         t850 = _v("temperature_850hPa", "temp_850")
         t500 = _v("temperature_500hPa", "temp_500")
-        _count_live(hit=False, historical=True)
+        _count_live(hit=False, historical=True, weight=_HIST_CALL_WEIGHT)
         return _hist_cache_put(ckey, _with_legacy_base({
             "temp_2m":    t2m,
             "humidity":   _v("relativehumidity_2m",        "humidity_pct") / 100,

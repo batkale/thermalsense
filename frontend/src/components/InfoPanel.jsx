@@ -1,5 +1,36 @@
+import { useEffect, useState } from 'react';
 import { useLang } from '../i18n/LanguageContext.jsx';
 import { GliderIcon } from './Icons.jsx';
+
+/**
+ * What the satellite layer is showing: the frame's time and age, and — when the
+ * slider is ahead — that the clouds are not moving with it. A cloud picture
+ * next to a "+3 h" heatmap otherwise reads as a forecast of the clouds.
+ */
+function SatelliteCaption({ satellite, forecastH }) {
+  const { t } = useLang();
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  if (satellite.failed || satellite.status === 'error') {
+    return <span className="toggle-sub warn">{t('satelliteFailed')}</span>;
+  }
+  if (!satellite.time || satellite.status !== 'ok') {
+    return <span className="toggle-sub">{t('satelliteLoading')}</span>;
+  }
+  const ageMin = Math.max(0, Math.round((now - Date.parse(satellite.time)) / 60_000));
+  return (
+    <>
+      <span className="toggle-sub">
+        {t('satelliteFrame', { time: satellite.time.slice(11, 16), n: ageMin })}
+      </span>
+      {forecastH > 0 && <span className="toggle-sub warn">{t('satelliteNotForecast')}</span>}
+    </>
+  );
+}
 
 /**
  * One labelled figure in the prediction block.
@@ -28,6 +59,7 @@ export default function InfoPanel({
   showAirborneOnly, onAirborneToggle,
   showOgnHeatmap, onOgnHeatmapToggle,
   compare, onCompareToggle,
+  showClouds, onCloudsToggle, satellite, forecastH = 0,
   onRetrain,
   onOpenTraining,
 }) {
@@ -160,6 +192,18 @@ export default function InfoPanel({
         />
         {t('compareToggle')} <span className="toggle-hint">{t('compareHint')}</span>
       </label>
+
+      {onCloudsToggle && (
+        <label className="toggle-row">
+          <input
+            type="checkbox"
+            checked={showClouds}
+            onChange={e => onCloudsToggle(e.target.checked)}
+          />
+          {t('satelliteToggle')} <span className="toggle-hint">{t('satelliteHint')}</span>
+          {showClouds && satellite && <SatelliteCaption satellite={satellite} forecastH={forecastH} />}
+        </label>
+      )}
 
       {/* Hidden in production unless an admin token is configured — the endpoint
           rejects unauthenticated calls, so an always-visible button would just fail. */}
