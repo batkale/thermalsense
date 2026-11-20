@@ -726,7 +726,7 @@ before it, the catch-all served the map app for any path that was not an exact
 file name. The map app stays at `/`, so `?compare=1` and `?panel=training`
 links keep working; the landing page links to both.
 
-- **It is a pre-seed pitch**, thirteen sections that scroll as one page,
+- **It is a pre-seed pitch**, fourteen sections that scroll as one page,
   about **low-altitude fixed-wing UAVs** (below ~10,000 ft — the band thermals
   form in). Rewritten 17 Nov 2026 after the TUSAŞ HANGAR BİGG mentor review,
   whose wording rules sit at the top of `landing/strings.js` and bind every
@@ -756,6 +756,17 @@ links keep working; the landing page links to both.
   in `strings.js` with their sources in its header. Re-measure one here and change it there. "Better than any
   single input" is a point-estimate statement — the sun-angle baseline's
   interval overlaps the model's.
+- **Section 08 is a sourced chronology of the field** (added 20 Nov 2026):
+  `TIMELINE` in `Landing.jsx`, 17 publications from 1980 to Aug 2026 in
+  four tracks (physics, in-flight soaring control, maps from flight data, AI
+  weather), then one ThermalSense row that links up to sections 05 and 07
+  rather than repeating figures. Each source with a `cite` is appended to the
+  bibliography (`BIBLIOGRAPHY`); one without must already be in `REFS`, and a
+  dev build warns otherwise. The "frontier" lines (`fr*`) claim only what that
+  survey did *not find* — never that nobody does it. Two dates were left out
+  because no source would confirm them: when RASP/BLIPMAP started, and when
+  thermal.kk7.ch launched. The 2026 paraglider paper's 123.6 m/°C is its
+  warm-season, midday, low-mountain subset, not France as a whole.
 - **Its copy lives in `landing/strings.js`, not `i18n/strings.js`**, so the
   map app's bundle does not carry a page of prose. Invariant 5 still holds: no
   string in a component, every key in both languages. A dev build warns in the
