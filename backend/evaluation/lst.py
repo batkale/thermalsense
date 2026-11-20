@@ -44,10 +44,15 @@ series is hourly HH:00 from the first slot with the sun above the horizon.
 
 `geo` needs h5py (NetCDF4 is HDF5), which the app does not, so it is installed
 into a scratch folder rather than the venv; the output is a plain .npz.  Its
-reader was checked end to end on synthetic files (exact up to int16 rounding),
-not yet on a real MTLST file: variable names are guessed from the MSG products
-(`LST`, CF scale / offset / fill), and it raises listing what the file does hold
-if the guess is wrong.
+reader was checked end to end on synthetic files (exact up to int16 rounding)
+and on the real MTLST archive (20 Nov 2026): `LST` int16, K = raw * 0.01 +
+273.15, fill -29999, on the LATLON file's own 5568 x 5568 grid with identical
+x / y axes (checked per run; a flipped grid is refused).  MTLST pixels are kept
+when QFLAGS says clear sky and LST_uncertainty <= --max-unc (2 K, as the MODIS
+mask).  The SEVIRI readers are still unchecked against real files.
+
+The LSA SAF LATLON file is public; the slot files answer 401 without the login
+(HTTP Basic, as LSA SAF's own wget examples use).
 """
 
 from __future__ import annotations
@@ -593,6 +598,9 @@ def _cf_decode(ds) -> np.ndarray:
     for key in ("_FillValue", "missing_value", "MISSING_VALUE"):
         if key in a:
             bad |= raw == np.asarray(a[key]).ravel()[0]
+    if "valid_range" in a:                  # CF: compared on the packed values
+        lo, hi = np.asarray(a["valid_range"]).ravel()[:2]
+        bad |= (raw < lo) | (raw > hi)
     scale = float(np.asarray(a.get("scale_factor", a.get("SCALING_FACTOR", 1.0))).ravel()[0])
     offset = float(np.asarray(a.get("add_offset", a.get("OFFSET", 0.0))).ravel()[0])
     if "SCALING_FACTOR" in a and "scale_factor" not in a:
@@ -674,6 +682,40 @@ def _read_geoloc(product: str, paths: list[str]):
 
 _LST_NAMES = {"mtlst": ["LST", "lst"], "mlst": ["LST", "lst"], "mlstas": ["MLST-AS", "LST", "lst"]}
 
+# MTLST QFLAGS: 1xx land, 3xx inland water; x01/x02/x03 clear and retrieved
+# (above / nominal / below nominal quality).  LST is already fill everywhere
+# else, so the flags only confirm; the per-pixel uncertainty is the real cut.
+_MTG_CLEAR = (101, 102, 103, 301, 302, 303)
+MAX_UNC_K = 2.0      # the MODIS mask keeps retrievals with error <= 2 K; same here
+
+
+def mtg_quality(qflags: np.ndarray, unc: np.ndarray | None, max_unc: float = MAX_UNC_K) -> np.ndarray:
+    """Pixels with a clear-sky MTLST retrieval whose stated uncertainty is <= max_unc K."""
+    ok = np.isin(qflags, _MTG_CLEAR)
+    if unc is not None:
+        ok &= np.isfinite(unc) & (unc <= max_unc)
+    return ok
+
+
+def _axes(path: str):
+    """The file's projection x / y coordinate arrays, or None when it has none."""
+    import h5py
+    with h5py.File(path, "r") as f:
+        if "x" in f and "y" in f:
+            return np.asarray(f["x"][()], float), np.asarray(f["y"][()], float)
+    return None
+
+
+def _unit_pixels(items, pix: np.ndarray) -> np.ndarray:
+    """(row, col) of a slot's unit reads; an empty int (0, 2) array for a morning-only slot."""
+    return np.array([pix[k] for k, kind in items if kind == 0], dtype=int).reshape(-1, 2)
+
+
+def _same_axes(a, b) -> bool:
+    return a is None or b is None or (
+        a[0].shape == b[0].shape and a[1].shape == b[1].shape
+        and np.allclose(a[0], b[0], atol=1e-6) and np.allclose(a[1], b[1], atol=1e-6))
+
 
 def cmd_geo(args) -> int:
     import h5py
@@ -703,6 +745,9 @@ def cmd_geo(args) -> int:
     missing = 0
     t0 = time.time()
     names = _LST_NAMES[args.product]
+    geo_axes = _axes(args.geoloc[0]) if len(args.geoloc) == 1 else None
+    axes_checked = False
+    px_clear = px_kept = 0            # unit-slot pixels at rows: clear sky, and also within max_unc
     for s_i, (t, items) in enumerate(sorted(needs.items())):
         fn = files / file_name(args.product, t)
         if not fn.exists():
@@ -713,8 +758,24 @@ def cmd_geo(args) -> int:
             continue
         with h5py.File(fn, "r") as f:
             lst = _cf_decode(_find_var(f, names))
+            good = None
+            if args.product == "mtlst" and "QFLAGS" in f:
+                unc = _cf_decode(f["LST_uncertainty"]) if "LST_uncertainty" in f else None
+                good = mtg_quality(np.squeeze(f["QFLAGS"][()]), unc, args.max_unc)
+                unc = None
         if lst.shape != lat.shape:
             raise SystemExit(f"{fn.name}: LST grid {lst.shape} is not the geolocation grid {lat.shape}")
+        if not axes_checked:
+            if not _same_axes(geo_axes, _axes(str(fn))):
+                raise SystemExit(f"{fn.name}: x / y axes differ from the geolocation file's "
+                                 "(flipped or another grid); pixels would not line up")
+            axes_checked = True
+        if good is not None:
+            unit_px = _unit_pixels(items, pix)
+            px_clear += int(np.isfinite(lst[unit_px[:, 0], unit_px[:, 1]]).sum())
+            lst[~good] = np.nan
+            px_kept += int(np.isfinite(lst[unit_px[:, 0], unit_px[:, 1]]).sum())
+            good = None
         if np.nanmedian(lst) < 150:                       # stored in Celsius
             lst = lst + 273.15
         for k, kind in items:
@@ -745,6 +806,9 @@ def cmd_geo(args) -> int:
              extra=np.column_stack([vza, (ts - slot) / 60.0]))
     keep = _kept(X)
     print(f"slots missing on disk {missing} of {len(needs)}")
+    if px_clear:
+        print(f"unit-slot pixels at rows: {px_clear} clear sky, {px_kept} ({px_kept / px_clear:.1%}) "
+              f"within {args.max_unc:g} K uncertainty")
     for j, cname in enumerate(GEO_COLUMNS):
         print(f"  {cname:<14} valid {np.isfinite(feats[keep, j]).mean():.1%} of kept rows")
     print(f"wrote {args.out}")
@@ -973,6 +1037,8 @@ def main() -> int:
     g.add_argument("--geoloc", action="append", required=True,
                    help="lat/lon file (MTG: one LATLON file; MSG: LAT then LON)")
     g.add_argument("--out", required=True)
+    g.add_argument("--max-unc", type=float, default=MAX_UNC_K,
+                   help="MTLST: drop pixels whose LST_uncertainty exceeds this, K")
     s = sub.add_parser("score")
     s.add_argument("--buffer", required=True)
     s.add_argument("--hires", required=True, help="drift_terrain cache; its 'under' set")

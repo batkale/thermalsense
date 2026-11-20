@@ -448,8 +448,8 @@ Breaking any of these has taken the app down or silently corrupted results befor
   agreement for commercial use. **Not in production;** re-measure once the
   archive holds a flying season. `build --bbox` writes the layer itself as
   Parquet (Alps: 174,114 blocks with ≥ 5 aircraft-days, 1.2 MB).
-- **Satellite land-surface temperature from MODIS adds nothing, measured
-  19 Nov 2026** (`evaluation/lst.py`; 6 Nov buffer, 2,009 units, by hour,
+- **Satellite land-surface temperature adds nothing, MODIS or MTG, measured
+  19–20 Nov 2026** (`evaluation/lst.py`; 6 Nov buffer, 2,009 units, by hour,
   seeds 0–2, 1,500 resamples, against hires terrain from the drift cache).
   MOD11A1 / MYD11A1 v6.1 came from Planetary Computer: anonymous STAC and SAS
   token, COG range reads, 395 tile-days, none failed. QC-masked to an LST
@@ -466,16 +466,37 @@ Breaking any of these has taken the app down or silently corrupted results befor
   lapse-adjusted −0.001 / −0.004 / −0.003, every interval spanning zero. On
   the 1,710 covered units only: +0.000 / −0.005 / +0.004. A daily pass hours
   from the row's own hour cannot say which ground is hot *now*. That is
-  the case for the geostationary product, and this does not rule it out.
-  **MTG/FCI MTLST (LSA-007) is not yet measured.** The LSA SAF archive needs
-  a free login. `lst need` lists the 527 hourly slots the buffer needs (HH:00
-  for every unit, plus the morning back to sunrise for `rise` / `rate`;
-  ~5.5 GB), and `lst geo` reads them once downloaded. 84% of rows are in
-  view of 0°. The effective FCI pixel there is 2.1 × 3.7 km in the Alps,
-  2.2 × 4.3 Germany, 2.1 × 2.9 Iberia and 2.1 × 3.5 Türkiye (SEVIRI
-  3.2 × 5.5 Alps). The 2 km figure holds only at nadir. Oct–Nov has the
-  weakest surface contrasts of the year, so a null here does not rule out
-  summer.
+  the case for the geostationary product. **MTG/FCI MTLST (LSA-007), the
+  geostationary product, adds nothing either** (20 Nov). Every unit reads
+  the HH:00 slot of its own hour, plus the hourly morning back to sunrise
+  for `rise` / `rate`: 527 slots, 5.8 GB, none missing. Kept: clear sky by
+  QFLAGS and LST_uncertainty ≤ 2 K; at the rows that cut removed 3 of
+  17,647 clear pixels. The effective FCI pixel is 2.1 × 3.7 km in the Alps,
+  2.2 × 4.3 Germany, 2.1 × 2.9 Iberia and 2.1 × 3.5 Türkiye, measured on
+  the LATLON grid at the rows (3.70 × 2.17 km median). The 2 km figure
+  holds only at nadir. **Coverage is the first problem:** 84% of rows are
+  in view, but one hourly look meets Oct–Nov cloud. That leaves 36% of rows
+  and 43% of mixed-label units (861 units scored on covered rows), against
+  MODIS's 85% from two passes a day. Values are sound: within an hour of a
+  MODIS pass r = 0.92 (Aqua) and 0.88 (Terra), MTG 1.5–2.6 K warmer. LST −
+  T2m has a median of +3.9 K, the morning rise 11.5 K at 2.1 K/h. **It is
+  still an altimeter:** raw 0.419, anomaly 0.421, rise 0.420 and rate 0.419
+  alone, while elevation alone scores 0.641 on the same rows. The lapse
+  inside a unit is only 2.1 K/km, because the pixel averages 8 km² of
+  terrain the row's own height barely describes. So the label-free
+  adjustment under-corrects and leaves 0.468, still below chance. Served
+  deltas against hires: raw −0.000 / −0.004 / +0.007 [+0.000, +0.013],
+  lapse-adjusted +0.003 / −0.002 / +0.006. Covered units only: raw −0.005
+  / −0.000 / +0.010 [+0.002, +0.019]. Every LST column from both sources
+  together: −0.002 / −0.002 / +0.005. The sign changes with the seed and
+  one seed touches zero: unproven. **At 1–4 km, skin temperature mostly
+  measures height, and inside an 11 km map there is little left once
+  height is known.** The LSA SAF LATLON file is public; slot files need the
+  free login (HTTP Basic). `lst need` writes the list, and a typo at
+  curl's one password prompt fails all 527 silently, which is why the
+  first two downloads fetched nothing. Oct–Nov has the weakest surface
+  contrasts of the year, so a null here does not rule out summer.
+  Re-measure on a summer buffer before calling satellite LST closed.
 - **Quality gate:** the challenger and the serving model are scored on identical
   rows from a *frozen, group-disjoint* benchmark (`evaluation/holdout.py`), and
   the challenger is rejected unless a paired bootstrap CI (`paired_delta_ci`)

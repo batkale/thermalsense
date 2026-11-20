@@ -132,6 +132,51 @@ def test_file_urls_follow_the_lsa_saf_layout():
     assert lst.file_name("mlstas", t) == "NETCDF4_LSASAF_MSG_MLST-ASv2_MSG-Disk_202610101200.nc"
 
 
+class _Var:
+    """Enough of an h5py dataset for _cf_decode: packed values plus attributes."""
+
+    def __init__(self, raw, **attrs):
+        self._raw, self.attrs = np.asarray(raw), attrs
+
+    def __getitem__(self, key):
+        return self._raw
+
+
+def test_mtlst_packing_fill_and_valid_range_decode_to_kelvin():
+    # As in LSA-007 MTLST: int16, K = raw * 0.01 + 273.15, fill -29999, valid -7100..8000.
+    raw = np.array([[[1500, -29999, 9000, -7100]]], dtype=np.int16)
+    v = lst._cf_decode(_Var(raw, scale_factor=np.array([0.01]), add_offset=np.array([273.15]),
+                            _FillValue=np.array([-29999]), valid_range=np.array([-7100, 8000])))
+    assert v.shape == (4,)
+    assert v[0] == pytest.approx(288.15) and v[3] == pytest.approx(202.15)
+    assert np.isnan(v[1]) and np.isnan(v[2])               # fill, and above the valid range
+
+
+def test_mtg_quality_keeps_clear_retrievals_within_two_kelvin():
+    q = np.array([102, 101, 103, 302, 110, 0, 200, 102])
+    unc = np.array([1.0, 0.5, 2.5, 1.9, 1.0, 1.0, 1.0, np.nan])
+    assert lst.mtg_quality(q, unc).tolist() == [True, True, False, True, False, False, False, False]
+    assert lst.mtg_quality(q, None).tolist() == [True, True, True, True, False, False, False, True]
+
+
+def test_a_morning_only_slot_has_no_unit_pixels_and_still_indexes():
+    pix = np.array([[3, 4], [5, 6]])
+    grid = np.arange(100.0).reshape(10, 10)
+    empty = lst._unit_pixels([(0, 1), (1, 1)], pix)          # both reads are morning-series reads
+    assert empty.shape == (0, 2) and empty.dtype.kind == "i"
+    assert grid[empty[:, 0], empty[:, 1]].size == 0
+    one = lst._unit_pixels([(0, 1), (1, 0)], pix)
+    assert one.tolist() == [[5, 6]]
+
+
+def test_a_flipped_grid_is_refused():
+    x = np.linspace(-0.15, 0.15, 7)
+    y = x[::-1].copy()
+    assert lst._same_axes((x, y), (x.copy(), y.copy()))
+    assert not lst._same_axes((x, y), (x, y[::-1]))         # rows south-up instead of north-up
+    assert lst._same_axes(None, (x, y))                     # nothing to compare: not refused
+
+
 def test_geogrid_finds_the_nearest_pixel_and_refuses_points_off_the_grid():
     lat = np.linspace(50.0, 40.0, 101)[:, None] * np.ones((1, 121))
     lon = np.ones((101, 1)) * np.linspace(0.0, 12.0, 121)[None, :]
