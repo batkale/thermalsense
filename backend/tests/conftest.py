@@ -101,6 +101,13 @@ def _meteo_offline(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _todo_in_tmp(tmp_path, monkeypatch):
+    """And the shared to-do list: a test save must never replace the team's list."""
+    import config
+    monkeypatch.setattr(config, "TODO_PATH", tmp_path / "todo.json")
+
+
+@pytest.fixture(autouse=True)
 def _ledger_in_tmp(tmp_path, monkeypatch):
     """And the forecast ledger, so no test writes into a real one."""
     import config

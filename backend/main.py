@@ -1431,6 +1431,13 @@ async def websocket_live(ws: WebSocket):
         reader.cancel()
 
 
+# --- Shared to-do list --------------------------------------------------------
+# Read by /to-do-list (frontend/public/to-do-list.html). Registered before the
+# SPA catch-all below, which would otherwise answer /todo with the map app.
+from data import todo_store
+app.include_router(todo_store.make_router(_require_admin))
+
+
 # --- Static frontend ----------------------------------------------------------
 def _static_file(static_dir: Path, full_path: str) -> Path | None:
     """The built file ``full_path`` names under ``static_dir``, or None.
