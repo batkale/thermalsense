@@ -609,6 +609,9 @@ Breaking any of these has taken the app down or silently corrupted results befor
 | `GET /verification/examples?status=&horizon_min=&limit=` | Recent forecasts with one status, always with the issued/scored counts they were picked from |
 | `GET /verification/forecast/{id}` | One recorded forecast, its outcome and its pooled grid, for replay |
 | `WS /ws/live` | Frames every `WS_FRAME_INTERVAL` (1 s). Client sends `{"bounds":{lat_min,lat_max,lon_min,lon_max}}` on connect and on every map move |
+| `GET /todo` | The team's shared to-do list (see "Housekeeping"). Open to read, `no-store`, `noindex` |
+| `PUT /todo` | Admin. `{version, items}`: replaces the list if it is still at `version`, else 409 |
+| `GET /todo/auth` | Admin. 200 when the key is right; the to-do page tests a key with it before offering editing |
 
 Admin endpoints require an `X-Admin-Token` header when `ADMIN_TOKEN` is set.
 
@@ -1017,3 +1020,27 @@ separate x and y pixel sizes.
 - The 30-column feature list goes stale often. Read `FEATURE_COUNT` and the
   `np.column_stack` block in `feature_engineering.py` rather than trusting any
   written list, including the one in `docs/ARCHITECTURE.md`.
+- **The team's to-do list is at `/to-do-list`** (added 20 Nov 2026): done, to
+  do, to research, so the two of us and every Claude session work from one
+  record. It is linked from nowhere, is `noindex` (meta tag and
+  `X-Robots-Tag`), and a test fails if a public page or bundle ever names it.
+  It is not secret, though: anyone with the address can read it, so nothing
+  that must stay private belongs in it. Editing takes the admin key
+  (`X-Admin-Token`), which the page asks for once and keeps in that browser.
+  - **The live list is on the VM, not in the repo.** It is
+    `/data/data/todo.json` on the data volume (`config.TODO_PATH`, written by
+    `data/todo_store.py`), so edits survive every deploy.
+    `backend/todo_seed.json` is only the first version, read while that file
+    does not exist. Editing the seed after the first save changes nothing
+    live. Change the list on the page.
+  - Every save names the version it started from, and a stale one gets a 409.
+    The page then reloads, so two people editing at once cannot erase each
+    other's change.
+  - The 30 most recent replaced versions are kept in `/data/data/todo_history/`.
+    That is the undo for a wrong delete: copy one back over `todo.json` on the
+    VM.
+  - The page is `frontend/public/to-do-list.html`: plain HTML and JS, copied
+    into the build as-is, outside both React bundles. It shares
+    `thermalsense.lang` / `thermalsense.theme` with the other two pages. Every
+    item string reaches the DOM as text, and only URLs and `#123` (a PR)
+    become links.

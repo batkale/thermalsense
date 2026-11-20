@@ -305,6 +305,11 @@ LIVE_FUSION_MAX_MIN = float(os.getenv("LIVE_FUSION_MAX_MIN", "60"))
 # against the gliders that were actually there (see data/forecast_ledger.py).
 ENABLE_FORECAST_LEDGER = os.getenv("ENABLE_FORECAST_LEDGER", "1").lower() not in {"0", "false", "no"}
 LEDGER_DB_PATH         = DATA_DIR / "data" / "forecast_ledger.db"
+
+# The team's shared to-do list behind /to-do-list (data/todo_store.py). It lives
+# on the data volume so edits made on the page survive every deploy; the repo's
+# backend/todo_seed.json is only its first version, read while this file is absent.
+TODO_PATH              = DATA_DIR / "data" / "todo.json"
 LEDGER_ISSUE_EVERY_MIN = int(os.getenv("LEDGER_ISSUE_EVERY_MIN", "15"))
 # The mentor's example horizons.  Any list works; the scoring does not care.
 # 360 added 17 Nov 2026: the TUSAŞ HANGAR review asked for skill at 1, 3 and
