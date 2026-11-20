@@ -1,9 +1,9 @@
 {
  "updated_at": "2026-11-20",
  "items": [
-  {"id": "t01", "section": "todo", "added": "2026-11-20",
-   "title": "Merge the satellite LST measurement (MODIS + MTG) into main",
-   "note": "Branch claude/interesting-bardeen-bb8202, commits d64810b and dd5d09f: evaluation code (evaluation/lst.py), its tests and the CLAUDE.md entry. No production change."},
+  {"id": "t01", "section": "done", "added": "2026-11-20", "done_at": "2026-11-20",
+   "title": "Satellite LST measurement (MODIS + MTG) merged into main",
+   "note": "evaluation/lst.py, its tests and the CLAUDE.md entry, from branch claude/interesting-bardeen-bb8202. No production change."},
   {"id": "t02", "section": "todo", "added": "2026-11-20",
    "title": "Get Turkish training data",
    "note": "The live buffer holds 1 row from Türkiye out of 78,428 (20 Nov). İnönü is the home site and the demo opens there, but the model has almost never seen Turkish air. Options: OGN trackers and a receiver at İnönü, paraglider IGC logs (thermal.kk7.ch is CC BY-NC-SA, so commercial use needs an agreement)."},
