@@ -401,6 +401,14 @@ class ThermalModel:
         self.model = None
         self._buffer_X: list[np.ndarray] = []
         self._buffer_y: list[int] = []
+        # Has the buffer changed since retrain() last fitted it?  The fit is
+        # deterministic (random_state=42), so refitting an unchanged buffer —
+        # every five minutes all night, when the solar floor drops every
+        # candidate — rebuilds the challenger the gate already judged.  If that
+        # one lost, each repeat loses again and spends one of
+        # _MAX_CONSECUTIVE_SKIPS, so an hour of night promoted it by repetition
+        # alone.  True at start so the first cycle after a restart always fits.
+        self._buffer_changed = True
         self._skipped_fits = 0
         # Outcome of the most recent fit_and_gate call, for /training/status.
         # The log already says this, but a training node is watched through a
@@ -649,6 +657,7 @@ class ThermalModel:
             X, y = X[~fake], y[~fake]
         self._buffer_X = list(X)
         self._buffer_y = list(y)
+        self._buffer_changed = True
         log.info(f"[model] buffer restored: {len(self._buffer_X)} samples from disk")
 
     def _save_buffer(self) -> None:
@@ -749,6 +758,7 @@ class ThermalModel:
         sampled: set[str] = set()
         offset_samples = 0
         considered = 0        # aircraft examined, which now exceeds len(candidates)
+        added = 0             # rows appended to the buffer this cycle
 
         for g in candidates:
             try:
@@ -845,6 +855,7 @@ class ThermalModel:
                         continue
                     self._buffer_X.append(row)
                     self._buffer_y.append(label)
+                    added += 1
                     sampled.add(o["id"])
                     if o["id"] != g["id"]:
                         offset_samples += 1
@@ -880,20 +891,36 @@ class ThermalModel:
             log.info(f"[model] {considered - offset_samples} centre + {offset_samples} off-centre "
                      f"samples from {len(candidates)} grids (no extra API calls)")
 
-        # Cap the resident buffer, spending it on day coverage rather than recency
-        self._buffer_X, self._buffer_y, note = _evict_to_cap(
-            self._buffer_X, self._buffer_y)
-        if note:
-            log.info(f"[model] {note}")
+        # The flag, not "added == 0" alone: /seed fills the buffer and then
+        # calls this to fit it, often at night when this cycle adds nothing.
+        if added:
+            self._buffer_changed = True
 
-        # Persist before the fit-threshold check.  Collecting a sample costs two
-        # rate-limited API calls, so losing a partial buffer to a restart throws
-        # away real work; durability must not depend on reaching the fit threshold.
-        self._save_buffer()
+        # Eviction and the save have nothing to do on an unchanged buffer.
+        if self._buffer_changed:
+            # Cap the resident buffer, spending it on day coverage rather than recency
+            self._buffer_X, self._buffer_y, note = _evict_to_cap(
+                self._buffer_X, self._buffer_y)
+            if note:
+                log.info(f"[model] {note}")
+
+            # Persist before the fit-threshold check.  Collecting a sample costs two
+            # rate-limited API calls, so losing a partial buffer to a restart throws
+            # away real work; durability must not depend on reaching the fit threshold.
+            self._save_buffer()
 
         # Rows from before the full-resolution columns get them filled in, a
         # bounded slice per cycle; fit_and_gate waits until none are left.
+        # Every cycle, changed or not — quiet hours are when it has the network
+        # to itself — and ahead of the check below, because filling rows in
+        # changes the buffer (it sets _buffer_changed).
         await self._backfill_hires(HIRES_BACKFILL_BUDGET_S)
+
+        # Nothing new since the last fit: the fit would rebuild the same model
+        # (see _buffer_changed).
+        if not self._buffer_changed:
+            log.info("[model] no new samples since the last fit — skipping fit")
+            return
 
         # to_thread for the same reason as predict(): the fit is pure CPU and the
         # app runs a single worker, so calling it inline froze every request for
@@ -902,6 +929,10 @@ class ThermalModel:
         # single attribute assignment, so a concurrent predict() sees either the
         # old model or the new one, never a half-built state.
         await asyncio.to_thread(self.fit_and_gate)
+        # Cleared only once the fit has returned, so a fit that raised or was
+        # cut off by the cycle timeout runs again next cycle.  Nothing appends
+        # meanwhile: every caller holds _training_lock.
+        self._buffer_changed = False
 
     async def _backfill_hires(self, budget_s: float) -> None:
         """
@@ -940,10 +971,14 @@ class ThermalModel:
             self._hires_filled += int(np.isfinite(h[:, 0]).sum())
         left = len(todo) - done
         if done:
+            self._buffer_changed = True       # rows changed in place
             self._save_buffer()
             log.info(f"[model] full-resolution terrain filled into {done} buffer rows, "
                      f"{left} left")
         if left == 0:
+            # The fits held while this ran are owed now, even if this call
+            # filled nothing (the last rows were evicted, say).
+            self._buffer_changed = True
             self._hires_backfill = False
             log.info(f"[model] terrain fill-in complete ({self._hires_filled} rows with "
                      f"values) — fits resume")
@@ -1197,6 +1232,7 @@ class ThermalModel:
             discarded = len(self._buffer_X)
             self._buffer_X = []
             self._buffer_y = []
+            self._buffer_changed = True
             log.info(f"[seed] reset — discarded {discarded} existing buffer samples")
 
         # Retention decides what actually exists, so it is the ceiling here.  A
@@ -1510,6 +1546,7 @@ class ThermalModel:
                     # retain the whole cached matrix.  See retrain().
                     self._buffer_X.append(row)
                     self._buffer_y.append(label)
+                    self._buffer_changed = True
                     added += 1
                 except Exception as exc:
                     log.warning(f"[seed] feature failed at ({lat:.3f},{lon:.3f}): {exc}")

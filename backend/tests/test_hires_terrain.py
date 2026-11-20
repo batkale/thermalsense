@@ -234,3 +234,52 @@ async def test_a_wider_model_wins_when_the_new_columns_carry_the_signal(tmp_path
     m.fit_and_gate()
     assert m.last_fit["outcome"] == "accepted", m.last_fit
     assert m.model.n_features_in_ == FEATURE_COUNT and m.last_fit["delta"][0] > 0
+
+
+async def test_a_cycle_that_adds_nothing_still_fills_in_and_then_fits(tmp_path, monkeypatch):
+    """retrain() skips the fit when the buffer is unchanged since the last one.
+    The fill-in changes rows in place and holds every fit until it is done, so
+    a dark cycle must still run it, and finishing it must count as a change —
+    or the first wider model waits for the next daylight sample."""
+    import data.ogn_client as oc
+    from data import meteo_client as mc
+
+    m, _, _ = await _load_old(tmp_path, monkeypatch)
+
+    async def gliders():
+        return [{"id": "G1", "lat": 39.5, "lon": 29.5, "alt": 2000.0, "vario": 2.5,
+                 "circling": True, "ac_type": 1, "is_tow": False, "under_tow": False}]
+
+    async def dark(lat, lon, h, strict=False):
+        return {"temp_2m": 8.0, "humidity": 0.8, "wind_speed": 3.0, "wind_dir": 0.0,
+                "cape": 0.0, "cin": 5.0, "solar_ghi": 0.0, "temp_850": 4.0,
+                "temp_500": -20.0, "lapse_rate": 6.0, "cape_base": 0,
+                "pbl_height": 200.0, "soil_temp": 10.0}
+
+    reads = {"ok": False}
+
+    async def terrain(lats, lons):
+        if not reads["ok"]:
+            raise RuntimeError("S3 unreachable")
+        return np.random.default_rng(0).random((len(lats), HIRES_COUNT)).astype(np.float32)
+
+    monkeypatch.setattr(oc, "fetch_ogn_gliders", gliders)
+    monkeypatch.setattr(oc, "is_thermal_evidence", lambda g: True)
+    monkeypatch.setattr(mc, "fetch_meteo_features", dark)
+    monkeypatch.setattr(tc, "hires_at_points", terrain)
+
+    fits = []
+    real_fit = m.fit_and_gate
+    monkeypatch.setattr(m, "fit_and_gate", lambda: (fits.append(1), real_fit()))
+
+    await m.retrain()                     # first cycle after start: fill-in paused, fit held
+    assert m._hires_backfill and m.last_fit["outcome"] == "filling_in_terrain"
+    assert len(fits) == 1
+
+    reads["ok"] = True
+    await m.retrain()                     # adds nothing, but the fill-in finishes
+    assert not m._hires_backfill
+    assert len(fits) == 2 and m.last_fit["outcome"] != "filling_in_terrain"
+
+    await m.retrain()                     # now nothing has changed
+    assert len(fits) == 2
