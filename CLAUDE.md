@@ -252,6 +252,22 @@ Breaking any of these has taken the app down or silently corrupted results befor
   same allowance; `meteo_client.live_usage()["total"]` counts both endpoints.
   Overlap with rows the live sampler already took from the same day is possible
   and expected to be small; the panel shows the run's `added` count.
+- **The seed buys weather by the fortnight, not by the hour** (since 20 Nov
+  2026). Open-Meteo bills a request up to 14 days long the same as one day, and
+  `fetch_meteo_historical` asks for a whole day to keep one hour. So before its
+  bucket loop the seed plans one request per 0.5° cell per ≤14-day span
+  (`plan_historical_ranges`), and `fetch_meteo_historical_range` caches each
+  wanted hour under the same key, as the same record (`_hist_record`), that
+  the single-hour fetch would write. Night buckets come free; each used to
+  cost a call to learn it was dark. Rebuilding 28 Sep–6 Nov from the archive
+  this way took 1,741 calls instead of ~17,000; real range answers matched
+  single-day ones on 41 of 41 hours (20 Nov), and 477 of 479 earlier (the two
+  misses were one hour Open-Meteo had revised). Whatever the prefetch does not
+  reach is fetched hour by hour as before. The budget now holds back only
+  *uncached* buckets (`meteo_deferred_buckets`): the loop used to stop at the
+  first bucket once the budget was reached, and after a prefetch that would
+  strand buckets already paid for. Tests cannot reach Open-Meteo or the real
+  cache: `conftest.py` stubs `_get_client` and moves the cache to `tmp_path`.
 - **What the score actually is, measured 27 Sep 2026** on the first buffer big
   enough to measure anything (11,774 rows, 1,714 positives, 2,571 scoring units,
   77 benchmark groups — the gate is open and fits are being accepted). Scored

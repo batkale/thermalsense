@@ -509,9 +509,13 @@ def _hist_path():
     return Path(DATA_DIR) / "cache" / "meteo_historical.jsonl"
 
 
+def _hist_cell(lat: float, lon: float) -> tuple[float, float]:
+    return (round(round(lat / _HIST_SNAP) * _HIST_SNAP, 2),
+            round(round(lon / _HIST_SNAP) * _HIST_SNAP, 2))
+
+
 def _hist_key(lat: float, lon: float, dt: datetime) -> str:
-    la = round(round(lat / _HIST_SNAP) * _HIST_SNAP, 2)
-    lo = round(round(lon / _HIST_SNAP) * _HIST_SNAP, 2)
+    la, lo = _hist_cell(lat, lon)
     return f"{la}|{lo}|{dt.strftime('%Y-%m-%dT%H')}"
 
 
@@ -566,6 +570,40 @@ def _hist_cache_put(key: str, value: dict) -> dict:
     return value
 
 
+def historical_cached(lat: float, lon: float, dt: datetime) -> bool:
+    """Whether fetch_meteo_historical would answer this hour without a call."""
+    return _hist_cache_get(_hist_key(lat, lon, dt)) is not None
+
+
+def _hist_record(hourly: dict, i: int) -> dict:
+    """
+    The cache entry for slot i of an archive response.
+
+    Both fetches build it here — the single hour and the range — so the two can
+    never cache different weather for the same hour.
+    """
+    def _v(key, fb_key):
+        val = hourly[key][i]
+        return val if val is not None else _FALLBACK[fb_key]
+
+    t850 = _v("temperature_850hPa", "temp_850")
+    t500 = _v("temperature_500hPa", "temp_500")
+    return _with_legacy_base({
+        "temp_2m":    _v("temperature_2m",             "temp_2m"),
+        "humidity":   _v("relativehumidity_2m",        "humidity_pct") / 100,
+        "wind_speed": _v("windspeed_10m",              "wind_speed"),
+        "wind_dir":   _v("winddirection_10m",          "wind_dir"),
+        "cape":       _v("cape",                        "cape"),
+        "cin":        _v("convective_inhibition",       "cin"),
+        "solar_ghi":  _v("shortwave_radiation",         "solar_ghi"),
+        "temp_850":   t850,
+        "temp_500":   t500,
+        "lapse_rate": (t850 - t500) / 3.5,
+        "pbl_height": _v("boundary_layer_height",      "pbl_height"),
+        "soil_temp":  _v("soil_temperature_0_to_7cm",  "soil_temp"),
+    })
+
+
 async def fetch_meteo_historical(
     lat: float, lon: float, dt: datetime, strict: bool = False
 ) -> dict | None:
@@ -609,30 +647,9 @@ async def fetch_meteo_historical(
             "timezone":   "UTC",
         })
         r.raise_for_status()
-        hourly = r.json()["hourly"]
-
-        def _v(key, fb_key):
-            val = hourly[key][hour_idx]
-            return val if val is not None else _FALLBACK[fb_key]
-
-        t2m  = _v("temperature_2m",    "temp_2m")
-        t850 = _v("temperature_850hPa", "temp_850")
-        t500 = _v("temperature_500hPa", "temp_500")
+        record = _hist_record(r.json()["hourly"], hour_idx)
         _count_live(hit=False, historical=True)
-        return _hist_cache_put(ckey, _with_legacy_base({
-            "temp_2m":    t2m,
-            "humidity":   _v("relativehumidity_2m",        "humidity_pct") / 100,
-            "wind_speed": _v("windspeed_10m",              "wind_speed"),
-            "wind_dir":   _v("winddirection_10m",          "wind_dir"),
-            "cape":       _v("cape",                        "cape"),
-            "cin":        _v("convective_inhibition",       "cin"),
-            "solar_ghi":  _v("shortwave_radiation",         "solar_ghi"),
-            "temp_850":   t850,
-            "temp_500":   t500,
-            "lapse_rate": (t850 - t500) / 3.5,
-            "pbl_height": _v("boundary_layer_height",      "pbl_height"),
-            "soil_temp":  _v("soil_temperature_0_to_7cm",  "soil_temp"),
-        }))
+        return _hist_cache_put(ckey, record)
     except Exception as exc:
         detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
         log.warning(
@@ -641,3 +658,101 @@ async def fetch_meteo_historical(
             f"{'skipping' if strict else 'using fallback'}"
         )
         return None if strict else _FALLBACK.copy()
+
+
+# --- many archived hours in one request ------------------------------------
+#
+# Open-Meteo bills a request by its span as well as its width: anything up to
+# two weeks costs the same as a single day (1.1 calls for the 11 HOURLY_VARS),
+# and every further fortnight costs that again.  fetch_meteo_historical asks for
+# a whole day and keeps one hour of it, so a cell flown for nine hours of one
+# day cost nine calls for one day's data.  Asking once per cell per fortnight
+# is the same data for one call.  Measured rebuilding 28 Sep-6 Nov 2026 from
+# the archive: 1,741 calls where hour-by-hour would have been ~17,000, and 477
+# of 479 hours checked came back identical to the single-day answers — the two
+# that differed were one hour Open-Meteo had revised since it was cached.
+_HIST_RANGE_DAYS = 14
+
+
+def plan_historical_ranges(points) -> list[tuple[float, float, list[datetime]]]:
+    """
+    Group archived hours into the fewest requests that bill as one.
+
+    points: (lat, lon, dt) for every hour wanted.  Hours already cached are
+    dropped; the rest are grouped by the 0.5 deg cell they are cached under and
+    cut into spans of at most _HIST_RANGE_DAYS days.  Returns one
+    (lat, lon, hours) per request, at the cell's snapped centre — where /seed
+    already asks — with the requests that cover the most hours first, so a
+    budget that runs out partway has bought as much weather as it could.
+    """
+    cells: dict[tuple[float, float], dict[str, datetime]] = {}
+    for lat, lon, dt in points:
+        key = _hist_key(lat, lon, dt)
+        if _hist_cache_get(key) is None:
+            cells.setdefault(_hist_cell(lat, lon), {})[key] = dt
+
+    plan = []
+    for (la, lo), hours in sorted(cells.items()):
+        span: list[datetime] = []
+        for dt in sorted(hours.values()):
+            if span and (dt.date() - span[0].date()).days >= _HIST_RANGE_DAYS:
+                plan.append((la, lo, span))
+                span = []
+            span.append(dt)
+        plan.append((la, lo, span))
+    plan.sort(key=lambda p: -len(p[2]))      # stable: ties stay in cell order
+    return plan
+
+
+async def fetch_meteo_historical_range(lat: float, lon: float, dts: list[datetime]) -> int:
+    """
+    Cache several archived hours of one 0.5 deg cell with a single request.
+
+    Each hour lands under exactly the key, as exactly the record,
+    fetch_meteo_historical would have written for it, which then answers it
+    from the cache.  Only the hours asked for are kept: the response carries
+    every hour of every day in the span, and the cache lives in memory whole.
+
+    Returns how many hours were cached.  A failure caches nothing and raises
+    nothing — those hours are simply still missing, and fetch_meteo_historical
+    will try each one itself, strict as ever.
+    """
+    if not dts:
+        return 0
+    first, last = min(dts).date(), max(dts).date()
+    if (last - first).days >= _HIST_RANGE_DAYS:
+        raise ValueError(f"{first}..{last} is longer than {_HIST_RANGE_DAYS} days "
+                         f"and would bill as more than one call")
+    la, lo = _hist_cell(lat, lon)
+    try:
+        r = await _get_client().get(OPEN_METEO_HIST_BASE, params={
+            "latitude":   la,
+            "longitude":  lo,
+            "hourly":     ",".join(HOURLY_VARS),
+            "start_date": first.isoformat(),
+            "end_date":   last.isoformat(),
+            "timezone":   "UTC",
+        })
+        r.raise_for_status()
+        _count_live(hit=False, historical=True)
+        hourly = r.json()["hourly"]
+        slot = {str(t)[:13]: i for i, t in enumerate(hourly["time"])}
+    except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+        log.warning(f"[meteo] historical range failed ({la:.2f},{lo:.2f}) "
+                    f"{first}..{last} ({detail}) — {len(dts)} hour(s) left to fetch singly")
+        return 0
+
+    cached = 0
+    for dt in dts:
+        key = _hist_key(la, lo, dt)
+        i = slot.get(dt.strftime("%Y-%m-%dT%H"))
+        if i is None or _hist_cache_get(key) is not None:
+            continue
+        try:
+            record = _hist_record(hourly, i)
+        except Exception:
+            continue                 # left for the single-hour fetch to judge
+        _hist_cache_put(key, record)
+        cached += 1
+    return cached

@@ -265,6 +265,9 @@ _MAX_BUFFER  = 200_000
 # ceiling is what it does not.  (30 columns made each matrix ~9.7 MB: ~39 MB.)
 _SEED_GRID_CACHE = 4
 
+# Pause between the seed's archive requests, and after each bucket.
+_SEED_PACE_S = 0.3
+
 # Buffer rows per full-resolution read during the fill-in (~50k sample points).
 _BACKFILL_CHUNK = 512
 
@@ -1177,7 +1180,9 @@ class ThermalModel:
         from collections import defaultdict
         from datetime import datetime, timezone, timedelta
         import sqlite3
-        from data.meteo_client import fetch_meteo_historical, thermal_top_agl
+        from data.meteo_client import (fetch_meteo_historical, fetch_meteo_historical_range,
+                                       flush_historical_cache, historical_cached,
+                                       plan_historical_ranges, thermal_top_agl)
         from data.terrain_client import fetch_elevation_grid, fetch_hires_grid, snap_grid_centre
         from data.ogn_client import SOARING_AC_TYPES
         from pipeline.feature_engineering import (build_feature_matrix, cyclic,
@@ -1341,24 +1346,58 @@ class ThermalModel:
         # never came near 6,000 calls, so nothing ever stopped the run.
         deadline = time.monotonic() + SEED_TIME_BUDGET_S
 
+        def _over_meteo_budget() -> bool:
+            # One Open-Meteo allowance covers this job and the live sampler, and
+            # the live one has to keep working tomorrow morning: stop at the
+            # budget rather than at the hard quota.
+            u = _meteo_usage()
+            return u["total"] >= min(SEED_METEO_BUDGET, u["quota"])
+
+        # Weather for the whole run first: one request per 0.5 deg cell per
+        # fortnight rather than one per bucket (see _HIST_RANGE_DAYS in
+        # meteo_client), and the loop below then finds its buckets in the cache.
+        # Night buckets come along free, where each used to cost a call just to
+        # learn it was dark.  Whatever this does not reach — the budget, the
+        # clock, a failed request — the loop fetches hour by hour as before.
+        plan = plan_historical_ranges(
+            (lat_b, lon_b, datetime.fromisoformat(f"{d}T{h:02d}:00:00+00:00"))
+            for lat_b, lon_b, d, h in buckets)
+        range_requests = prefetched = 0
+        for la, lo, dts in plan:
+            if time.monotonic() >= deadline or _over_meteo_budget():
+                break
+            prefetched += await fetch_meteo_historical_range(la, lo, dts)
+            range_requests += 1
+            await asyncio.sleep(_SEED_PACE_S)
+        if plan:
+            # On disk before the loop: it is the part of the seed that has been
+            # OOM-killed, and the cache otherwise writes only every 50 entries.
+            flush_historical_cache(force=True)
+            log.info(f"[seed] weather prefetch: {prefetched} of "
+                     f"{sum(len(p[2]) for p in plan)} uncached hour(s) "
+                     f"in {range_requests} of {len(plan)} request(s)")
+
+        meteo_deferred = 0
         for (lat_b, lon_b, date_str, hour), beacons in buckets.items():
             if time.monotonic() >= deadline:
                 time_stopped = True
                 log.warning(f"[seed] stopping at the {SEED_TIME_BUDGET_S:.0f}s time budget — "
                             f"{len(buckets) - done_buckets} buckets left for next time")
                 break
-            # One Open-Meteo allowance covers this job and the live sampler, and
-            # the live one has to keep working tomorrow morning: stop at the
-            # budget rather than at the hard quota.
-            u = _meteo_usage()
-            if u["total"] >= min(SEED_METEO_BUDGET, u["quota"]):
+            dt_b = datetime.fromisoformat(f"{date_str}T{hour:02d}:00:00+00:00")
+            # Only a bucket that would cost a call waits for the next run.  A
+            # cached one is free, and after the prefetch most of them are: the
+            # budget it ran into must not stop the loop at the first bucket.
+            if not historical_cached(lat_b, lon_b, dt_b) and _over_meteo_budget():
+                if not quota_stopped:
+                    u = _meteo_usage()
+                    log.warning(f"[seed] reached the meteo budget "
+                                f"({u['total']}/{SEED_METEO_BUDGET}) — buckets not "
+                                f"already cached are left for next time")
                 quota_stopped = True
-                log.warning(f"[seed] stopping at the meteo budget "
-                            f"({u['total']}/{SEED_METEO_BUDGET}) — "
-                            f"{len(buckets) - done_buckets} buckets left for next time")
-                break
+                meteo_deferred += 1
+                continue
             try:
-                dt_b  = datetime.fromisoformat(f"{date_str}T{hour:02d}:00:00+00:00")
                 # strict: a failed fetch returns None rather than synthetic
                 # constants, so we drop the bucket instead of training on invented weather
                 meteo = await fetch_meteo_historical(lat_b, lon_b, dt_b, strict=True)
@@ -1476,7 +1515,7 @@ class ThermalModel:
                     log.warning(f"[seed] feature failed at ({lat:.3f},{lon:.3f}): {exc}")
                     errors += 1
 
-            await asyncio.sleep(0.3)  # polite pacing for the Open-Meteo archive API
+            await asyncio.sleep(_SEED_PACE_S)  # polite pacing for the Open-Meteo archive API
 
         # Same day-stratified eviction as the live path — a /seed rebuild is
         # exactly the case where one long stretch could otherwise crowd out
@@ -1501,7 +1540,10 @@ class ThermalModel:
             "skipped_ambiguous":    ambiguous,
             "skipped_no_terrain":   no_terrain,
             "stopped_at_meteo_budget": quota_stopped,
+            "meteo_deferred_buckets":  meteo_deferred,
             "stopped_at_time_budget":  time_stopped,
+            "meteo_range_requests":    range_requests,
+            "meteo_hours_prefetched":  prefetched,
             "buffer_total":     len(self._buffer_X),
         }
         log.info(f"[seed] complete: {result}")
