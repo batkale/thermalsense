@@ -374,6 +374,14 @@ class ThermalModel:
         self.model = None
         self._buffer_X: list[np.ndarray] = []
         self._buffer_y: list[int] = []
+        # Has the buffer changed since retrain() last fitted it?  The fit is
+        # deterministic (random_state=42), so refitting an unchanged buffer —
+        # every five minutes all night, when the solar floor drops every
+        # candidate — rebuilds the challenger the gate already judged.  If that
+        # one lost, each repeat loses again and spends one of
+        # _MAX_CONSECUTIVE_SKIPS, so an hour of night promoted it by repetition
+        # alone.  True at start so the first cycle after a restart always fits.
+        self._buffer_changed = True
         self._skipped_fits = 0
         # Outcome of the most recent fit_and_gate call, for /training/status.
         # The log already says this, but a training node is watched through a
@@ -588,6 +596,7 @@ class ThermalModel:
             X, y = X[~fake], y[~fake]
         self._buffer_X = list(X)
         self._buffer_y = list(y)
+        self._buffer_changed = True
         log.info(f"[model] buffer restored: {len(self._buffer_X)} samples from disk")
 
     def _save_buffer(self) -> None:
@@ -683,6 +692,7 @@ class ThermalModel:
         sampled: set[str] = set()
         offset_samples = 0
         considered = 0        # aircraft examined, which now exceeds len(candidates)
+        added = 0             # rows appended to the buffer this cycle
 
         for g in candidates:
             try:
@@ -772,6 +782,7 @@ class ThermalModel:
                         continue
                     self._buffer_X.append(row)
                     self._buffer_y.append(label)
+                    added += 1
                     sampled.add(o["id"])
                     if o["id"] != g["id"]:
                         offset_samples += 1
@@ -807,6 +818,16 @@ class ThermalModel:
             log.info(f"[model] {considered - offset_samples} centre + {offset_samples} off-centre "
                      f"samples from {len(candidates)} grids (no extra API calls)")
 
+        # Nothing new since the last fit: the fit would rebuild the same model
+        # (see _buffer_changed), and eviction and the save have nothing to do.
+        # Not "added == 0" alone — /seed fills the buffer and then calls this
+        # to fit it, often at night when this cycle adds nothing.
+        if added:
+            self._buffer_changed = True
+        if not self._buffer_changed:
+            log.info("[model] no new samples since the last fit — skipping fit")
+            return
+
         # Cap the resident buffer, spending it on day coverage rather than recency
         self._buffer_X, self._buffer_y, note = _evict_to_cap(
             self._buffer_X, self._buffer_y)
@@ -825,6 +846,10 @@ class ThermalModel:
         # single attribute assignment, so a concurrent predict() sees either the
         # old model or the new one, never a half-built state.
         await asyncio.to_thread(self.fit_and_gate)
+        # Cleared only once the fit has returned, so a fit that raised or was
+        # cut off by the cycle timeout runs again next cycle.  Nothing appends
+        # meanwhile: every caller holds _training_lock.
+        self._buffer_changed = False
 
     def fit_and_gate(self) -> None:
         """
@@ -1052,6 +1077,7 @@ class ThermalModel:
             discarded = len(self._buffer_X)
             self._buffer_X = []
             self._buffer_y = []
+            self._buffer_changed = True
             log.info(f"[seed] reset — discarded {discarded} existing buffer samples")
 
         # Retention decides what actually exists, so it is the ceiling here.  A
@@ -1326,6 +1352,7 @@ class ThermalModel:
                     # retain the whole cached matrix.  See retrain().
                     self._buffer_X.append(row)
                     self._buffer_y.append(label)
+                    self._buffer_changed = True
                     added += 1
                 except Exception as exc:
                     log.warning(f"[seed] feature failed at ({lat:.3f},{lon:.3f}): {exc}")
