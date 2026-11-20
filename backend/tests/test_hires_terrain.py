@@ -127,6 +127,7 @@ def _old_buffer(groups=150, per_group=16, seed=0):
     X[:, 3] = rng.uniform(0, 30, n)
     X[:, 4] = rng.uniform(0, 360, n)
     X[:, 21] = rng.uniform(300, 2500, n)
+    X[:, 5], X[:, 6], X[:, 19] = 20.0, 0.3, 3000.0   # thermal top ~2,260 m, above every row
     y = (rng.random(n) < 1 / (1 + np.exp(-(X[:, 3] - 15) / 4))).astype(int)
     return X, y
 

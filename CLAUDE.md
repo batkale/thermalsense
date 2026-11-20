@@ -173,11 +173,19 @@ Breaking any of these has taken the app down or silently corrupted results befor
   below `_MIN_SAMPLE_AGL` (200 m AGL — on the field, on the roll or on approach)
   and above the estimated thermal top + 300 m (that climb is wave, ridge or
   engine; the top is `meteo_client.thermal_top_agl` — see "The thermal top
-  replaced `cape_base`" below). The AGL floor is applied at collection *and*
-  again in `fit_and_gate`, so a buffer written before it existed is cleaned
-  without a `/seed` rebuild. The thermal-top filter is applied at collection
-  only, deliberately — measured as neutral, and applying it in `fit_and_gate`
-  would thin the frozen benchmark's groups in the middle of a run.
+  replaced `cape_base`" below). Both the AGL floor and the thermal top are
+  applied at collection *and* again at fit time (`_fit_rows`, used by
+  `fit_and_gate`, `training_summary` and `evaluation/evaluate.py`), so a buffer
+  written before either existed is cleaned without a `/seed` rebuild. Rows are
+  masked, not deleted. The thermal top joined it on 20 Nov 2026; until then it
+  was collection-only, on the grounds that it would thin the frozen
+  benchmark's groups mid-run. Measured on the live buffer that day: it
+  excludes 7,440 of 78,416 rows (635 positives) — all collected or rebuilt
+  before the switch; 0 of the 691 collected after it — and takes the
+  benchmark from 695 to 655 mixed-label groups against the 30 the gate needs.
+  The gate's decision is paired on whatever rows the benchmark holds, so only
+  the logged "serving" score mixes populations, for one cycle.
+  `evaluate.py --no-thermal-top` reproduces scores recorded before then.
 - **Why the AGL floor exists:** without it 18% of the buffer sat at exactly 0 m
   AGL, all negative, and the model learned "aircraft on the ground are not
   thermalling". Measured: `alt_agl` alone scored 0.631 within-group against 0.664

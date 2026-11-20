@@ -439,6 +439,10 @@ def main() -> int:
     ap.add_argument("--no-agl-floor", action="store_true",
                     help="keep rows below _MIN_SAMPLE_AGL, which production "
                          "drops. Useful only to show the leak they cause.")
+    ap.add_argument("--no-thermal-top", action="store_true",
+                    help="keep rows above the thermal top + margin, which "
+                         "production drops. Scores recorded before 20 Nov 2026 "
+                         "were measured with them in.")
     args = ap.parse_args()
     _register_cached_variants(args.hires, args.prior_db)
     variants = args.variant or ["base", "solar"]
@@ -469,6 +473,14 @@ def main() -> int:
                   f"AGL dropped, {int(y[~keep].sum())} of them positive "
                   f"(--no-agl-floor to keep them)")
             X, y = X[keep], y[keep]
+    if not args.no_thermal_top:
+        from models.thermal_model import _THERMAL_BASE_MARGIN_M, _above_thermal_top_rows
+        above = _above_thermal_top_rows(X)
+        if above.any():
+            print(f"thermal top {int(above.sum())} rows above the top + "
+                  f"{_THERMAL_BASE_MARGIN_M} m dropped, {int(y[above].sum())} of them "
+                  f"positive (--no-thermal-top to keep them)")
+            X, y = X[~above], y[~above]
 
     if args.mode == "holdout":
         (Xtr, ytr, _), (Xes, yes, _), (Xe, ye, ge) = split(X, y)

@@ -59,6 +59,7 @@ def _buffer(groups=150, per_group=16, seed=0):
     # filtered away entirely and every gate test would exercise the early return
     # instead of the decision it is about.
     X[:, 21] = rng.uniform(300, 2500, n)             # alt_agl
+    X[:, 5], X[:, 6], X[:, 19] = 20.0, 0.3, 3000.0   # thermal top ~2,260 m, above every row
 
     # Label tracks slope, so a fit has real within-group signal to find.
     p = 1 / (1 + np.exp(-(X[:, 3] - 15) / 4))
