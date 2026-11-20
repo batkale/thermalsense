@@ -218,12 +218,17 @@ Breaking any of these has taken the app down or silently corrupted results befor
 - **A cycle that changed nothing does not fit** (since 20 Nov 2026,
   `_buffer_changed`). The fit is deterministic (`random_state=42`), so a cycle
   that added no rows — all night, every night — rebuilt the challenger the gate
-  had already judged and rewrote the unchanged buffer. If that challenger had
-  lost, each repeat lost again and spent one of `_MAX_CONSECUTIVE_SKIPS`, so an
-  hour of darkness promoted it by repetition alone. The flag, not "added this
-  cycle", decides it: `/seed` fills the buffer and then calls `retrain()` to fit
-  it, at 02:00 UTC when the cycle itself adds nothing. The first cycle after a
-  start always fits, and a fit that raised or timed out runs again.
+  had already judged and rewrote the unchanged buffer. If that challenger was
+  reliably worse, each repeat was rejected again and spent one of
+  `_MAX_CONSECUTIVE_SKIPS`, so an hour of darkness promoted it by repetition
+  alone; if it had won, each repeat re-saved the same model. The flag, not
+  "added this cycle", decides it: `/seed` fills the buffer and then calls
+  `retrain()` to fit it, at 02:00 UTC when the cycle itself adds nothing; and
+  `_backfill_hires` sets it when it fills rows in or finishes, because it edits
+  rows in place and holds every fit until it is done. That fill-in runs every
+  cycle, ahead of the check — a dark cycle that skipped it would stall it, and
+  the first wider model with it. The first cycle after a start always fits,
+  and a fit that raised or timed out runs again.
 - **Buffer eviction is day-stratified, not chronological** (`_evict_to_cap`).
   The `_MAX_BUFFER = 200_000` cap stays — it is a RAM limit on an 896 MB box —
   but keeping the *newest* N meant a full buffer held one stretch of weather, so

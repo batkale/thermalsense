@@ -891,30 +891,36 @@ class ThermalModel:
             log.info(f"[model] {considered - offset_samples} centre + {offset_samples} off-centre "
                      f"samples from {len(candidates)} grids (no extra API calls)")
 
-        # Nothing new since the last fit: the fit would rebuild the same model
-        # (see _buffer_changed), and eviction and the save have nothing to do.
-        # Not "added == 0" alone — /seed fills the buffer and then calls this
-        # to fit it, often at night when this cycle adds nothing.
+        # The flag, not "added == 0" alone: /seed fills the buffer and then
+        # calls this to fit it, often at night when this cycle adds nothing.
         if added:
             self._buffer_changed = True
-        if not self._buffer_changed:
-            log.info("[model] no new samples since the last fit — skipping fit")
-            return
 
-        # Cap the resident buffer, spending it on day coverage rather than recency
-        self._buffer_X, self._buffer_y, note = _evict_to_cap(
-            self._buffer_X, self._buffer_y)
-        if note:
-            log.info(f"[model] {note}")
+        # Eviction and the save have nothing to do on an unchanged buffer.
+        if self._buffer_changed:
+            # Cap the resident buffer, spending it on day coverage rather than recency
+            self._buffer_X, self._buffer_y, note = _evict_to_cap(
+                self._buffer_X, self._buffer_y)
+            if note:
+                log.info(f"[model] {note}")
 
-        # Persist before the fit-threshold check.  Collecting a sample costs two
-        # rate-limited API calls, so losing a partial buffer to a restart throws
-        # away real work; durability must not depend on reaching the fit threshold.
-        self._save_buffer()
+            # Persist before the fit-threshold check.  Collecting a sample costs two
+            # rate-limited API calls, so losing a partial buffer to a restart throws
+            # away real work; durability must not depend on reaching the fit threshold.
+            self._save_buffer()
 
         # Rows from before the full-resolution columns get them filled in, a
         # bounded slice per cycle; fit_and_gate waits until none are left.
+        # Every cycle, changed or not — quiet hours are when it has the network
+        # to itself — and ahead of the check below, because filling rows in
+        # changes the buffer (it sets _buffer_changed).
         await self._backfill_hires(HIRES_BACKFILL_BUDGET_S)
+
+        # Nothing new since the last fit: the fit would rebuild the same model
+        # (see _buffer_changed).
+        if not self._buffer_changed:
+            log.info("[model] no new samples since the last fit — skipping fit")
+            return
 
         # to_thread for the same reason as predict(): the fit is pure CPU and the
         # app runs a single worker, so calling it inline froze every request for
@@ -965,10 +971,14 @@ class ThermalModel:
             self._hires_filled += int(np.isfinite(h[:, 0]).sum())
         left = len(todo) - done
         if done:
+            self._buffer_changed = True       # rows changed in place
             self._save_buffer()
             log.info(f"[model] full-resolution terrain filled into {done} buffer rows, "
                      f"{left} left")
         if left == 0:
+            # The fits held while this ran are owed now, even if this call
+            # filled nothing (the last rows were evicted, say).
+            self._buffer_changed = True
             self._hires_backfill = False
             log.info(f"[model] terrain fill-in complete ({self._hires_filled} rows with "
                      f"values) — fits resume")
