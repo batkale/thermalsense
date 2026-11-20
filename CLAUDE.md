@@ -11,7 +11,8 @@ traffic. The model trains itself online from the Open Glider Network (OGN) APRS
 feed — every circling, climbing glider is a positive label.
 
 Live deployment: `https://thermalsense-tr.polandcentral.cloudapp.azure.com`
-(Azure VM, 2 vCPU / 896 MB usable RAM — see [DEPLOY.md](DEPLOY.md)).
+(Azure VM, 2 vCPU / 3.9 GB RAM, app container capped at 1.5 GB — see
+[DEPLOY.md](DEPLOY.md); the limits below were first set for an 896 MB box).
 **Merging to `main` deploys it:** cron on the VM runs
 [deploy/auto-deploy.sh](deploy/auto-deploy.sh) every five minutes, with a
 health-checked rollback. A merged PR is live within minutes.
@@ -25,7 +26,7 @@ All backend commands run from `backend/`. A Windows venv exists at
 `backend/.venv` with every dependency installed — prefer it.
 
 ```bash
-# Tests — 374 tests, ~15 s (needs pyarrow, or the archive tests skip)
+# Tests — ~500 tests, ~15 s (needs pyarrow, or the archive tests skip)
 cd backend && ./.venv/Scripts/python.exe -m pytest tests/ -q
 
 # Single test file
@@ -73,7 +74,8 @@ local `cache/terrain-copernicus/points.json` held 200 entries, all
 |---|---|
 | [backend/main.py](backend/main.py) | FastAPI app: all endpoints, WebSocket, APScheduler jobs, disk guard, static SPA mount |
 | [backend/config.py](backend/config.py) | Every tunable. Read this before changing behaviour — the comments carry the reasoning |
-| [backend/pipeline/feature_engineering.py](backend/pipeline/feature_engineering.py) | `build_feature_matrix` and `FEATURE_COUNT` (22 columns) |
+| [backend/pipeline/feature_engineering.py](backend/pipeline/feature_engineering.py) | `build_feature_matrix` and `FEATURE_COUNT` (30 columns: the original 22, then 8 full-resolution terrain columns at 22–29) |
+| [backend/pipeline/hires_terrain.py](backend/pipeline/hires_terrain.py) | The 8 full-resolution terrain columns (slope, northness, eastness, ruggedness, TPI at 150/400/1000/2500 m), vectorised. `evaluation/hires_terrain.py` stays the scalar reference they were measured with; a test pins the two together |
 | [backend/pipeline/solar.py](backend/pipeline/solar.py) | Sun position, per-cell cos(incidence). Candidate feature, evaluation-only so far |
 | [backend/models/thermal_model.py](backend/models/thermal_model.py) | `ThermalModel`: load/save, MC-dropout predict, online retrain + quality gate, physics fallback |
 | [backend/data/ogn_client.py](backend/data/ogn_client.py) | APRS TCP client, beacon parser, plausibility gate (`_admit`), SQLite history, retention purge |
@@ -103,10 +105,16 @@ Breaking any of these has taken the app down or silently corrupted results befor
    duplicate upstream connection and serves divergent data. This also rules out
    serverless entirely.
 
-2. **`FEATURE_COUNT` and the saved model must agree.** Change the width of the
-   feature matrix and you must retrain (`POST /train` or `POST /seed`), or the
-   app runs physics-only. `ThermalModel.load()` refuses a stale model rather than
-   crashing, and the buffer is set aside as `.vN`.
+2. **`FEATURE_COUNT` and the saved model must agree — or be a listed prefix.**
+   New columns are *appended*, and the old width goes into `LEGACY_WIDTHS`
+   (`feature_engineering.py`). Then a model of that width keeps serving on the
+   leading columns (`_model_view`), and a buffer of that width is widened with
+   NaN and filled in rather than set aside, so there is no physics-only dark
+   period. Any other width: `load()` refuses the model (physics fallback until a
+   retrain) and sets the buffer aside as `.vN`. Inserting a column in the
+   middle breaks the prefix and puts you back in that case. **A rollback past a
+   widening is not free:** the older code refuses the wider model and buffer,
+   so back both up before deploying one.
 
 3. **`GRID_RADIUS` (backend config) and `PREDICT_RADIUS` (frontend config) are
    separate copies of one number.** They must stay equal — training features and
@@ -136,10 +144,13 @@ Breaking any of these has taken the app down or silently corrupted results befor
    Bypass it and shared ids come back as one icon crossing three countries
    every few seconds — see "The feed carries ids that are not one aircraft".
 
-10. **Anything that trains passes `strict=True` to all three fetchers**
-    (`fetch_meteo_features`, `fetch_meteo_historical`, `fetch_elevation_grid`)
-    and skips the sample on `None`. The non-strict return is a stand-in made
-    for a display request; with a real label attached it is a fabrication.
+10. **Anything that trains passes `strict=True` to all four fetchers**
+    (`fetch_meteo_features`, `fetch_meteo_historical`, `fetch_elevation_grid`,
+    `fetch_hires_grid`) and skips the sample on `None`. The non-strict return is
+    a stand-in made for a display request; with a real label attached it is a
+    fabrication. `fetch_hires_grid`'s stand-in is all-NaN, and so is its answer
+    whenever the source is not Copernicus (nothing else reads at that
+    resolution): unknown, never a number.
 
 ## Model and training loop
 
@@ -160,9 +171,13 @@ Breaking any of these has taken the app down or silently corrupted results befor
   and meteo budget is not spent on rows that get discarded afterwards.
 - **Rejected samples:** below `_MIN_SOLAR_GHI` (50 W/m², no surface heating),
   below `_MIN_SAMPLE_AGL` (200 m AGL — on the field, on the roll or on approach)
-  and above the estimated thermal base + 300 m (that climb is wave, ridge or
-  engine). The AGL floor is applied at collection *and* again in `fit_and_gate`,
-  so a buffer written before it existed is cleaned without a `/seed` rebuild.
+  and above the estimated thermal top + 300 m (that climb is wave, ridge or
+  engine; the top is `meteo_client.thermal_top_agl` — see "The thermal top
+  replaced `cape_base`" below). The AGL floor is applied at collection *and*
+  again in `fit_and_gate`, so a buffer written before it existed is cleaned
+  without a `/seed` rebuild. The thermal-top filter is applied at collection
+  only, deliberately — measured as neutral, and applying it in `fit_and_gate`
+  would thin the frozen benchmark's groups in the middle of a run.
 - **Why the AGL floor exists:** without it 18% of the buffer sat at exactly 0 m
   AGL, all negative, and the model learned "aircraft on the ground are not
   thermalling". Measured: `alt_agl` alone scored 0.631 within-group against 0.664
@@ -191,6 +206,12 @@ Breaking any of these has taken the app down or silently corrupted results befor
   0.1° is not a compromise: `build_feature_matrix` already spreads one point
   sample across the whole 11 km grid. The synthetic fallback is never cached —
   pinning invented weather for an hour would feed it straight into the buffer.
+- **The counter counts billed calls, not requests** (since 19 Nov 2026).
+  Open-Meteo bills a request over 10 variables or two weeks as a fraction
+  more (`_call_weight`): the live request carries 13 variables, so it is 1.3
+  calls, and an archive hour 1.1. `live_usage()["total"]` — what every budget
+  checks — used to add 1 per request and read up to 30% low. Add a variable to
+  `HOURLY_VARS` or `DISPLAY_VARS` and every request costs another 0.1.
 - **The solar floor is checked before the feature matrix is built.** At night
   every candidate is dropped there, and building first spent ~7 MB and a terrain
   read to discard the result.
@@ -246,6 +267,22 @@ Breaking any of these has taken the app down or silently corrupted results befor
   same allowance; `meteo_client.live_usage()["total"]` counts both endpoints.
   Overlap with rows the live sampler already took from the same day is possible
   and expected to be small; the panel shows the run's `added` count.
+- **The seed buys weather by the fortnight, not by the hour** (since 20 Nov
+  2026). Open-Meteo bills a request up to 14 days long the same as one day, and
+  `fetch_meteo_historical` asks for a whole day to keep one hour. So before its
+  bucket loop the seed plans one request per 0.5° cell per ≤14-day span
+  (`plan_historical_ranges`), and `fetch_meteo_historical_range` caches each
+  wanted hour under the same key, as the same record (`_hist_record`), that
+  the single-hour fetch would write. Night buckets come free; each used to
+  cost a call to learn it was dark. Rebuilding 28 Sep–6 Nov from the archive
+  this way took 1,741 calls instead of ~17,000; real range answers matched
+  single-day ones on 41 of 41 hours (20 Nov), and 477 of 479 earlier (the two
+  misses were one hour Open-Meteo had revised). Whatever the prefetch does not
+  reach is fetched hour by hour as before. The budget now holds back only
+  *uncached* buckets (`meteo_deferred_buckets`): the loop used to stop at the
+  first bucket once the budget was reached, and after a prefetch that would
+  strand buckets already paid for. Tests cannot reach Open-Meteo or the real
+  cache: `conftest.py` stubs `_get_client` and moves the cache to `tmp_path`.
 - **What the score actually is, measured 27 Sep 2026** on the first buffer big
   enough to measure anything (11,774 rows, 1,714 positives, 2,571 scoring units,
   77 benchmark groups — the gate is open and fits are being accepted). Scored
@@ -320,10 +357,25 @@ Breaking any of these has taken the app down or silently corrupted results befor
   negatives (4.4 vs 5.1 km median); the served delta holds at ≥5 km
   (+0.026 [+0.005, +0.049], +0.041 [+0.016, +0.067]). It does fade above
   ~800 m AGL (297 units, interval spans chance) — fewer units, and thermals
-  drift off their trigger with height. **Not in production:** serving it
-  means reading terrain at full resolution in `fetch_elevation_grid` (or a
-  second fine read), widening the feature matrix, and a reseed. Confirm on a
-  fresh buffer first.
+  drift off their trigger with height.
+- **Shipped to the live model 19 Nov 2026** as columns 22–29
+  (`pipeline/hires_terrain.py`, `terrain_client.fetch_hires_grid`), with the
+  live gate as the "fresh buffer" check. The switch: the 22-column model keeps
+  serving on columns 0–21; the 22-column buffer is widened, and
+  `_backfill_hires` reads each row's columns at its own cell (the cell the
+  live grid computes them for), `HIRES_BACKFILL_BUDGET_S` (60 s) per retrain
+  cycle, sorted by area so rows share blocks; **fits are held until it is
+  done**, so the first 30-column model is judged on complete rows. The gate
+  then scores it against the 22-column model on the same benchmark rows, and
+  `/training/status` shows `model.full_resolution_terrain` (rows left, model
+  width) and `last_fit.width / serving_width / delta` for that decision.
+  Measured locally on real Copernicus: one grid 0.3–0.9 s warm, 0.9–2.3 s cold
+  (1–4 blocks), event loop never blocked over 80 ms (the arithmetic runs in a
+  thread on blocks `dem_client.load_window` fetched first), peak 33–50 MB.
+  Filling in a 48k-row buffer is ~2,600 distinct blocks, ~16 min of reading
+  at home-connection speed, so ~17 cycles. **The first version took 4.3 s a
+  grid:** `np.unique(axis=0)` over (lat, lon) pairs sorted every one of 400k
+  points per chunk; one integer key per tile fixed it.
 - **Also measured 17 Nov 2026, same export and seeds:** `prior` from the
   export's 43-day Parquet archive (`evaluation/archive_prior.py`, `--prior-db`)
   +0.008 / +0.016 / +0.016 served — consistent sign, one interval clear of
@@ -432,11 +484,69 @@ Breaking any of these has taken the app down or silently corrupted results befor
   agreement for commercial use. **Not in production;** re-measure once the
   archive holds a flying season. `build --bbox` writes the layer itself as
   Parquet (Alps: 174,114 blocks with ≥ 5 aircraft-days, 1.2 MB).
+- **The thermal top replaced `cape_base`, 19 Nov 2026** — the "thermal base"
+  on the map and the ceiling of the training filter. Now
+  `meteo_client.thermal_top_agl`: **min(boundary layer height, condensation
+  level)**, the LCL being 125 m per °C of dew-point spread (Magnus dew point
+  from 2 m temperature and humidity). Dry thermals stop at the layer top;
+  where the layer clears the LCL they stop at cloud base. The old
+  `(t2m − 8) / max(1, (t2m − t850) / 1.5) × 1000` read no humidity and no
+  layer: over the 3,567 cached daylight hours it was **0 m — filter off — on
+  22.7%** (every hour under 8 °C), sat > 300 m above the new estimate on 42%,
+  and reached 27,200 m wherever 2 m and 850 hPa were within 1.5 °C (high
+  ground, inversions). At İnönü that noon it said 2,273 m against an 890 m
+  cloud base. Measured three ways (`evaluation/thermal_top.py`):
+  - **It predicts how high gliders climb** (`replay`): in the 978 (0.5°,
+    hour) buckets with ≥ 3 thermalling aircraft, the p95 height of
+    climbing-circling beacons (median 855 m) against each estimate — new
+    Spearman **0.73**, median miss **229 m**, observed/estimate 0.90; old
+    0.55, 715 m, 0.57, and no estimate at all in 11% of buckets. Layer
+    height alone 0.71 / 290 m, LCL alone 0.66 / 375 m: the minimum beats both.
+  - **What it admits** (`replay`): 10 archive days (17 Sep – 5 Nov) joined
+    to the cached meteo, 2.35M labelled beacons ≥ 200 m AGL, terrain from the
+    cached Copernicus lattice (95.1% known). Positives kept 89.8% → **96.8%**
+    (per aircraft-hour 94.8% → 95.8%), negatives 87.6% → 89.5% (93.9% →
+    92.2%). The old filter was throwing away real climbs: Germany positives
+    74.9% → 96.3%: on cool October days just above 8 °C the old formula
+    gave a median 132 m, and dropped climbs at a median 718 m AGL under a
+    778 m new top.
+    The Alps are the one place it keeps fewer climbing aircraft-hours (97.0%
+    → 95.4%) — wave and high mountain thermals a coarse NWP layer
+    under-reads. These rows are absent from any buffer, so only the replay
+    sees them.
+  - **The score does not move** (`buffer`, 6 Nov buffer, 47,419 rows): on
+    top of the old filter the new one drops 250 positives (4.0%) and 4,151
+    negatives (10.1%). Same folds, a model trained only on what it keeps
+    against one trained on everything, served, by hour: **+0.003 / −0.001 /
+    +0.000** (seeds 0–2) on the kept rows, every interval within ±0.012 of
+    zero over 1,909 units; on all rows ±0.001. `evaluate.py --variant base
+    --by-hour` on the filtered buffer: 0.569 / 0.570 / 0.559 against 0.570 /
+    0.569 / 0.567 unfiltered — the seed-2 dip is the folds being re-cut on
+    fewer rows; the paired run, on fixed folds, shows +0.000.
+  So the switch is justified by the estimate, not by the model: the map shows
+  a number that tracks reality, and the filter stops discarding real climbs
+  on cool days and stops switching itself off — at no cost to the score.
+  **Semantics changed with it:** only `None` is "no estimate"; 0 m (saturated
+  air) is a real one. The old function treated 0 as missing because the old
+  formula produced it below 8 °C. Historical-cache entries keep a
+  `cape_base` key, now holding the new top (`_with_legacy_base`), so an older
+  image's `/seed` still reads them after a rollback; nothing in this code
+  reads the key, and old entries are recomputed from their own fields.
 - **Quality gate:** the challenger and the serving model are scored on identical
   rows from a *frozen, group-disjoint* benchmark (`evaluation/holdout.py`), and
-  the challenger is rejected unless a paired bootstrap CI (`paired_delta_ci`)
-  lies entirely above zero. After `_MAX_CONSECUTIVE_SKIPS = 12` rejections it
-  accepts and re-baselines, so a lucky score cannot freeze the model forever.
+  the challenger is **rejected only when the paired bootstrap CI
+  (`paired_delta_ci`) lies entirely below zero** — reliably worse. One the
+  benchmark cannot tell apart from the serving model is promoted. So the gate
+  stops regressions; it does not pick improvements, and because every cycle
+  refits from scratch, a fresh model can be promoted every cycle. **"Accepted"
+  is not evidence that a change helped:** the 22 → 30 column switch was
+  accepted on 19 Nov 2026 at −0.009 [−0.022, +0.009] over 199 groups. Judge a
+  change by the paired delta in `last_fit`, the offline harness and the
+  forecast ledger. Until 19 Nov 2026 this entry said a challenger needed the
+  whole interval *above* zero; the code (`fit_and_gate`, `delta["hi"] < 0`)
+  has never done that, from the gate's first commit on 16 Aug 2026. After
+  `_MAX_CONSECUTIVE_SKIPS = 12` consecutive rejections it accepts and
+  re-baselines, so a lucky score cannot freeze the model forever.
   **Do not report the split or a missing gate as bugs — both were fixed.**
 - **XGBoost thread trap:** `fit_and_gate` promotes the challenger object
   directly, and a booster keeps the `nthread` it was *fitted* under.
@@ -703,6 +813,35 @@ added at full strength at every horizon), and the response carries
 and model-only maps side by side, which is how the fusion constants should be
 tuned.
 
+**Cumulus outlook** (`weather.cumulus` in `/predict`, `meteo_client.cumulus_outlook`):
+`cumulus` / `blue` / `none` and a cloud base from values the request already
+carries — dew point by Magnus from 2 m temperature and humidity, base ≈ 125 m
+per °C of spread (Lawrence 2005), cumulus where `boundary_layer_height` clears
+it. Display only, no variable and no call added, `None` under the fallback.
+It shares `lcl_agl` with the thermal top (see "The thermal top replaced
+`cape_base`"), so the two agree by construction: under `cumulus` the "T-base"
+chip and the cloud base are the same level; under `blue` the thermal base is
+the layer top, below the cloud base this chip names. Before that switch they
+disagreed — 900 m cloud base against a `cape_base` of 2,273 m AGL at İnönü
+noon on 19 Nov — which is how the old formula was caught.
+
+**Satellite clouds** (`components/SatelliteLayer.jsx`, toggle or `?clouds=1`):
+Meteosat MTG GeoColour from EUMETSAT's public WMS, fetched by the browser — no
+backend memory, no Open-Meteo calls, no key, CORS open. Observed, never
+forecast; the sidebar says so when the slider is ahead. Three traps:
+- **Always send `time=`.** Without it the server answers "latest" with
+  `max-age=604800`, and a test request came back a sunlit scene during the
+  Turkish night — a cached render, not the current frame. The newest time is
+  the `default` of the per-layer capabilities document (~6 KB), ~30 min behind.
+- **Ask for native pixels, not screen pixels** (`SATELLITE_NATIVE_M`). The server
+  upsamples nearest-neighbour and ignores `interpolations`, so zoomed in to a
+  scan a full-size request drew hard 2 km squares.
+- **z-index 400, not below.** Leaflet's map pane is `z-index: 400` and opaque,
+  so a canvas portalled into the container below that is invisible.
+  `OgnHeatmapCanvas` (the "live activity layer", 398) is exactly that: a solid
+  red test fill on it did not show on 19 Nov 2026. It has been hidden under the
+  base imagery, and is left so until someone decides it should be seen.
+
 ## Resource budget
 
 The deployment target is 2 vCPU / 896 MB, and most odd-looking choices come from it.
@@ -712,8 +851,9 @@ The deployment target is 2 vCPU / 896 MB, and most odd-looking choices come from
   `min(32, cpu_count+4)` threads, each spawning its own OpenMP pool.
 - `XGB_FIT_THREADS=1` (the background job yields cores), `XGB_PREDICT_THREADS`
   takes all of them.
-- `mem_limit: 700m` on the app service — a blast radius, not a target (steady
-  state is ~135–190 MB).
+- `mem_limit: 1536m` on the app service — a blast radius, not a target. It
+  was 700m from the 896 MB box until 19 Nov 2026; see the note at the end of
+  this section.
 - **Retention is now eviction, not deletion.** `_archive_job` writes every
   completed day to `ARCHIVE_DIR` as Parquet before `_purge_job` deletes it, and
   `purge_old_beacons` refuses to delete past the unbroken archived prefix — an
@@ -750,20 +890,33 @@ The deployment target is 2 vCPU / 896 MB, and most odd-looking choices come from
   records and the file is rewritten only when it passes twice the bound.
   Measured on a copy of the node's cache: point cache 196 → 56 MB, a flush
   1.0 s → 0.13 ms, start-up load 0.95 → 0.18 s. Sizes are under
-  `terrain.cached` in `/training/status`. The old `points.json` is imported
+  `terrain.cached` in `/training/status`. The full-resolution grids
+  (`_hires_cache`, `TERRAIN_HIRES_CACHE` 16 × ~1.3 MB) are bounded and
+  reported there too, and memory-only on purpose: one per centre on disk would
+  be ~2 GB a day. The old `points.json` is imported
   once and then left alone, because the previous image still reads it.
 - **The 896 MB figures in this file no longer describe the node.** `free -m`
-  there reported 3,905 MB total on 15 Nov 2026, with `mem_limit` at 700m (not
-  the 600m the nightly-seed note above records) and `BEACON_RETENTION_DAYS`
-  at 2 in `docker-compose.yml`. Nobody has re-derived the limits for the
-  larger box; raising `mem_limit` would have hidden the cache growth, not
-  fixed it.
+  there reports 3,905 MB total (15 and 19 Nov 2026), with
+  `BEACON_RETENTION_DAYS` at 2 in `docker-compose.yml`. `mem_limit` stayed at
+  700m (not the 600m the nightly-seed note above records) while the terrain
+  caches leaked, because raising it then would have hidden the growth, not
+  fixed it. **Raised to 1536m on 19 Nov 2026**, once the kernel log showed no
+  OOM kill since 12:39 UTC on 16 Nov — every earlier one was this cgroup's
+  limit (`CONSTRAINT_MEMCG`), never the host. Measured before the change, with
+  the 30-column switch running: app 449 MB anon at rest (309 MB just after a
+  restart), 593 MB cgroup peak during the terrain fill-in, Caddy 23 MB, the
+  host's own processes ~750 MB, page cache 2.6 GB. At the new cap ≥ 1.6 GB of
+  page cache is left for the beacon DB. Do not lift the cap entirely: the
+  18 Sep outage was the host starving, not the container. The other limits
+  (`_MAX_BUFFER`, retention, `PREDICT_CONCURRENCY`) have still not been
+  re-derived for the larger box.
 
 **Upstream ceilings:** Copernicus DEM has no key and no quota (the terrain
 default); OpenTopoData 1000 calls/day and 1 req/s, now only the fallback — as
 the primary source a training node spent the whole day's quota in its first 40
-minutes; Open-Meteo 10k/day; ESA WorldCover needs no key and has no published
-limit.
+minutes; Open-Meteo 10k/day, billed in calls (see the counter note above); ESA
+WorldCover needs no key and has no published limit; EUMETSAT's WMS lists no
+fees and no access constraints.
 
 **Copernicus vs SRTM** (36 grids, after the production upsample): elevation
 4.4 m mean difference, slope 0.26° (r = 0.92), aspect 3.2°. The features barely
@@ -793,8 +946,8 @@ separate x and y pixel sizes.
   compare toggle is labelled "Ham veri ↔ ThermalSense AI".
 - **Every altitude on screen names its reference** (`metresMsl` /
   `metresAgl`). The prediction altitude is MSL (with its AGL beneath), the
-  thermal base is AGL (`cape_base` is a height above the surface) with its MSL
-  equivalent over the grid's mean terrain. Two bare "m" figures side by side
+  thermal base is AGL (`thermal_top_agl` is a height above the surface, in
+  50 m steps) with its MSL equivalent over the grid's mean terrain. Two bare "m" figures side by side
   read as comparable and were not — the mentor review asked exactly this.
   The GeoJSON export's `thermal_base_m` is still AGL and still unlabelled.
 - Map labels come from Esri's `Reference/World_Boundaries_and_Places` layer,
@@ -819,6 +972,6 @@ separate x and y pixel sizes.
   protection existed when it did not. Nothing had leaked — verified across
   the whole history — but the VM's SSH key and the `ADMIN_TOKEN` env file
   live in the working tree, so it had been luck.
-- The 22-column feature list goes stale often. Read `FEATURE_COUNT` and the
+- The 30-column feature list goes stale often. Read `FEATURE_COUNT` and the
   `np.column_stack` block in `feature_engineering.py` rather than trusting any
   written list, including the one in `docs/ARCHITECTURE.md`.

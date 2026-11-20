@@ -78,6 +78,29 @@ def _beacon_store_in_tmp(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _meteo_offline(tmp_path, monkeypatch):
+    """
+    No test talks to Open-Meteo, and none reads or writes the real archive cache.
+
+    The seed fetches each cell's weather as a date range before its bucket loop,
+    so a test that stubs fetch_meteo_historical alone would otherwise send that
+    request for real — and cache what came back in backend/cache, which is
+    permanent and which the next real seed would trust.  A test that wants the
+    client stubs _get_client itself; its stub wins over this one.
+    """
+    from data import meteo_client as mc
+
+    def _offline():
+        raise RuntimeError("tests do not call Open-Meteo — stub meteo_client._get_client")
+
+    monkeypatch.setattr(mc, "_get_client", _offline)
+    monkeypatch.setattr(mc, "_hist_path", lambda: tmp_path / "meteo_historical.jsonl")
+    monkeypatch.setattr(mc, "_hist_cache", {})
+    monkeypatch.setattr(mc, "_hist_pending", [])
+    monkeypatch.setattr(mc, "_hist_loaded", False)
+
+
+@pytest.fixture(autouse=True)
 def _ledger_in_tmp(tmp_path, monkeypatch):
     """And the forecast ledger, so no test writes into a real one."""
     import config

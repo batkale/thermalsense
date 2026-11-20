@@ -448,7 +448,11 @@ def main() -> int:
 
     with np.load(args.buffer, allow_pickle=False) as d:
         X, y = d["X"], d["y"].astype(int)
-    if X.shape[1] != FEATURE_COUNT:
+    # A 22-column buffer predates the full-resolution terrain columns; its
+    # columns are the first 22 of today's, so every variant here still reads it
+    # (the `hires` variant appends those columns from its own cache).
+    from pipeline.feature_engineering import LEGACY_WIDTHS
+    if X.shape[1] != FEATURE_COUNT and X.shape[1] not in LEGACY_WIDTHS:
         print(f"buffer has {X.shape[1]} features, expected {FEATURE_COUNT}")
         return 1
 

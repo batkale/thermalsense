@@ -412,8 +412,9 @@ def test_only_three_columns_belong_to_the_observation():
                                     lat_bounds=bounds[0], lon_bounds=bounds[1],
                                     alt_amsl=2400.0)
 
+    # Unknown full-resolution terrain is NaN in both; two unknowns are the same.
     differing = {c for c in range(fe.FEATURE_COUNT)
-                 if not np.allclose(base[:, c], moved[:, c])}
+                 if not np.allclose(base[:, c], moved[:, c], equal_nan=True)}
     assert differing == {fe.COL_HOUR_SIN, fe.COL_HOUR_COS, fe.COL_ALT_AGL}, (
         f"columns {sorted(differing)} move with the observation; the seed only "
         f"corrects {sorted({fe.COL_HOUR_SIN, fe.COL_HOUR_COS, fe.COL_ALT_AGL})}"
@@ -450,7 +451,7 @@ def test_seed_row_matches_a_full_build():
     full = fe.build_feature_matrix(meteo, elev, dt=dt, lat_bounds=lat_bounds,
                                    lon_bounds=lon_bounds, alt_amsl=alt)
 
-    assert np.array_equal(row, full[idx]), (
+    assert np.array_equal(row, full[idx], equal_nan=True), (
         f"reused row differs at columns "
         f"{[c for c in range(fe.FEATURE_COUNT) if row[c] != full[idx][c]]}"
     )

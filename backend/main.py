@@ -446,6 +446,7 @@ async def training_status():
             "benchmark_score": model._saved_bench_score(),
             "last_fit": model.last_fit,
             "retrain_interval_s": UPDATE_INTERVAL,
+            "full_resolution_terrain": model.hires_status(),
         },
         "buffer": await section(model.training_summary),
         "last_seed": model.last_seed,
@@ -569,10 +570,18 @@ async def compute_prediction(lat: float, lon: float, alt: int | float | None,
     """
     issued_at = datetime.now(timezone.utc)
     grid_lat, grid_lon = snap_grid_centre(lat, lon)
-    meteo, terrain = await asyncio.gather(
+    meteo, terrain, hires = await asyncio.gather(
         fetch_meteo_features(lat, lon, forecast_h),
         fetch_elevation_grid(lat, lon),
+        terrain_client.fetch_hires_grid(lat, lon),
     )
+    # Fetched alongside the elevation grid, so it assumes that grid's usual
+    # shape.  They always agree in production; if they ever did not, unknown
+    # terrain is a degraded map where a shape error would be an empty one.
+    if hires.shape[0] != terrain.size:
+        log.warning(f"[predict] full-resolution grid {hires.shape[0]} cells vs elevation "
+                    f"{terrain.shape} — columns left unknown")
+        hires = None
     # The fallback is invented weather (a summer afternoon in southern England)
     # that used to reach the map without a word.  Say so on the wire.
     meteo_fallback = meteo_client.is_synthetic(meteo)
@@ -595,6 +604,7 @@ async def compute_prediction(lat: float, lon: float, alt: int | float | None,
         lon_bounds=(grid_lon - radius, grid_lon + radius),
         alt_amsl=alt_amsl,
         land_use_props=land_props,
+        hires=hires,
     )
     grid_rows, grid_cols = terrain.shape
     # to_thread, not inline: predict() runs _MC_SAMPLES synchronous passes
@@ -721,7 +731,10 @@ async def predict(lat: float, lon: float, alt: int | None = None,
             "elevation_cols": int(raw_elev.shape[1]),
             "feature_count":  int(features.shape[1]),
         },
-        "thermal_base": meteo["cape_base"],
+        # How high thermals reach, metres AGL: min(boundary layer, cloud base)
+        # -- see meteo_client.thermal_top_agl.  The key keeps its old name so an
+        # older bundle still reads it; until 19 Nov 2026 this was `cape_base`.
+        "thermal_base": _thermal_top_display(meteo),
         "cape":         meteo["cape"],
         "weather": {
             "temp_2m":     round(meteo["temp_2m"], 1),
@@ -732,12 +745,27 @@ async def predict(lat: float, lon: float, alt: int | None = None,
             "cin":         round(meteo["cin"]),
             "solar_ghi":   round(meteo["solar_ghi"]),
             "lapse_rate":  round(meteo["lapse_rate"], 1),
-            "thermal_base": meteo["cape_base"],
+            "thermal_base": _thermal_top_display(meteo),
             "pbl_height":  round(meteo["pbl_height"]),
             "soil_temp":   round(meteo["soil_temp"], 1),
+            # Cumulus or blue thermals, and the cloud base — derived from the
+            # values above, display only (see meteo_client.cumulus_outlook).
+            # None under the synthetic fallback; an older bundle ignores it.
+            "cumulus":     meteo_client.cumulus_outlook(meteo, _MIN_SOLAR_GHI),
             **_sky_and_clock(meteo),
         },
     }
+
+
+def _thermal_top_display(meteo: dict) -> int | None:
+    """The thermal top in 50 m steps, or None when there is no estimate.
+
+    125 m per degree of dew-point spread is good to a few hundred metres, and
+    "1,637 m" would claim more than that.  Under cumulus this is the same
+    number, rounded the same way, as the cloud base.
+    """
+    top = meteo_client.thermal_top_agl(meteo)
+    return None if top is None else int(round(top / 50) * 50)
 
 
 def _sky_and_clock(meteo: dict) -> dict:

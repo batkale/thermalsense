@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import re
 from collections import OrderedDict
 import httpx
@@ -7,7 +8,7 @@ import numpy as np
 from pathlib import Path
 from scipy.ndimage import zoom as ndimage_zoom
 from config import (SRTM_BASE, GRID_RES, TERRAIN_RES, GRID_RADIUS, DATA_DIR, TERRAIN_SOURCE,
-                    TERRAIN_GRID_CACHE, TERRAIN_POINT_CACHE)
+                    TERRAIN_GRID_CACHE, TERRAIN_POINT_CACHE, TERRAIN_HIRES_CACHE)
 from data import dem_client
 
 log = logging.getLogger(__name__)
@@ -36,6 +37,10 @@ DEFAULT_POINT_DP = 2
 # Bounded by TERRAIN_GRID_CACHE; every grid is also on disk, so falling out of
 # here costs a 1 KB read and an upsample, not a fetch.
 _grid_cache: "OrderedDict[tuple[float, float, float], np.ndarray]" = OrderedDict()
+
+# Full-resolution terrain columns per grid, same key.  Bounded by
+# TERRAIN_HIRES_CACHE and memory-only — see config.py.
+_hires_cache: "OrderedDict[tuple[float, float, float], np.ndarray]" = OrderedDict()
 
 
 def _recall(cache: dict, key):
@@ -355,7 +360,8 @@ def source_usage() -> dict:
             "copernicus": dem_client.usage() if TERRAIN_SOURCE == "copernicus" else None,
             "cached": {"grids": len(_grid_cache), "grids_max": TERRAIN_GRID_CACHE,
                        "points": len(_elev_cache), "points_max": TERRAIN_POINT_CACHE,
-                       "points_unsaved": len(_point_unsaved)}}
+                       "points_unsaved": len(_point_unsaved),
+                       "hires_grids": len(_hires_cache), "hires_grids_max": TERRAIN_HIRES_CACHE}}
 
 
 async def _get_with_retry(client: httpx.AsyncClient, url: str, max_retries: int = 3) -> httpx.Response:
@@ -603,3 +609,81 @@ async def fetch_elevation_grid(lat: float, lon: float,
             return None
         log.warning(f"[terrain] elevation fetch failed ({exc}) — using flat-zero fallback")
         return np.zeros(fine_shape)
+
+
+_HIRES_CHUNK = 2048   # cells per read: ~200k sample points, ~6 MB of coordinates
+
+
+async def hires_at_points(lats, lons) -> np.ndarray:
+    """
+    The eight full-resolution terrain columns at arbitrary cells, (n, 8) float32.
+
+    Used for whole grids (fetch_hires_grid) and for buffer rows collected before
+    the columns existed.  Read from Copernicus in chunks so the coordinate arrays
+    stay small; raises if a read fails, NaN only where no tile is published.
+    Without Copernicus there is nothing at this resolution to read, so every
+    value is NaN — "unknown", which the model handles, never a stand-in number.
+    """
+    from pipeline import hires_terrain as ht
+    lats = np.asarray(lats, dtype=float)
+    lons = np.asarray(lons, dtype=float)
+    out = np.full((len(lats), len(ht.COLUMNS)), np.nan, dtype=np.float32)
+    if TERRAIN_SOURCE != "copernicus" or not len(lats):
+        return out
+    # By 0.25 deg area, so each window is a few blocks however spread the
+    # points are (buffer rows come from everywhere; a grid is one area).
+    area = np.floor(lats * 4).astype(np.int64) * 10_000 + np.floor(lons * 4).astype(np.int64)
+    reach = (max(ht.RINGS_M) + 4 * ht.STEP_M) / 111_320.0          # widest ring, plus a margin
+    for key in np.unique(area):
+        sel = np.flatnonzero(area == key)
+        la, lo = lats[sel], lons[sel]
+        reach_lon = reach / max(math.cos(math.radians(float(np.abs(la).max()) + reach)), 1e-3)
+        window = await dem_client.load_window(la.min() - reach, la.max() + reach,
+                                              lo.min() - reach_lon, lo.max() + reach_lon)
+        out[sel] = await asyncio.to_thread(_hires_from_window, window, la, lo)
+        dem_client._tick(points=len(sel) * ht.N_POINTS)
+    return out
+
+
+def _hires_from_window(window: dict, lats: np.ndarray, lons: np.ndarray) -> np.ndarray:
+    """The CPU half of hires_at_points, in chunks so coordinates stay ~6 MB.  Thread-safe."""
+    from pipeline import hires_terrain as ht
+    out = np.empty((len(lats), len(ht.COLUMNS)), dtype=np.float32)
+    for s in range(0, len(lats), _HIRES_CHUNK):
+        plat, plon = ht.sample_points(lats[s:s + _HIRES_CHUNK], lons[s:s + _HIRES_CHUNK])
+        out[s:s + len(plat)] = ht.features(dem_client.sample_window(window, plat, plon))
+    return out
+
+
+async def fetch_hires_grid(lat: float, lon: float, radius: float = GRID_RADIUS,
+                           strict: bool = False,
+                           shape: tuple[int, int] | None = None) -> np.ndarray | None:
+    """
+    Full-resolution terrain columns for every cell of the grid at (lat, lon).
+
+    (rows * cols, 8) float32 in build_feature_matrix's cell order, for the same
+    snapped centre fetch_elevation_grid uses — the two must describe one patch
+    of ground.  Pass the elevation grid's own shape when it is in hand; the
+    default is the shape fetch_elevation_grid returns.  strict follows
+    fetch_elevation_grid: a failed read returns None to anything that trains (a
+    grid with holes punched by a network error is not the ground), and an
+    all-NaN grid to a display request, which the model reads as unknown terrain
+    rather than as a fabricated one.
+    """
+    from pipeline import hires_terrain as ht
+    shape = tuple(shape) if shape is not None else grid_shape(radius)
+    clat, clon = snap_grid_centre(lat, lon)
+    key = (clat, clon, radius, shape)
+    cached = _recall(_hires_cache, key)
+    if cached is not None:
+        return cached
+    try:
+        out = await hires_at_points(*ht.grid_cells(clat, clon, radius, shape))
+    except Exception as exc:
+        if strict:
+            log.warning(f"[terrain] full-resolution read failed ({exc}) — strict, no fallback")
+            return None
+        log.warning(f"[terrain] full-resolution read failed ({exc}) — columns left unknown")
+        return np.full((shape[0] * shape[1], len(ht.COLUMNS)), np.nan, dtype=np.float32)
+    _remember(_hires_cache, key, out, TERRAIN_HIRES_CACHE)
+    return out
