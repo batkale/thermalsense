@@ -151,6 +151,14 @@ async def test_a_range_caches_what_single_hours_would(archive, monkeypatch, tmp_
         "2026-08-01", "2026-08-04")
 
 
+async def test_a_fortnight_is_billed_as_one_archive_call(archive):
+    """The quota is in billed calls, and the budgets read that figure."""
+    await mc.fetch_meteo_historical_range(47.0, 13.0, [_h(1, 12), _h(14, 12)])
+    u = mc.live_usage()
+    assert u["historical_requests"] == 1
+    assert u["historical_calls"] == pytest.approx(mc._HIST_CALL_WEIGHT)
+
+
 async def test_a_range_keeps_only_the_hours_asked_for(archive):
     """The response carries 72 hours here; the cache is held in memory whole."""
     assert await mc.fetch_meteo_historical_range(47.0, 13.0, [_h(1, 12), _h(3, 12)]) == 2

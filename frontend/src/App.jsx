@@ -7,6 +7,7 @@ import SearchBar         from './components/SearchBar.jsx';
 import PinnedGliderCard  from './components/PinnedGliderCard.jsx';
 import TrainingPanel     from './components/TrainingPanel.jsx';
 import { AlertIcon }     from './components/Icons.jsx';
+import { useSatelliteFrame } from './components/SatelliteLayer.jsx';
 import { useBackend }    from './hooks/useBackend.js';
 import { triggerRetrain } from './services/api.js';
 import { useLang }        from './i18n/LanguageContext.jsx';
@@ -43,6 +44,23 @@ export default function App() {
   const [compare, setCompare] = useState(
     () => new URLSearchParams(window.location.search).get('compare') === '1'
   );
+  // Meteosat clouds under the heatmap. Off by default — the imagery covers the
+  // base map — and ?clouds=1 opens with it on, like ?compare=1.
+  const [showClouds, setShowClouds] = useState(
+    () => new URLSearchParams(window.location.search).get('clouds') === '1'
+  );
+  const satFrame = useSatelliteFrame(showClouds);
+  const [satStatus, setSatStatus] = useState(null);
+  // A pan asks for a new view, but the previous one stays on screen until it
+  // arrives, so "loading" after an image is shown would only make the caption
+  // flicker. An error is reported either way: part of the view may be stale.
+  const handleSatStatus = useCallback(
+    s => setSatStatus(prev => (s === 'loading' && prev === 'ok' ? prev : s)), []
+  );
+  const toggleClouds = useCallback(on => {
+    setShowClouds(on);
+    setSatStatus(null);
+  }, []);
   const [flyTarget, setFlyTarget] = useState(null);
   const [pinnedId, setPinnedId] = useState(null);
   // Opens straight into the panel with ?panel=training, so a training node can
@@ -178,6 +196,8 @@ export default function App() {
             compare={compare}
             rawInputs={rawInputs}
             noInsolation={noInsolation}
+            satelliteTime={showClouds ? satFrame.time : null}
+            onSatelliteStatus={handleSatStatus}
           />
           {/* With the comparison on, its two caption cards hang from the top of
               the divider — which starts at the centre, exactly where this note
@@ -210,6 +230,10 @@ export default function App() {
             onOgnHeatmapToggle={setShowOgnHeatmap}
             compare={compare}
             onCompareToggle={setCompare}
+            showClouds={showClouds}
+            onCloudsToggle={toggleClouds}
+            satellite={{ time: satFrame.time, failed: satFrame.failed, status: satStatus }}
+            forecastH={forecastH}
             onRetrain={CAN_RETRAIN ? handleRetrain : null}
             onOpenTraining={() => setShowTraining(true)}
           />
