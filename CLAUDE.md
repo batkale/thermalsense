@@ -545,6 +545,21 @@ Breaking any of these has taken the app down or silently corrupted results befor
   `cape_base` key, now holding the new top (`_with_legacy_base`), so an older
   image's `/seed` still reads them after a rollback; nothing in this code
   reads the key, and old entries are recomputed from their own fields.
+- **More days do not yet measurably help on an unseen day, measured 20 Nov
+  2026** (`evaluation/learning_curve.py`, live buffer of 20 Nov: 71,034 rows
+  after `_fit_rows`, 57 scorable days, 4,487 (day, cell, hour) units, seeds
+  0–2). It replays the buffer: for each day D the production fit on every day
+  before D against the same fit on days before D − 7, both blind to D, paired
+  on D's units. Pooled: **+0.001 [−0.008, +0.011] / +0.001 [−0.005, +0.008] /
+  +0.004 [−0.004, +0.012] — inconclusive.** A 14-day gap: +0.010 / +0.005 /
+  +0.012, one interval clear of zero. Only September, with 2–14 days of
+  history, gains from a week: +0.016 / +0.006 / +0.021, two of three clear;
+  October and November ±0.004. The model does beat terrain on days it never
+  saw: +0.022 to +0.025, every interval clear. Its out-of-day score is
+  0.535–0.538, the ledger's 0.52–0.54; grouped CV on the same units 0.542–0.544
+  (forward minus CV −0.004 to −0.008, one clear). The newer model has also seen
+  the seven days nearest D, so a gain could not separate quantity from recency.
+  Re-run as the buffer grows; `models/score_history.py` answers it forward.
 - **Quality gate:** the challenger and the serving model are scored on identical
   rows from a *frozen, group-disjoint* benchmark (`evaluation/holdout.py`), and
   the challenger is **rejected only when the paired bootstrap CI
