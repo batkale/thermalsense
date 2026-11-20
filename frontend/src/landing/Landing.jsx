@@ -46,6 +46,90 @@ const REFS = [
     href: 'https://www.giiresearch.com/report/moi1850151-small-uav-market-share-analysis-industry-trends.html' },
 ];
 
+// Chronology (section 08): how thermal prediction got where it is, one row per
+// published step. Each row's text is `tl<id>T` / `tl<id>` in strings.js; the
+// sources are bibliographic and identical in both languages. A source with a
+// `cite` is new to the bibliography and is appended to it; one without must
+// already be in REFS (a dev build warns otherwise). Every link was opened on
+// 20 Nov 2026. Results quoted in the text are the publications' own. Only the
+// `us` row is ThermalSense, and it points at sections 05 and 07 rather than
+// carrying figures of its own.
+const TRACK_KEY = {
+  physics: 'tlTrackPhysics', onboard: 'tlTrackOnboard', data: 'tlTrackData',
+  weather: 'tlTrackWeather', us: 'tlTrackUs',
+};
+const TIMELINE = [
+  { id: 'Lenschow', year: 1980, track: 'physics', src: [
+    { short: 'Lenschow & Stephens 1980 · Boundary-Layer Meteorology', href: 'https://doi.org/10.1007/BF00122351' }] },
+  { id: 'Wharington', year: 1998, track: 'onboard', src: [
+    { short: 'Wharington & Herszberg 1998 · ICAS', href: 'https://www.icas.org/icas_archive/ICAS1998/ABSTRACTS/371.HTM',
+      cite: 'Wharington, J., & Herszberg, I. (1998). Control of High Endurance Unmanned Air Vehicle. 21st Congress of the International Council of the Aeronautical Sciences (ICAS), Melbourne.' }] },
+  { id: 'Nasa', year: 2005, track: 'onboard', src: [
+    { short: 'NASA Dryden 2005', href: SOURCES.nasaFlight }] },
+  { id: 'Rl2016', year: 2016, track: 'onboard', src: [
+    { short: 'Reddy et al. 2016 · PNAS', href: 'https://pmc.ncbi.nlm.nih.gov/articles/PMC4995969/',
+      cite: 'Reddy, G., Celani, A., Sejnowski, T. J., & Vergassola, M. (2016). Learning to soar in turbulent environments. PNAS, 113(33), E4877–E4884.' }] },
+  { id: 'Rl2018', year: 2018, track: 'onboard', src: [
+    { short: 'Reddy et al. 2018 · Nature', href: 'https://doi.org/10.1038/s41586-018-0533-0',
+      cite: 'Reddy, G., Wong-Ng, J., Celani, A., Sejnowski, T. J., & Vergassola, M. (2018). Glider soaring via reinforcement learning in the field. Nature, 562, 236–239.' }] },
+  { id: 'Autopilot', year: 2018, track: 'onboard', src: [
+    { short: 'Tabor et al. 2018 · ArduSoar', href: 'https://arxiv.org/abs/1802.08215' },
+    { short: 'Guilliard et al. 2018 · POMDP', href: 'https://arxiv.org/abs/1805.09875',
+      cite: 'Guilliard, I., Rogahn, R., Piavis, J., & Kolobov, A. (2018). Autonomous Thermalling as a Partially Observable Markov Decision Process. arXiv:1805.09875.' },
+    { short: 'Depenbusch et al. 2018 · AutoSOAR', href: SOURCES.autosoar }] },
+  { id: 'Storks', year: 2019, track: 'data', src: [
+    { short: 'Scacco et al. 2019 · R. Soc. Open Sci.', href: 'https://doi.org/10.1098/rsos.181440',
+      cite: 'Scacco, M., Flack, A., Duriez, O., Wikelski, M., & Safi, K. (2019). Static landscape features predict uplift locations for soaring birds across Europe. Royal Society Open Science, 6(1), 181440.' }] },
+  { id: 'Soarnet', year: 2021, track: 'data', src: [
+    { short: 'Tallman 2021 · Cal Poly MS thesis', href: 'https://digitalcommons.calpoly.edu/theses/2339/',
+      cite: 'Tallman, J. T. (2021). SOARNET, Deep Learning Thermal Detection for Free Flight. MS thesis, California Polytechnic State University, San Luis Obispo.' }] },
+  { id: 'Xc', year: 2023, track: 'onboard', src: [
+    { short: 'Notter et al. 2023 · J. Guidance, Control, and Dynamics', href: 'https://doi.org/10.2514/1.G006746',
+      cite: 'Notter, S., Schimpf, F., Müller, G., & Fichter, W. (2023). Hierarchical Reinforcement Learning Approach for Autonomous Cross-Country Soaring. Journal of Guidance, Control, and Dynamics, 46(1), 114–126.' }] },
+  { id: 'Graphcast', year: 2023, track: 'weather', src: [
+    { short: 'Lam et al. 2023 · Science', href: 'https://doi.org/10.1126/science.adi2336',
+      cite: 'Lam, R., et al. (2023). Learning skillful medium-range global weather forecasting. Science, 382(6677), 1416–1421.' }] },
+  { id: 'Dayclass', year: 2024, track: 'data', src: [
+    { short: 'Schnieder 2024 · Smart Cities', href: 'https://doi.org/10.3390/smartcities7010007',
+      cite: 'Schnieder, M. (2024). Using Explainable Artificial Intelligence (XAI) to Predict the Influence of Weather on the Thermal Soaring Capabilities of Sailplanes for Smart City Applications. Smart Cities, 7(1), 163–178.' }] },
+  { id: 'Hotspots', year: 2024, track: 'data', src: [
+    { short: 'WeGlide 2024', href: 'https://magazine.weglide.org/thermal-hotspots-gliding-copilot-weglide/',
+      cite: 'Rieger, J. (2024). NEW | Thermal Hotspots in WeGlide Copilot. WeGlide Magazine, 26 May 2024.' },
+    { short: 'thermal.kk7.ch', href: 'https://thermal.kk7.ch/',
+      cite: 'von Känel, M. thermal.kk7.ch — thermal and hotspot maps from IGC flight logs. Website, accessed 20 November 2026.' }] },
+  { id: 'Vulture', year: 2024, track: 'onboard', src: [
+    { short: 'Flato et al. 2024 · Nature Communications', href: 'https://doi.org/10.1038/s41467-024-48670-x',
+      cite: 'Flato, Y., Harel, R., Tamar, A., Nathan, R., & Beatus, T. (2024). Revealing principles of autonomous thermal soaring in windy conditions using vulture-inspired deep reinforcement-learning. Nature Communications, 15, 4942.' }] },
+  { id: 'Stormcast', year: 2024, track: 'weather', src: [
+    { short: 'Pathak et al. 2024 · StormCast', href: 'https://arxiv.org/abs/2408.10958',
+      cite: 'Pathak, J., et al. (2024). Kilometer-Scale Convection Allowing Model Emulation using Generative Diffusion Modeling. arXiv:2408.10958.' }] },
+  { id: 'Aifs', year: 2025, track: 'weather', src: [
+    { short: 'ECMWF, 25 Feb 2025', href: 'https://www.ecmwf.int/en/about/media-centre/news/2025/ecmwfs-ai-forecasts-become-operational',
+      cite: 'ECMWF (2025). ECMWF’s AI forecasts become operational. News item, 25 February 2025.' },
+    { short: 'ECMWF, 1 Jul 2025', href: 'https://www.ecmwf.int/en/about/media-centre/news/2025/ecmwfs-ensemble-ai-forecasts-become-operational',
+      cite: 'ECMWF (2025). ECMWF’s ensemble AI forecasts become operational. News item, 1 July 2025.' }] },
+  { id: 'Les', year: 2025, track: 'physics', src: [
+    { short: 'Esclapez et al. 2025 · DALES on GPU', href: 'https://arxiv.org/abs/2502.20412',
+      cite: 'Esclapez et al. (2025). Accelerating the Dutch Atmospheric Large-Eddy Simulation (DALES) model with OpenACC. arXiv:2502.20412.' }] },
+  { id: 'Paragliders', year: 2026, track: 'data', src: [
+    { short: 'Hernández-Aguayo et al. 2026 · arXiv', href: 'https://arxiv.org/abs/2608.00241',
+      cite: 'Hernández-Aguayo, C., Cristelli, M., & Benzaquen, M. (2026). From Flight Logs to Atmospheric Science: Paragliders as Convection Sensors for Identifying Thermal Predictors. arXiv:2608.00241.' }] },
+  { id: 'Us', year: 2026, track: 'us', src: [
+    { key: 'navProduct', href: '#product' },
+    { key: 'navHorizon', href: '#horizon' }] },
+];
+
+// The bibliography: REFS, then each chronology source new to it, in order.
+const BIBLIOGRAPHY = [
+  ...REFS,
+  ...TIMELINE.flatMap(e => e.src).filter(s => s.cite).map(({ cite, href }) => ({ cite, href })),
+];
+if (import.meta.env?.DEV) {
+  const known = new Set(BIBLIOGRAPHY.map(r => r.href));
+  const loose = TIMELINE.flatMap(e => e.src).filter(s => !s.key && !known.has(s.href));
+  if (loose.length) console.warn('[landing] chronology sources missing from the bibliography:', loose.map(s => s.href).join(', '));
+}
+
 // ThermalSense's own scores, within-(day, cell, hour) micro AUC:
 // `python -m evaluation.evaluate --variant base --by-hour`, run 16 Nov 2026 on
 // the 6 Nov 2026 buffer minus its invented-weather rows (CLAUDE.md). The CIs
@@ -59,17 +143,18 @@ const SCORES = [
 ];
 
 // Forecast ledger, GET /verification/summary?days=30 on the live node, read
-// 17 Nov 2026 (rules_version 1). [value, lo, hi]; n = forecasts that had
-// traffic to score against. pooled = pooled_served, hit = hit_rate (chance
-// 0.2), within = within_served. 360 was added to LEDGER_HORIZONS_MIN that day
-// and has no result yet — it stays "being measured" until it does.
+// 19 Nov 2026 (rules_version 1). [value, lo, hi]; n = within_served.forecasts,
+// the forecasts that had traffic to score against. pooled = pooled_served,
+// hit = hit_rate (chance 0.2), within = within_served. 360 was added to
+// LEDGER_HORIZONS_MIN on 17 Nov and had 8 such forecasts at this reading —
+// too few to print a number, so it stays "being measured" and shows only n.
 const HORIZONS = [
-  { min: 15,  pooled: [0.714, 0.671, 0.753], hit: [0.254, 0.213, 0.307], within: [0.530, 0.490, 0.577], n: 199 },
-  { min: 30,  pooled: [0.683, 0.632, 0.731], hit: [0.243, 0.198, 0.292], within: [0.502, 0.454, 0.558], n: 149 },
-  { min: 60,  pooled: [0.701, 0.643, 0.753], hit: [0.220, 0.165, 0.272], within: [0.477, 0.425, 0.530], n: 119 },
-  { min: 120, pooled: [0.709, 0.626, 0.784], hit: [0.143, 0.080, 0.215], within: [0.468, 0.391, 0.546], n: 68 },
-  { min: 180, pooled: [0.671, 0.559, 0.808], hit: [0.132, 0.067, 0.208], within: [0.482, 0.354, 0.619], n: 51 },
-  { min: 360, pending: true },
+  { min: 15,  pooled: [0.694, 0.664, 0.726], hit: [0.242, 0.211, 0.277], within: [0.530, 0.502, 0.557], n: 277 },
+  { min: 30,  pooled: [0.711, 0.668, 0.748], hit: [0.243, 0.209, 0.285], within: [0.519, 0.485, 0.549], n: 204 },
+  { min: 60,  pooled: [0.718, 0.669, 0.754], hit: [0.198, 0.161, 0.239], within: [0.454, 0.400, 0.504], n: 145 },
+  { min: 120, pooled: [0.696, 0.639, 0.738], hit: [0.196, 0.149, 0.249], within: [0.494, 0.436, 0.545], n: 86 },
+  { min: 180, pooled: [0.578, 0.508, 0.666], hit: [0.181, 0.123, 0.254], within: [0.497, 0.425, 0.561], n: 51 },
+  { min: 360, pending: true, n: 8 },
 ];
 
 // Competition matrix: one row per question, one cell per column, each a
@@ -96,12 +181,12 @@ const REF_AUTOSOAR = 3 / 7.8;
 const REF_NASA     = 1 - 2 / 8.6;
 const F_MAX = 0.8;
 
-const SECTIONS = ['problem', 'product', 'architecture', 'horizon', 'competition', 'market', 'gain', 'roadmap'];
+const SECTIONS = ['problem', 'product', 'architecture', 'horizon', 'field', 'competition', 'market', 'gain', 'roadmap'];
 const NAV_KEY = {
   problem: 'navProblem', product: 'navProduct', architecture: 'navArch', horizon: 'navHorizon',
-  competition: 'navCompete', market: 'navMarket', gain: 'navGain', roadmap: 'navRoad',
+  field: 'navField', competition: 'navCompete', market: 'navMarket', gain: 'navGain', roadmap: 'navRoad',
 };
-const TOTAL = 13;
+const TOTAL = 14;
 
 /**
  * How many thermals the feed is marking right now — the one live number on the
@@ -322,10 +407,48 @@ export default function Landing() {
           </div>
         </section>
 
-        {/* 08 — competition */}
-        <section className="slide" id="competition" aria-labelledby="cmp-h">
+        {/* 08 — the field: chronology with sources, and where the frontier is */}
+        <section className="slide" id="field" aria-labelledby="field-h">
           <div className="wrap">
             <Counter n={8} t={t} />
+            <h2 id="field-h">{t('tlTitle')}</h2>
+            <p className="intro">{t('tlIntro')}</p>
+            <ol className="timeline">
+              {TIMELINE.map((e, i) => (
+                <li key={e.id} className={`tl-item ${e.track}`}>
+                  {/* A year is printed once, on the first row that has it. */}
+                  <p className="tl-year">{i > 0 && TIMELINE[i - 1].year === e.year ? '' : e.year}</p>
+                  <div className="tl-body">
+                    <p className="tl-track">{t(TRACK_KEY[e.track])}</p>
+                    <h3>{t(`tl${e.id}T`)}</h3>
+                    <p>{t(`tl${e.id}`)}</p>
+                    <p className="tl-src">
+                      {e.src.map(s => (s.key
+                        ? <a key={s.href} href={s.href}>{t(s.key)} ↑</a>
+                        : <a key={s.href} href={s.href} rel="noopener">{s.short} ↗</a>))}
+                    </p>
+                  </div>
+                </li>
+              ))}
+            </ol>
+            <h3 className="sub">{t('frTitle')}</h3>
+            <div className="notes frontier">
+              <div><h3>{t('fr1')}</h3><p>{t('fr1Text')}</p></div>
+              <div><h3>{t('fr2')}</h3><p>{t('fr2Text')}</p></div>
+              <div><h3>{t('fr3')}</h3><p>{t('fr3Text')}</p></div>
+            </div>
+            <div className="honest">
+              <h3>{t('frGapTitle')}</h3>
+              <p>{t('frGap')}</p>
+            </div>
+            <p className="meta tl-meta">{t('tlMeta')}</p>
+          </div>
+        </section>
+
+        {/* 09 — competition */}
+        <section className="slide" id="competition" aria-labelledby="cmp-h">
+          <div className="wrap">
+            <Counter n={9} t={t} />
             <h2 id="cmp-h">{t('cmpTitle')}</h2>
             <p className="intro">{t('cmpIntro')}</p>
             <div className="table-scroll">
@@ -355,10 +478,10 @@ export default function Landing() {
           </div>
         </section>
 
-        {/* 09 — market */}
+        {/* 10 — market */}
         <section className="slide" id="market" aria-labelledby="mkt-h">
           <div className="wrap">
-            <Counter n={9} t={t} />
+            <Counter n={10} t={t} />
             <h2 id="mkt-h">{t('mktTitle')}</h2>
             <p className="intro">{t('mktIntro')}</p>
             <dl className="market">
@@ -378,10 +501,10 @@ export default function Landing() {
           </div>
         </section>
 
-        {/* 10 — gain */}
+        {/* 11 — gain */}
         <section className="slide" id="gain" aria-labelledby="gain-h">
           <div className="wrap">
-            <Counter n={10} t={t} />
+            <Counter n={11} t={t} />
             <h2 id="gain-h">{t('gainTitle')}</h2>
             <p className="intro">{t('gainIntro')}</p>
             <GainCalculator t={t} num={num} />
@@ -392,10 +515,10 @@ export default function Landing() {
           </div>
         </section>
 
-        {/* 11 — why us */}
+        {/* 12 — why us */}
         <section className="slide" aria-labelledby="why-h">
           <div className="wrap">
-            <Counter n={11} t={t} />
+            <Counter n={12} t={t} />
             <h2 id="why-h">{t('whyTitle')}</h2>
             <div className="notes why">
               <div><h3>{t('why1')}</h3><p>{t('why1Text')}</p></div>
@@ -406,10 +529,10 @@ export default function Landing() {
           </div>
         </section>
 
-        {/* 12 — roadmap and ask */}
+        {/* 13 — roadmap and ask */}
         <section className="slide ask" id="roadmap" aria-labelledby="road-h">
           <div className="wrap">
-            <Counter n={12} t={t} />
+            <Counter n={13} t={t} />
             <h2 id="road-h">{t('roadTitle')}</h2>
             <ol className="milestones">
               {[0, 1, 2, 3, 4, 5].map(i => (
@@ -432,14 +555,14 @@ export default function Landing() {
           </div>
         </section>
 
-        {/* 13 — references */}
+        {/* 14 — references */}
         <section className="slide refs" id="references" aria-labelledby="ref-h">
           <div className="wrap">
-            <Counter n={13} t={t} />
+            <Counter n={14} t={t} />
             <h2 id="ref-h">{t('refTitle')}</h2>
             <p className="intro">{t('refIntro')}</p>
             <ol className="ref-list">
-              {REFS.map(r => (
+              {BIBLIOGRAPHY.map(r => (
                 <li key={r.href + r.cite.slice(0, 20)}>
                   {r.cite} <a href={r.href} rel="noopener">↗</a>
                 </li>
@@ -481,7 +604,10 @@ function HorizonTable({ t, num }) {
             <tr key={h.min} className={h.pending ? 'pending' : undefined}>
               <th scope="row">{label(h.min)}</th>
               {h.pending ? (
-                <td colSpan={4}>{t('hzPendingRow')}</td>
+                <>
+                  <td colSpan={h.n == null ? 4 : 3}>{t('hzPendingRow')}</td>
+                  {h.n != null && <td className="num">{num(h.n, 0)}</td>}
+                </>
               ) : (
                 <>
                   <td className="num em">{auc(h.pooled)}</td>
