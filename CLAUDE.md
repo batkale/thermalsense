@@ -830,17 +830,35 @@ the layer top, below the cloud base this chip names. Before that switch they
 disagreed — 900 m cloud base against a `cape_base` of 2,273 m AGL at İnönü
 noon on 19 Nov — which is how the old formula was caught.
 
-**Satellite clouds** (`components/SatelliteLayer.jsx`, toggle or `?clouds=1`):
-Meteosat MTG GeoColour from EUMETSAT's public WMS, fetched by the browser — no
-backend memory, no Open-Meteo calls, no key, CORS open. Observed, never
-forecast; the sidebar says so when the slider is ahead. Three traps:
+**Clouds now** (`components/CloudLayer.jsx`, toggle or `?clouds=1`): where
+the clouds are, **drawn by us, not photographed.** It replaced a GeoColour
+satellite image on 20 Nov 2026 — the photograph sat over the map at 80% and
+did not look like part of it. Two of EUMETSAT's derived Meteosat products are
+read as *data* by the browser (public WMS, no key, CORS open, no backend
+memory, no Open-Meteo calls): the **cloud mask** `msg_fes:clm` (white cloud,
+green land, blue sea, resampled — so a pixel's darkest channel is its cloud
+fraction) and the **cloud-top height** `msg_fes:cth` (a colour ramp, decoded
+back to metres by nearest stop in `CLOUD_TOP_RAMP`, read off the product's
+legend). MSG at 0°, 15 min, ~3 km at nadir, infrared, so it works at night,
+which GeoColour did not. Its disc ends near ±75° longitude: no clouds are
+drawn over the Americas, which means unknown, not clear. The illustration is
+a lattice of `CLOUD_PUFF_PX` anchored in world pixels (so it does not shimmer
+on a pan): each cloudy node becomes a three-lobed puff for low tops, a flat
+translucent ellipse for mid tops, and a veil with cirrus streaks for high
+tops, with a soft navy ground shadow — flat light shapes with a thin dark rim,
+like the map's other marks, and like them not themed. Observed, never
+forecast; the sidebar says so when the slider is ahead. Traps:
 - **Always send `time=`.** Without it the server answers "latest" with
   `max-age=604800`, and a test request came back a sunlit scene during the
   Turkish night — a cached render, not the current frame. The newest time is
-  the `default` of the per-layer capabilities document (~6 KB), ~30 min behind.
-- **Ask for native pixels, not screen pixels** (`SATELLITE_NATIVE_M`). The server
-  upsamples nearest-neighbour and ignores `interpolations`, so zoomed in to a
-  scan a full-size request drew hard 2 km squares.
+  the `default` of each product's own capabilities document; the two are not
+  always on the same frame (cloud-top height was 15 min ahead on 20 Nov).
+- **PNG only, `crossOrigin = 'anonymous'`.** The colours are the data, so a
+  JPEG would corrupt them, and without the CORS flag the canvas is tainted and
+  `getImageData` throws.
+- **The ramp is copied, not fetched.** If EUMETSAT restyles `cth`, heights
+  decode wrong (clouds still land in the right place — that is the mask).
+  Re-read the legend's colour bar (GetLegendGraphic, x 155–634 = 320–16,000 m).
 - **z-index 400, not below.** Leaflet's map pane is `z-index: 400` and opaque,
   so a canvas portalled into the container below that is invisible.
   `OgnHeatmapCanvas` (the "live activity layer", 398) is exactly that: a solid

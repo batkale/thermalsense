@@ -83,36 +83,70 @@ export const FORECAST_STEPS = [
   ...Array.from({ length: 21 }, (_, i) => 3 + i),      // 3, 4 … 23
 ];
 
-// --- Satellite clouds -----------------------------------------------------------
-// EUMETSAT's public WMS (EUMETView): no key, no fee, CORS open. Requested straight
-// from the browser, so the backend never holds an image. GeoColour is true colour
-// by day (cumulus show as white puffs over the ground) and infrared cloud over a
-// static night-lights background after dark. Meteosat MTG-I, every 10 minutes,
-// ~1 km at nadir and coarser over Türkiye, which it sees ~48° off the
-// sub-satellite point. The newest frame was ~30 minutes old when measured.
+// --- Clouds now ---------------------------------------------------------------------
+// Where the clouds are, drawn by us rather than shown as a photograph. Two of
+// EUMETSAT's derived Meteosat products are read as *data*, straight from the
+// browser (public WMS, no key, CORS open — the backend never holds them and
+// Open-Meteo's quota is untouched):
+//   Cloud Mask (msg_fes:clm)       — cloud / clear land / clear sea per pixel.
+//                                    Served as white / green / blue, resampled,
+//                                    so the darkest channel of a pixel is its
+//                                    cloud fraction.
+//   Cloud Top Height (msg_fes:cth) — a colour ramp from 320 m to 16 km; decoded
+//                                    back to metres with CLOUD_TOP_RAMP.
+// MSG at 0 degrees, every 15 min, ~3 km at nadir (~4-5 km over Europe and
+// Türkiye), infrared-based, so it works at night too. Its disc ends near
+// ±75° longitude: the Americas and the far east of Asia get no clouds drawn,
+// which is "unknown", never "clear".
 //
-// Every image request names its frame time. Without one the server answers
-// "latest" with Cache-Control: max-age=604800, and on 19 Nov 2026 such a request
-// came back a sunlit scene at 07:20 local in November — someone else's cached
-// render — where the 04:20 UTC frame named explicitly was the night it was.
-export const SATELLITE_WMS   = 'https://view.eumetsat.int/geoserver/wms';
-export const SATELLITE_LAYER = 'mtg_fd:rgb_geocolour';
-// The per-layer capabilities document (~6 KB, not the 280 KB global one): its
-// time dimension's default is the newest frame.
-export const SATELLITE_CAPS  = 'https://view.eumetsat.int/geoserver/mtg_fd/rgb_geocolour/ows'
-                             + '?service=WMS&request=GetCapabilities&version=1.3.0';
-export const SATELLITE_REFRESH_MS = 5 * 60 * 1000;
-// Opaque imagery: enough of the base map shows through to keep roads and ridges
-// legible, while white cloud still reads as cloud.
-export const SATELLITE_OPACITY = 0.8;
-// One GetMap image per view, at most this many pixels on a side.
-export const SATELLITE_MAX_PX = 2048;
-// Nor finer than this many metres of ground per pixel. The data is ~1 km at
-// nadir, and the server upsamples nearest-neighbour (its `interpolations`
-// parameter changed nothing, 19 Nov 2026), so zoomed in to a scan a full-size
-// request drew 2 km squares. Asking for native pixels and letting the canvas
-// smooth them shows the same information without inventing hard edges.
-export const SATELLITE_NATIVE_M = 1000;
+// Every request names its frame time. Without one the server answers "latest"
+// with Cache-Control: max-age=604800, and on 19 Nov 2026 a GeoColour request
+// came back someone else's cached render of a different hour.
+export const CLOUD_WMS        = 'https://view.eumetsat.int/geoserver/wms';
+export const CLOUD_MASK_LAYER = 'msg_fes:clm';
+export const CLOUD_TOP_LAYER  = 'msg_fes:cth';
+// Per-layer capabilities (a few KB, not the 280 KB global one): the time
+// dimension's default is the newest frame. The two products are not always on
+// the same frame — on 20 Nov 2026 the height was 15 min ahead of the mask.
+export const CLOUD_CAPS = (layer) => {
+  const [ws, name] = layer.split(':');
+  return `https://view.eumetsat.int/geoserver/${ws}/${name}/ows`
+       + '?service=WMS&request=GetCapabilities&version=1.3.0';
+};
+export const CLOUD_REFRESH_MS = 5 * 60 * 1000;
+// One GetMap per product per view, at most this many pixels on a side. The
+// clouds are drawn on a lattice of CLOUD_PUFF_PX, so more data than that is
+// never looked at.
+export const CLOUD_MAX_PX = 256;
+// Nor finer than this many metres of ground per pixel: the data's own size.
+export const CLOUD_NATIVE_M = 3000;
+// The data is requested this much wider than the view on every side, so a pan
+// redraws from data already in hand instead of leaving a blank edge.
+export const CLOUD_MARGIN = 0.3;
+// Spacing of the illustration's lattice, in screen pixels. Each node that is
+// cloudy becomes one puff; overlapping puffs make the scalloped outline.
+export const CLOUD_PUFF_PX = 18;
+// Cloud-top bands, metres above sea level: below LOW the cloud is drawn as
+// cumulus puffs, from HIGH up as a cirrus veil with streaks, between as a
+// flat layer. A thick high top (a storm) is drawn as a veil too — the two
+// products cannot tell it from cirrus.
+export const CLOUD_LOW_TOP_M  = 3500;
+export const CLOUD_HIGH_TOP_M = 7000;
+// msg_fes:cth's colour ramp, read off its GetLegendGraphic on 20 Nov 2026:
+// [metres, r, g, b], 41 stops, linear between 320 m and 16,000 m.
+export const CLOUD_TOP_RAMP = [
+  [320, 0, 0, 0], [710, 53, 23, 0], [1100, 83, 37, 0], [1490, 122, 36, 42],
+  [1880, 146, 24, 94], [2280, 174, 9, 154], [2670, 167, 0, 201], [3060, 117, 0, 216],
+  [3450, 47, 0, 239], [3840, 4, 1, 253], [4230, 0, 45, 255], [4620, 0, 76, 255],
+  [5010, 0, 121, 255], [5410, 0, 163, 255], [5800, 0, 194, 255], [6190, 0, 244, 255],
+  [6580, 0, 248, 226], [6970, 0, 224, 128], [7360, 0, 207, 67], [7750, 10, 194, 0],
+  [8140, 52, 204, 0], [8530, 83, 212, 0], [8930, 134, 225, 0], [9320, 159, 231, 0],
+  [9710, 208, 243, 0], [10100, 237, 250, 0], [10490, 254, 226, 0], [10880, 254, 184, 0],
+  [11270, 254, 152, 0], [11660, 254, 102, 0], [12060, 254, 77, 0], [12450, 254, 28, 0],
+  [12840, 250, 11, 8], [13230, 219, 57, 57], [13620, 191, 108, 108], [14010, 166, 150, 150],
+  [14400, 181, 181, 181], [14790, 193, 193, 193], [15190, 218, 218, 218],
+  [15580, 230, 230, 230], [15970, 255, 255, 255],
+];
 
 // Must match backend fetch_elevation_grid default radius (config.py GRID_RADIUS).
 // The grid spans centre ± this on both axes, inclusive of both edges, so it is

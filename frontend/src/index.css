@@ -730,6 +730,15 @@ button { font-family: inherit; }
   cursor: default;
 }
 .toggle-sub.warn { color: var(--warn); }
+/* The cloud layer's key: three glyphs, each before its label, on one line. */
+.toggle-sub.cloud-key {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 4px;
+}
+.cloud-glyph { flex-shrink: 0; }
+.cloud-key > span { margin-right: 6px; }
 
 /* ── Buttons ── */
 .btn-primary, .btn-secondary {
