@@ -280,6 +280,41 @@ Breaking any of these has taken the app down or silently corrupted results befor
   same allowance; `meteo_client.live_usage()["total"]` counts both endpoints.
   Overlap with rows the live sampler already took from the same day is possible
   and expected to be small; the panel shows the run's `added` count.
+- **Türkiye first, since 21 Nov 2026** (`config.PRIORITY_BBOX`, the same box
+  as `evaluation/regions.py`'s Türkiye; a test pins the two together). The
+  live buffer held 1 Turkish row of 78,428 because both ways in sampled the
+  worldwide feed blind. The live sampler took the first `MAX_SAMPLE_GRIDS`
+  soaring aircraft in feed order, and the seed took every n-th labelable row
+  by ROWID.
+  - **Live sampler:** `retrain()` now sorts Turkish aircraft to the front of
+    the candidates. The sort is stable, so everyone else keeps feed order and
+    the cap is unchanged.
+  - **Seed:** `seed_from_history` first takes every labelable row inside the
+    box, up to `PRIORITY_SEED_LIMIT` (2,000) per source. Its worldwide sample
+    of `limit` then excludes the box, so no row is read twice. Those buckets
+    go first in the loop.
+  - **Weather plan:** reordered so the Turkish cells are bought first. It is
+    otherwise biggest first, which put Türkiye's few hours last, where a
+    spent budget would have deferred them.
+  - **Backfill:** `POST /seed?priority_only=true` takes the box alone, the
+    one-off backfill of what earlier seeds sampled past. `last_seed` reports
+    `priority_rows` and `priority_added`.
+
+  **This is not much data, and the feed cannot give more.** Measured on the
+  52-day archive (17 Aug–5 Nov): OGN heard 143 soaring aircraft over Türkiye
+  (129 paragliders, 8 gliders) but only 188 climbing-circling fixes, against
+  1.06M in the Alps and 2.4M in Germany. That is about 65 labelable rows a
+  day. Turkish aircraft reach OGN about once a minute through phone apps
+  (ids `NAV…`, `FNT…`): median 58 s between fixes, against 1.7 s in the
+  Alps. The OGN receiver list (edited March 2026) has no receiver in
+  Türkiye, and no glider was ever seen within 25 km of İnönü. The labels
+  are still valid: `circling` is the turn rate the tracker itself reports
+  (`rot`, > 8°/s), not a difference between fixes.
+
+  Eviction does not protect the region: at the 200k cap the day quota keeps
+  positives first, Turkish or not. More data needs OGN receivers (İnönü,
+  Babadağ) or flight logs by agreement (THK İnönü, ypforum, XContest,
+  thermal.kk7.ch). The to-do list tracks both.
 - **The seed buys weather by the fortnight, not by the hour** (since 20 Nov
   2026). Open-Meteo bills a request up to 14 days long the same as one day, and
   `fetch_meteo_historical` asks for a whole day to keep one hour. So before its
@@ -497,6 +532,55 @@ Breaking any of these has taken the app down or silently corrupted results befor
   agreement for commercial use. **Not in production;** re-measure once the
   archive holds a flying season. `build --bbox` writes the layer itself as
   Parquet (Alps: 174,114 blocks with ≥ 5 aircraft-days, 1.2 MB).
+- **Satellite land-surface temperature adds nothing, MODIS or MTG, measured
+  19–20 Nov 2026** (`evaluation/lst.py`; 6 Nov buffer, 2,009 units, by hour,
+  seeds 0–2, 1,500 resamples, against hires terrain from the drift cache).
+  MOD11A1 / MYD11A1 v6.1 came from Planetary Computer: anonymous STAC and SAS
+  token, COG range reads, 395 tile-days, none failed. QC-masked to an LST
+  error ≤ 2 K, 1 km. Per row: LST at the pixel, its anomaly against the
+  ±0.05° grid box, and LST − T2m. Coverage was 74% of rows on either platform
+  (Aqua 45%, Terra 61%) and 85% of mixed-label units. Both orbits have
+  drifted: Aqua's median pass is now **15:00** local solar time, not 13:30,
+  and Terra's 09:18. **Raw LST ranks lift below chance** (0.432–0.471 alone)
+  because it is an altimeter: skin temperature falls 5.6 K/km (Aqua) and
+  4.4 K/km (Terra) inside a unit, and elevation alone scores 0.605 on the
+  same rows. With that lapse taken out (`lapse_adjusted`, fitted without
+  labels), Terra scores 0.505 and Aqua 0.544, about what the sun angle
+  scores. Served deltas against hires: raw +0.001 / −0.004 / +0.004,
+  lapse-adjusted −0.001 / −0.004 / −0.003, every interval spanning zero. On
+  the 1,710 covered units only: +0.000 / −0.005 / +0.004. A daily pass hours
+  from the row's own hour cannot say which ground is hot *now*. That is
+  the case for the geostationary product. **MTG/FCI MTLST (LSA-007), the
+  geostationary product, adds nothing either** (20 Nov). Every unit reads
+  the HH:00 slot of its own hour, plus the hourly morning back to sunrise
+  for `rise` / `rate`: 527 slots, 5.8 GB, none missing. Kept: clear sky by
+  QFLAGS and LST_uncertainty ≤ 2 K; at the rows that cut removed 3 of
+  17,647 clear pixels. The effective FCI pixel is 2.1 × 3.7 km in the Alps,
+  2.2 × 4.3 Germany, 2.1 × 2.9 Iberia and 2.1 × 3.5 Türkiye, measured on
+  the LATLON grid at the rows (3.70 × 2.17 km median). The 2 km figure
+  holds only at nadir. **Coverage is the first problem:** 84% of rows are
+  in view, but one hourly look meets Oct–Nov cloud. That leaves 36% of rows
+  and 43% of mixed-label units (861 units scored on covered rows), against
+  MODIS's 85% from two passes a day. Values are sound: within an hour of a
+  MODIS pass r = 0.92 (Aqua) and 0.88 (Terra), MTG 1.5–2.6 K warmer. LST −
+  T2m has a median of +3.9 K, the morning rise 11.5 K at 2.1 K/h. **It is
+  still an altimeter:** raw 0.419, anomaly 0.421, rise 0.420 and rate 0.419
+  alone, while elevation alone scores 0.641 on the same rows. The lapse
+  inside a unit is only 2.1 K/km, because the pixel averages 8 km² of
+  terrain the row's own height barely describes. So the label-free
+  adjustment under-corrects and leaves 0.468, still below chance. Served
+  deltas against hires: raw −0.000 / −0.004 / +0.007 [+0.000, +0.013],
+  lapse-adjusted +0.003 / −0.002 / +0.006. Covered units only: raw −0.005
+  / −0.000 / +0.010 [+0.002, +0.019]. Every LST column from both sources
+  together: −0.002 / −0.002 / +0.005. The sign changes with the seed and
+  one seed touches zero: unproven. **At 1–4 km, skin temperature mostly
+  measures height, and inside an 11 km map there is little left once
+  height is known.** The LSA SAF LATLON file is public; slot files need the
+  free login (HTTP Basic). `lst need` writes the list, and a typo at
+  curl's one password prompt fails all 527 silently, which is why the
+  first two downloads fetched nothing. Oct–Nov has the weakest surface
+  contrasts of the year, so a null here does not rule out summer.
+  Re-measure on a summer buffer before calling satellite LST closed.
 - **The thermal top replaced `cape_base`, 19 Nov 2026** — the "thermal base"
   on the map and the ceiling of the training filter. Now
   `meteo_client.thermal_top_agl`: **min(boundary layer height, condensation
@@ -619,7 +703,7 @@ Breaking any of these has taken the app down or silently corrupted results befor
 | `GET /weather?lat=&lon=&forecast_h=` | Sky and local clock at one point, no model run — for the pinned glider card. Same cached meteo call as `/predict` |
 | `GET /healthz` | `{status, model_loaded}` |
 | `POST /train` | Admin. Background retrain |
-| `POST /seed?days_back=&limit=&reset=` | Admin. Rebuild the buffer from beacon history |
+| `POST /seed?days_back=&limit=&reset=&priority_only=` | Admin. Rebuild the buffer from beacon history. Türkiye's rows always go first; `priority_only=true` takes those alone (see "Türkiye first") |
 | `GET /verification/summary?days=` | Forecast ledger scorecard per horizon: statuses, within-forecast score for served / model / terrain / persistence with bootstrap CIs, hotspot hit rate vs chance, pooled score, Brier |
 | `GET /verification/examples?status=&horizon_min=&limit=` | Recent forecasts with one status, always with the issued/scored counts they were picked from |
 | `GET /verification/forecast/{id}` | One recorded forecast, its outcome and its pooled grid, for replay |
