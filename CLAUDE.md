@@ -280,6 +280,41 @@ Breaking any of these has taken the app down or silently corrupted results befor
   same allowance; `meteo_client.live_usage()["total"]` counts both endpoints.
   Overlap with rows the live sampler already took from the same day is possible
   and expected to be small; the panel shows the run's `added` count.
+- **Türkiye first, since 21 Nov 2026** (`config.PRIORITY_BBOX`, the same box
+  as `evaluation/regions.py`'s Türkiye; a test pins the two together). The
+  live buffer held 1 Turkish row of 78,428 because both ways in sampled the
+  worldwide feed blind. The live sampler took the first `MAX_SAMPLE_GRIDS`
+  soaring aircraft in feed order, and the seed took every n-th labelable row
+  by ROWID.
+  - **Live sampler:** `retrain()` now sorts Turkish aircraft to the front of
+    the candidates. The sort is stable, so everyone else keeps feed order and
+    the cap is unchanged.
+  - **Seed:** `seed_from_history` first takes every labelable row inside the
+    box, up to `PRIORITY_SEED_LIMIT` (2,000) per source. Its worldwide sample
+    of `limit` then excludes the box, so no row is read twice. Those buckets
+    go first in the loop.
+  - **Weather plan:** reordered so the Turkish cells are bought first. It is
+    otherwise biggest first, which put Türkiye's few hours last, where a
+    spent budget would have deferred them.
+  - **Backfill:** `POST /seed?priority_only=true` takes the box alone, the
+    one-off backfill of what earlier seeds sampled past. `last_seed` reports
+    `priority_rows` and `priority_added`.
+
+  **This is not much data, and the feed cannot give more.** Measured on the
+  52-day archive (17 Aug–5 Nov): OGN heard 143 soaring aircraft over Türkiye
+  (129 paragliders, 8 gliders) but only 188 climbing-circling fixes, against
+  1.06M in the Alps and 2.4M in Germany. That is about 65 labelable rows a
+  day. Turkish aircraft reach OGN about once a minute through phone apps
+  (ids `NAV…`, `FNT…`): median 58 s between fixes, against 1.7 s in the
+  Alps. The OGN receiver list (edited March 2026) has no receiver in
+  Türkiye, and no glider was ever seen within 25 km of İnönü. The labels
+  are still valid: `circling` is the turn rate the tracker itself reports
+  (`rot`, > 8°/s), not a difference between fixes.
+
+  Eviction does not protect the region: at the 200k cap the day quota keeps
+  positives first, Turkish or not. More data needs OGN receivers (İnönü,
+  Babadağ) or flight logs by agreement (THK İnönü, ypforum, XContest,
+  thermal.kk7.ch). The to-do list tracks both.
 - **The seed buys weather by the fortnight, not by the hour** (since 20 Nov
   2026). Open-Meteo bills a request up to 14 days long the same as one day, and
   `fetch_meteo_historical` asks for a whole day to keep one hour. So before its
@@ -653,7 +688,7 @@ Breaking any of these has taken the app down or silently corrupted results befor
 | `GET /weather?lat=&lon=&forecast_h=` | Sky and local clock at one point, no model run — for the pinned glider card. Same cached meteo call as `/predict` |
 | `GET /healthz` | `{status, model_loaded}` |
 | `POST /train` | Admin. Background retrain |
-| `POST /seed?days_back=&limit=&reset=` | Admin. Rebuild the buffer from beacon history |
+| `POST /seed?days_back=&limit=&reset=&priority_only=` | Admin. Rebuild the buffer from beacon history. Türkiye's rows always go first; `priority_only=true` takes those alone (see "Türkiye first") |
 | `GET /verification/summary?days=` | Forecast ledger scorecard per horizon: statuses, within-forecast score for served / model / terrain / persistence with bootstrap CIs, hotspot hit rate vs chance, pooled score, Brier |
 | `GET /verification/examples?status=&horizon_min=&limit=` | Recent forecasts with one status, always with the issued/scored counts they were picked from |
 | `GET /verification/forecast/{id}` | One recorded forecast, its outcome and its pooled grid, for replay |

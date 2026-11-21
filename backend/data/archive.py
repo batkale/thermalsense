@@ -324,7 +324,10 @@ def scan(root: Path, columns: list[str] | None = None,
 
 def training_rows(root: Path, since: date, until: date, ac_types,
                   positive_min_vario: float, negative_max_vario: float,
-                  limit: int) -> list[tuple]:
+                  limit: int,
+                  bbox: tuple[float, float, float, float] | None = None,
+                  exclude_bbox: tuple[float, float, float, float] | None = None,
+                  ) -> list[tuple]:
     """
     Labelable beacons from the archive, shaped like the seed's SQLite query.
 
@@ -336,6 +339,10 @@ def training_rows(root: Path, since: date, until: date, ac_types,
     Sampled with a stride rather than truncated: taking the first `limit` rows
     of a date-ordered scan would return the oldest day and nothing else, which
     is the exact failure the day-stratified buffer eviction exists to avoid.
+
+    bbox keeps only rows inside (lat_min, lat_max, lon_min, lon_max);
+    exclude_bbox drops them.  The seed reads the priority region with the one
+    and the rest of the world with the other, so no row is taken twice.
     """
     pa, _ = _pa()
     import pyarrow.compute as pc
@@ -355,6 +362,16 @@ def training_rows(root: Path, since: date, until: date, ac_types,
             & (ds.field("under_tow") == 0)
             & ds.field("ac_type").isin(list(ac_types))
             & labelable)
+
+    def _inside(b):
+        la0, la1, lo0, lo1 = b
+        return ((ds.field("lat") >= la0) & (ds.field("lat") <= la1)
+                & (ds.field("lon") >= lo0) & (ds.field("lon") <= lo1))
+
+    if bbox is not None:
+        filt = filt & _inside(bbox)
+    if exclude_bbox is not None:
+        filt = filt & ~_inside(exclude_bbox)
 
     table = dataset.to_table(
         columns=["ts", "lat", "lon", "alt", "vario", "circling"], filter=filt)
