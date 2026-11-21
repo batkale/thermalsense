@@ -1194,16 +1194,19 @@ async def trigger_train(background_tasks: BackgroundTasks):
     return {"status": "started"}
 
 
-async def _seed_job(days_back: float | None, limit: int, reset: bool = False) -> None:
+async def _seed_job(days_back: float | None, limit: int, reset: bool = False,
+                    priority_only: bool = False) -> None:
     async with _training_lock:
-        log.info(f"[seed] starting — days_back={days_back}, limit={limit}, reset={reset}")
+        log.info(f"[seed] starting — days_back={days_back}, limit={limit}, reset={reset}, "
+                 f"priority_only={priority_only}")
         try:
             # Terrain is the bottleneck: ~1 unique 0.1-degree cell per beacon at the
             # SRTM API's 1 req/s cap, so a few thousand beacons runs well past an
             # hour.  On timeout the whole run is discarded unsaved, so keep this
             # generous — it is a background job with a lock, not a request.
             result = await asyncio.wait_for(
-                model.seed_from_history(days_back=days_back, limit=limit, reset=reset),
+                model.seed_from_history(days_back=days_back, limit=limit, reset=reset,
+                                        priority_only=priority_only),
                 timeout=SEED_TIMEOUT,
             )
         except asyncio.TimeoutError:
@@ -1257,6 +1260,7 @@ async def seed_from_history(
     days_back: float | None = None,
     limit: int = 5000,
     reset: bool = False,
+    priority_only: bool = False,
 ):
     """
     Backfill the training buffer from historical beacon DB records.
@@ -1272,11 +1276,16 @@ async def seed_from_history(
     - limit: max beacon rows to process (default 5000; sampled uniformly across the window)
     - reset: discard the existing buffer first so the rebuild replaces it rather
       than appending (use after a feature-pipeline correction)
+    - priority_only: take only the rows inside config.PRIORITY_BBOX (Türkiye),
+      every labelable one up to PRIORITY_SEED_LIMIT per source. The one-off
+      backfill of what earlier worldwide seeds sampled past; every seed already
+      takes these rows first.
     """
     if _training_lock.locked():
         return {"status": "already_running"}
-    background_tasks.add_task(_seed_job, days_back, limit, reset)
-    return {"status": "started", "days_back": days_back, "limit": limit, "reset": reset}
+    background_tasks.add_task(_seed_job, days_back, limit, reset, priority_only)
+    return {"status": "started", "days_back": days_back, "limit": limit, "reset": reset,
+            "priority_only": priority_only}
 
 # Fields the frontend actually reads. `seen_at` is deliberately excluded: it is
 # internal TTL bookkeeping, was being sent 43,200x/day per viewer, and leaked

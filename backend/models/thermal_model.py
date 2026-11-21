@@ -10,7 +10,8 @@ from pathlib import Path
 from config import (MODEL_PATH, BUFFER_PATH, GRID_RADIUS, LAT_MIN, LAT_MAX, LON_MIN, LON_MAX,
                     XGB_FIT_THREADS, XGB_PREDICT_THREADS, ENABLE_LANDCOVER,
                     MAX_SAMPLE_GRIDS, SAMPLE_TIME_BUDGET_S, TERRAIN_SOURCE,
-                    SEED_METEO_BUDGET, SEED_TIME_BUDGET_S, HIRES_BACKFILL_BUDGET_S)
+                    SEED_METEO_BUDGET, SEED_TIME_BUDGET_S, HIRES_BACKFILL_BUDGET_S,
+                    PRIORITY_BBOX, PRIORITY_SEED_LIMIT)
 from evaluation.holdout import split as bench_split
 from evaluation.metrics import grouped_auc, paired_delta_ci
 from pipeline.feature_engineering import FEATURE_COUNT, COL_HIRES, HIRES_COUNT, LEGACY_WIDTHS
@@ -141,6 +142,16 @@ def _plausible_coords(X: np.ndarray) -> np.ndarray:
     """
     lat, lon = X[:, 0], X[:, 1]
     return (np.abs(lat) <= 90.0) & (np.abs(lon) <= 180.0)
+
+
+def in_priority_region(lat, lon) -> bool:
+    """Inside config.PRIORITY_BBOX (Türkiye), the region both ways into the
+    buffer serve first.  A missing or non-numeric coordinate is outside."""
+    la0, la1, lo0, lo1 = PRIORITY_BBOX
+    try:
+        return la0 <= float(lat) <= la1 and lo0 <= float(lon) <= lo1
+    except (TypeError, ValueError):
+        return False
 
 
 def _grid_index(lat: float, lon: float,
@@ -780,6 +791,11 @@ class ThermalModel:
             # Quiet hours are when the fill-in has the network to itself.
             await self._backfill_hires(HIRES_BACKFILL_BUDGET_S)
             return
+        # Türkiye first (config.PRIORITY_BBOX).  Feed order put its few aircraft
+        # behind hundreds of European ones, so the cap below almost never
+        # reached them.  The sort is stable: everyone else keeps feed order, and
+        # the cap still bounds the cycle exactly as before.
+        soaring.sort(key=lambda g: not in_priority_region(g.get("lat"), g.get("lon")))
         candidates = soaring[:MAX_SAMPLE_GRIDS]
         # Stop on whichever bound arrives first — see MAX_SAMPLE_GRIDS.
         deadline = time.monotonic() + SAMPLE_TIME_BUDGET_S
@@ -1232,9 +1248,16 @@ class ThermalModel:
         days_back: float | None = None,
         limit: int = 5000,
         reset: bool = False,
+        priority_only: bool = False,
     ) -> dict:
         """
         Backfill the training buffer from the historical beacons DB.
+
+        Rows inside config.PRIORITY_BBOX (Türkiye) are taken first and apart
+        from `limit`: every labelable one up to PRIORITY_SEED_LIMIT per source
+        (hot DB, archive), then the worldwide sample of `limit`, which skips the
+        box.  priority_only=True takes the box alone -- the one-off backfill of
+        the Turkish rows earlier seeds sampled past.
 
         Groups beacons into (0.5° lat × 0.5° lon × UTC hour) buckets so that
         historical meteo is fetched once per bucket rather than once per beacon.
@@ -1317,6 +1340,27 @@ class ThermalModel:
                      f"(circling = 0 AND vario < {_NEGATIVE_MAX_VARIO}))")
         where = (f"ts >= ? AND ac_type IN ({placeholders}) AND under_tow = 0 "
                  f"AND {labelable}")
+        # Türkiye apart from the worldwide sample: see PRIORITY_BBOX in config.
+        # The worldwide query excludes the box, so no row is read twice.
+        in_box = "(lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?)"
+        box_args = tuple(PRIORITY_BBOX)
+
+        def _strided(con, cond: str, args: tuple, cap: int) -> tuple[int, list]:
+            """Every n-th matching row, n chosen so at most `cap` come back."""
+            n = con.execute(f"SELECT COUNT(*) FROM beacons WHERE {cond}", args).fetchone()[0]
+            if n == 0 or cap <= 0:
+                return n, []
+            got = con.execute(
+                f"""
+                SELECT ts, lat, lon, alt, vario, circling
+                FROM beacons
+                WHERE {cond}
+                  AND (ROWID % ?) = 0
+                LIMIT ?
+                """,
+                (*args, max(1, n // cap), cap),
+            ).fetchall()
+            return n, got
 
         with sqlite3.connect(db_path) as con:
             cols = {r[1] for r in con.execute("PRAGMA table_info(beacons)")}
@@ -1328,10 +1372,15 @@ class ThermalModel:
                     "added": 0,
                     "buffer_total": len(self._buffer_X),
                 }
-            total = con.execute(
-                f"SELECT COUNT(*) FROM beacons WHERE {where}",
-                (cutoff, *soaring_ids),
-            ).fetchone()[0]
+            base_args = (cutoff, *soaring_ids)
+            pri_total, pri_rows = _strided(
+                con, f"{where} AND {in_box}", (*base_args, *box_args), PRIORITY_SEED_LIMIT)
+            if priority_only:
+                total, rows = 0, []
+            else:
+                total, rows = _strided(
+                    con, f"{where} AND NOT {in_box}", (*base_args, *box_args), limit)
+            total += pri_total
             if total == 0:
                 log.warning(
                     "[seed] no untowed classified soaring beacons in the window — "
@@ -1343,17 +1392,6 @@ class ThermalModel:
                     "reason": "no rows with a soaring ac_type and under_tow = 0",
                     "buffer_total": len(self._buffer_X),
                 }
-            sample_rate = max(1, total // limit)
-            rows = con.execute(
-                f"""
-                SELECT ts, lat, lon, alt, vario, circling
-                FROM beacons
-                WHERE {where}
-                  AND (ROWID % ?) = 0
-                LIMIT ?
-                """,
-                (cutoff, *soaring_ids, sample_rate, limit),
-            ).fetchall()
 
         # Days the archive holds that the hot DB no longer does.  The boundary
         # comes from what the DB *actually* still holds, not from
@@ -1380,15 +1418,28 @@ class ThermalModel:
                        if hot_first is not None and want_from <= d < hot_first)
         if older:
             try:
-                cold = _archive.training_rows(
+                pri_cold = _archive.training_rows(
+                    ARCHIVE_DIR, older[0], older[-1], sorted(SOARING_AC_TYPES),
+                    _POSITIVE_MIN_VARIO, _NEGATIVE_MAX_VARIO, PRIORITY_SEED_LIMIT,
+                    bbox=PRIORITY_BBOX,
+                )
+                cold = [] if priority_only else _archive.training_rows(
                     ARCHIVE_DIR, older[0], older[-1], sorted(SOARING_AC_TYPES),
                     _POSITIVE_MIN_VARIO, _NEGATIVE_MAX_VARIO, limit,
+                    exclude_bbox=PRIORITY_BBOX,
                 )
-                log.info(f"[seed] archive contributed {len(cold):,} rows over "
+                log.info(f"[seed] archive contributed {len(cold):,} rows and "
+                         f"{len(pri_cold):,} from the priority region over "
                          f"{len(older)} day(s) {older[0]}..{older[-1]}")
+                pri_rows = list(pri_rows) + pri_cold
                 rows = list(rows) + cold
             except Exception as exc:
                 log.warning(f"[seed] archive read failed, using hot DB only: {exc}")
+
+        # Priority rows first: buckets are processed in insertion order, so if the
+        # clock or the meteo budget stops the run, it stops in the worldwide part.
+        priority_rows = len(pri_rows)
+        rows = list(pri_rows) + list(rows)
 
         if not rows:
             return {"rows_scanned": 0, "added": 0, "buffer_total": len(self._buffer_X)}
@@ -1407,6 +1458,7 @@ class ThermalModel:
 
         added = errors = skipped_no_meteo = above_base = dark = on_ground = 0
         ambiguous = no_terrain = 0
+        priority_added = 0
         done_buckets = 0
 
         from data.meteo_client import live_usage as _meteo_usage
@@ -1436,6 +1488,10 @@ class ThermalModel:
         plan = plan_historical_ranges(
             (lat_b, lon_b, datetime.fromisoformat(f"{d}T{h:02d}:00:00+00:00"))
             for lat_b, lon_b, d, h in buckets)
+        # The plan comes biggest first, which puts Türkiye's few hours last; a
+        # budget that ran out there would defer exactly the buckets served first
+        # below.  Stable, so the order within each part stays biggest first.
+        plan.sort(key=lambda p: not in_priority_region(p[0], p[1]))
         range_requests = prefetched = 0
         for la, lo, dts in plan:
             if time.monotonic() >= deadline or _over_meteo_budget():
@@ -1586,6 +1642,8 @@ class ThermalModel:
                     self._buffer_y.append(label)
                     self._buffer_changed = True
                     added += 1
+                    if in_priority_region(lat, lon):
+                        priority_added += 1
                 except Exception as exc:
                     log.warning(f"[seed] feature failed at ({lat:.3f},{lon:.3f}): {exc}")
                     errors += 1
@@ -1619,6 +1677,9 @@ class ThermalModel:
             "stopped_at_time_budget":  time_stopped,
             "meteo_range_requests":    range_requests,
             "meteo_hours_prefetched":  prefetched,
+            "priority_rows":           priority_rows,
+            "priority_added":          priority_added,
+            "priority_only":           priority_only,
             "buffer_total":     len(self._buffer_X),
         }
         log.info(f"[seed] complete: {result}")

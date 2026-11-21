@@ -43,7 +43,8 @@ def test_before_any_save_the_list_is_the_seed_at_version_zero(client):
     assert res.status_code == 200
     body = res.json()
     assert body["version"] == 0
-    assert body["items"][0]["id"] == "t01"
+    seed = json.loads(todo_store.SEED_PATH.read_text(encoding="utf-8"))
+    assert [it["id"] for it in body["items"]] == [it["id"] for it in seed["items"]]
     assert res.headers["cache-control"] == "no-store"
     assert "noindex" in res.headers["x-robots-tag"]
     assert not config.TODO_PATH.exists()                  # reading never writes

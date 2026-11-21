@@ -260,6 +260,21 @@ SEED_METEO_BUDGET = int(os.getenv("SEED_METEO_BUDGET", "6000"))
 # as a day of live sampling rather than three orders above it.
 NIGHTLY_SEED_LIMIT = int(os.getenv("NIGHTLY_SEED_LIMIT", "2000"))
 
+# Türkiye first (since 21 Nov 2026).  The product is for Türkiye and the live
+# buffer held 1 Turkish row of 78,428, because both ways in sample the worldwide
+# feed blind: the live sampler takes the first MAX_SAMPLE_GRIDS soaring aircraft
+# in feed order, and the seed takes every n-th labelable row.  Türkiye is ~0.01%
+# of that feed -- measured on the 52-day archive (17 Aug-5 Nov 2026), 188
+# climbing-circling beacons against 1.06M in the Alps -- so it was sampled
+# about once a fortnight.  Now aircraft inside this box go to the front of the
+# live candidates, and the seed takes every labelable row inside it (up to
+# PRIORITY_SEED_LIMIT) before its worldwide sample, which then skips the box so
+# nothing is read twice.  The cost is small because the traffic is: ~65
+# labelable rows a day.  The box is evaluation/regions.py's "Türkiye", and a
+# test pins the two together so the slice the scores report is the one fed.
+PRIORITY_BBOX = (35.8, 42.2, 25.6, 44.9)      # lat_min, lat_max, lon_min, lon_max
+PRIORITY_SEED_LIMIT = int(os.getenv("PRIORITY_SEED_LIMIT", "2000"))
+
 # Wall-clock ceiling for one seed run.  The live sampler has had
 # SAMPLE_TIME_BUDGET_S since the quota work; the seed had no deadline at all,
 # which is the asymmetry that took the box down on 18 Sep 2026 — it stopped only
