@@ -645,6 +645,25 @@ Breaking any of these has taken the app down or silently corrupted results befor
   `_MAX_CONSECUTIVE_SKIPS = 12` consecutive rejections it accepts and
   re-baselines, so a lucky score cannot freeze the model forever.
   **Do not report the split or a missing gate as bugs — both were fixed.**
+- **Daily score history** (`models/score_history.py`, `GET /training/history`,
+  "Daily score" in the training panel; since 20 Nov 2026) is how "does it get
+  better with more data" is answered. The gate's `benchmark_score` cannot: each
+  group's side of the split is frozen, but every new day adds held-out groups
+  and eviction thins old ones, so it is measured on a different set every day.
+  At 23:55 UTC the serving model is copied to `SCORE_SNAPSHOT_DIR/<next
+  day>.json` — it has seen nothing of that day. At 03:00 UTC, after the
+  nightly seed has added yesterday, every row of yesterday (both sides of the
+  split: no copy saw any of them), at the AGL floor, is scored by that copy and
+  by the copies from `SCORE_COMPARE_DAYS` (7, 28) earlier, served
+  (`_score_served`) and grouped by `decision_ids`, with paired deltas; terrain
+  alone beside them; and that day's ledger per horizon. **Read the delta, not
+  a day's own score** — days differ in difficulty. Rows carry day-of-year, not
+  year, so a copy whose buffer already held the same day-of-year (a buffer
+  older than a year) records `seen_in_training` instead of a score. The
+  snapshot is skipped if it fires after 23:59, and a missed 03:00 run is
+  caught up for 7 days (and once 10 minutes after start). Copies are ~330 KB,
+  kept `SCORE_SNAPSHOT_KEEP_DAYS` (35). `horizon_summary` takes a past `now` as
+  an inclusive upper bound for this; without one it counts as before.
 - **XGBoost thread trap:** `fit_and_gate` promotes the challenger object
   directly, and a booster keeps the `nthread` it was *fitted* under.
   `_for_serving()` retunes at the promotion and save points. `save_model` does
@@ -689,6 +708,7 @@ Breaking any of these has taken the app down or silently corrupted results befor
 | `GET /healthz` | `{status, model_loaded}` |
 | `POST /train` | Admin. Background retrain |
 | `POST /seed?days_back=&limit=&reset=&priority_only=` | Admin. Rebuild the buffer from beacon history. Türkiye's rows always go first; `priority_only=true` takes those alone (see "Türkiye first") |
+| `GET /training/history?days=` | Daily score history, newest first: per finished day, the model copied the night before scored on it, terrain alone, paired deltas against the copies 7 and 28 days older, and the day's ledger per horizon. `snapshots` lists the copies on disk |
 | `GET /verification/summary?days=` | Forecast ledger scorecard per horizon: statuses, within-forecast score for served / model / terrain / persistence with bootstrap CIs, hotspot hit rate vs chance, pooled score, Brier |
 | `GET /verification/examples?status=&horizon_min=&limit=` | Recent forecasts with one status, always with the issued/scored counts they were picked from |
 | `GET /verification/forecast/{id}` | One recorded forecast, its outcome and its pooled grid, for replay |

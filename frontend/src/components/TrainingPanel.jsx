@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { fetchTrainingStatus } from '../services/api.js';
+import { fetchTrainingHistory, fetchTrainingStatus } from '../services/api.js';
 import { useLang } from '../i18n/LanguageContext.jsx';
 
 // Polled only while open. Everything on it moves on the scale of the retrain
@@ -42,6 +42,64 @@ function Row({ label, value, tone }) {
   );
 }
 
+const signed = v => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(3)}`;
+
+// One finished day per row: the model as it stood the night before, scored on
+// that day, and the paired delta against the copy from `k` days earlier. A
+// day's own score is not comparable with another day's — days differ in
+// difficulty — which is why the delta, not the score, carries the colour.
+function DailyScore({ history }) {
+  const { t, locale } = useLang();
+  const k = history.compare_days?.[0] ?? 7;
+  const day = iso => new Date(`${iso}T00:00:00Z`)
+    .toLocaleDateString(locale, { day: 'numeric', month: 'short', timeZone: 'UTC' });
+
+  if (!history.days?.length) {
+    const next = history.snapshots?.[history.snapshots.length - 1];
+    return <div className="tp-hint">{next ? t('dailyWaiting', { day: day(next) }) : t('dailyNoCopy')}</div>;
+  }
+  return (
+    <>
+      <table className="tp-regions">
+        <thead>
+          <tr>
+            <th>{t('dailyDay')}</th>
+            <th>{t('dailyModel')}</th>
+            <th>{t('dailyDelta', { k })}</th>
+            <th>{t('dailyTerrain')}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {history.days.map(r => {
+            if (!r.model) {
+              return (
+                <tr key={r.day}>
+                  <td>{day(r.day)}</td>
+                  <td colSpan={3} className="tp-reason">{t(`dailyReason_${r.reason}`)}</td>
+                </tr>
+              );
+            }
+            const d = r.compare?.find(c => c.days_older === k)?.delta;
+            const tone = d?.lo > 0 ? 'ok' : d?.hi < 0 ? 'bad' : undefined;
+            return (
+              <tr key={r.day}>
+                <td>{day(r.day)}</td>
+                <td>{r.model.score.toFixed(3)} ({r.groups})</td>
+                <td className={tone}>
+                  {d?.point == null ? '—' : signed(d.point)}
+                  {d?.lo != null && <span className="tp-ci">[{signed(d.lo)}, {signed(d.hi)}]</span>}
+                </td>
+                <td>{r.terrain?.score == null ? '—' : r.terrain.score.toFixed(3)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <div className="tp-hint">{t('dailyHint', { k })}</div>
+    </>
+  );
+}
+
 function Section({ title, error, children }) {
   const { t } = useLang();
   return (
@@ -56,6 +114,7 @@ export default function TrainingPanel({ onClose }) {
   const { t, locale } = useLang();
   const [data, setData] = useState(null);
   const [failed, setFailed] = useState(false);
+  const [history, setHistory] = useState(null);
 
   useEffect(() => {
     let alive = true;
@@ -64,6 +123,9 @@ export default function TrainingPanel({ onClose }) {
       .catch(() => { if (alive) setFailed(true); });
     load();
     const id = setInterval(load, POLL_MS);
+    // Once per open: the history gains one row a day. An older backend has no
+    // endpoint, and the section is then simply absent.
+    fetchTrainingHistory().then(h => { if (alive) setHistory(h); }).catch(() => {});
     return () => { alive = false; clearInterval(id); };
   }, []);
 
@@ -122,6 +184,12 @@ export default function TrainingPanel({ onClose }) {
           <Row label={t('benchmarkScore')}
                value={model.benchmark_score == null ? t('notComparable') : model.benchmark_score.toFixed(3)} />
         </Section>
+
+        {history?.enabled && (
+          <Section title={t('sectionDailyScore')}>
+            <DailyScore history={history} />
+          </Section>
+        )}
 
         <Section title={t('sectionBuffer')} error={buffer.error}>
           <Row label={t('samples')} value={t('samplesValue', { n: n(buffer.rows), p: n(buffer.positives) })} />

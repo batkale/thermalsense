@@ -353,3 +353,18 @@ LEDGER_METEO_CEILING  = int(os.getenv("LEDGER_METEO_CEILING", "8000"))
 # Grids are kept this long, except those of forecasts that came true, which are
 # the gallery.  The forecast record and its outcome are kept forever (~1 KB).
 LEDGER_GRID_KEEP_DAYS = int(os.getenv("LEDGER_GRID_KEEP_DAYS", "30"))
+
+# Daily score history (models/score_history.py): does the model get better as
+# the buffer grows?  The gate's benchmark score cannot say — each new day adds
+# held-out groups, so it is measured on a different set every day.  Instead the
+# serving model is copied every night just before 00:00 UTC, when it has seen
+# nothing of the coming day, and once that day is over it is scored on all of
+# it beside the copies from SCORE_COMPARE_DAYS earlier, paired on the same rows.
+ENABLE_SCORE_HISTORY    = os.getenv("ENABLE_SCORE_HISTORY", "1").lower() not in {"0", "false", "no"}
+SCORE_SNAPSHOT_DIR      = DATA_DIR / "models" / "daily"
+SCORE_HISTORY_PATH      = DATA_DIR / "data" / "score_history.jsonl"
+SCORE_COMPARE_DAYS      = [int(d) for d in
+                           os.getenv("SCORE_COMPARE_DAYS", "7,28").split(",") if d.strip()]
+# A copy is ~330 KB, so 35 days is ~12 MB — enough for the 28-day comparison
+# and a week of days the 03:00 job missed and catches up on.
+SCORE_SNAPSHOT_KEEP_DAYS = int(os.getenv("SCORE_SNAPSHOT_KEEP_DAYS", "35"))

@@ -233,6 +233,21 @@ const STRINGS = {
     pairedDelta:        'Fark (yeni − mevcut)',
     benchmarkScore:     'Benchmark skoru',
     notComparable:      'Karşılaştırılabilir değil',
+    sectionDailyScore:  'Günlük skor',
+    dailyDay:           'Gün',
+    dailyModel:         'Model (grup)',
+    dailyDelta:         'Δ {k} gün',
+    dailyTerrain:       'Arazi',
+    dailyHint:          'Her gün, o günden hiçbir şey görmemiş olan önceki gecenin modeliyle '
+                      + 'puanlanır. Günlerin zorluğu farklıdır; bu yüzden Δ sütununa bakın: aynı '
+                      + 'gün, {k} gün önceki modele karşı. Yeşil, aralığın tamamının sıfırın '
+                      + 'üstünde olduğunu gösterir.',
+    dailyNoCopy:        'Henüz model kopyası yok — ilki 23:55 UTC’de alınır.',
+    dailyWaiting:       '{day} için kopya alındı; skoru o gün bitince, 03:00 UTC’de gelir.',
+    dailyReason_no_rows:            'O güne ait örnek yok',
+    dailyReason_no_mixed_groups:    'Sıralanacak karışık grup yok',
+    dailyReason_seen_in_training:   'Model bu takvim gününü geçen yıldan görmüş',
+    dailyReason_no_snapshot:        'Model kopyası yok',
     sectionBuffer:      'Eğitim verisi',
     samples:            'Örnek',
     samplesValue:       '{n} ({p} pozitif)',
@@ -479,6 +494,21 @@ const STRINGS = {
     pairedDelta:        'Delta (new − current)',
     benchmarkScore:     'Benchmark score',
     notComparable:      'Not comparable',
+    sectionDailyScore:  'Daily score',
+    dailyDay:           'Day',
+    dailyModel:         'Model (groups)',
+    dailyDelta:         'Δ {k} days',
+    dailyTerrain:       'Terrain',
+    dailyHint:          'Each day is scored by the model as it stood the night before, which had '
+                      + 'seen none of it. Days differ in difficulty, so read the Δ column: the same '
+                      + 'day against the model from {k} days earlier. Green means its whole interval '
+                      + 'is above zero.',
+    dailyNoCopy:        'No model copy yet — the first is taken at 23:55 UTC.',
+    dailyWaiting:       'A copy is waiting for {day}; its score arrives after that day, at 03:00 UTC.',
+    dailyReason_no_rows:            'No samples that day',
+    dailyReason_no_mixed_groups:    'No mixed groups to rank',
+    dailyReason_seen_in_training:   'The model saw this calendar day last year',
+    dailyReason_no_snapshot:        'No model copy',
     sectionBuffer:      'Training data',
     samples:            'Samples',
     samplesValue:       '{n} ({p} positive)',

@@ -116,3 +116,16 @@ def _ledger_in_tmp(tmp_path, monkeypatch):
     main = sys.modules.get("main")
     if main is not None:
         monkeypatch.setattr(main, "LEDGER_DB_PATH", path, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _score_history_in_tmp(tmp_path, monkeypatch):
+    """And the daily model copies and the score history, which main binds at import."""
+    import config
+    snaps, hist = tmp_path / "daily", tmp_path / "score_history.jsonl"
+    monkeypatch.setattr(config, "SCORE_SNAPSHOT_DIR", snaps)
+    monkeypatch.setattr(config, "SCORE_HISTORY_PATH", hist)
+    main = sys.modules.get("main")
+    if main is not None:
+        monkeypatch.setattr(main, "SCORE_SNAPSHOT_DIR", snaps, raising=False)
+        monkeypatch.setattr(main, "SCORE_HISTORY_PATH", hist, raising=False)
