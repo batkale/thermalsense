@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useLang } from '../i18n/LanguageContext.jsx';
 import { GliderIcon } from './Icons.jsx';
 import { CLOUD_LOW_TOP_M, CLOUD_HIGH_TOP_M } from '../config.js';
+import { COLOURS } from './CloudLayer.jsx';
 
 /**
  * What the cloud layer is showing: the frame's time and age, a key to the three
@@ -44,37 +45,55 @@ function CloudCaption({ clouds, forecastH }) {
 }
 
 /**
- * The three cloud marks in miniature, in the layer's own colours (CloudLayer.jsx).
- * Like the map's other legend swatches they key marks drawn over satellite
- * imagery, so they are not themed either.
+ * The three cloud marks in miniature, in the layer's own colours and light
+ * (CloudLayer.jsx): lit from the upper left, grey on the far side. Like the
+ * map's other legend swatches they key marks drawn over satellite imagery, so
+ * they are not themed either. The map draws its clouds with no outline; here
+ * a faint one stays, or a white heap vanishes on the light sidebar.
  */
+const HEAP = [[6.5, 7.2, 3.6], [11.5, 5.6, 4.4], [16, 7.4, 3.4]];
+
 function CloudGlyph({ kind }) {
-  const rim = 'rgba(8,18,27,0.55)';
+  const rim = 'rgba(8,18,27,0.3)';
+  const id = `cloud-glyph-${kind}`;
   return (
     <svg className="cloud-glyph" viewBox="0 0 22 12" width="22" height="12" aria-hidden="true">
       {kind === 'low' && (
         <g>
-          <circle cx="6.5" cy="7.2" r="3.6" fill="#b4c6d6" stroke={rim} strokeWidth="1.1" />
-          <circle cx="11.5" cy="5.6" r="4.4" fill="#b4c6d6" stroke={rim} strokeWidth="1.1" />
-          <circle cx="16" cy="7.4" r="3.4" fill="#b4c6d6" stroke={rim} strokeWidth="1.1" />
-          <circle cx="6.5" cy="7.2" r="3" fill="#b4c6d6" />
-          <circle cx="11.5" cy="5.6" r="3.8" fill="#b4c6d6" />
-          <circle cx="16" cy="7.4" r="2.8" fill="#b4c6d6" />
-          <circle cx="6" cy="6.5" r="2.7" fill="#f2f7fb" />
-          <circle cx="11" cy="4.9" r="3.5" fill="#f2f7fb" />
-          <circle cx="15.5" cy="6.7" r="2.5" fill="#f2f7fb" />
+          <defs>
+            <linearGradient id={id} gradientUnits="userSpaceOnUse" x1="4" y1="2" x2="17" y2="12">
+              <stop offset="0" stopColor={COLOURS.lit} />
+              <stop offset="0.45" stopColor={COLOURS.body} />
+              <stop offset="0.8" stopColor={COLOURS.shade} />
+              <stop offset="1" stopColor={COLOURS.deep} />
+            </linearGradient>
+          </defs>
+          {/* Stroked under the fills, so only the outer edge keeps a line. */}
+          {HEAP.map(([cx, cy, r]) => (
+            <circle key={`r${cx}`} cx={cx} cy={cy} r={r} fill="none" stroke={rim} strokeWidth="1" />
+          ))}
+          {HEAP.map(([cx, cy, r]) => (
+            <circle key={`f${cx}`} cx={cx} cy={cy} r={r} fill={`url(#${id})`} />
+          ))}
         </g>
       )}
       {kind === 'mid' && (
-        <ellipse cx="11" cy="6.5" rx="9.5" ry="3.6" fill="#d6e2ec" fillOpacity="0.85"
-                 stroke="rgba(8,18,27,0.35)" strokeWidth="1" />
+        <g>
+          <defs>
+            <filter id={id} x="-20%" y="-40%" width="140%" height="180%">
+              <feGaussianBlur stdDeviation="0.5" />
+            </filter>
+          </defs>
+          <ellipse cx="11" cy="6.5" rx="9.5" ry="3.6" fill={COLOURS.sheet} fillOpacity="0.9"
+                   stroke={rim} strokeWidth="1" filter={`url(#${id})`} />
+        </g>
       )}
       {kind === 'high' && (
         <g strokeLinecap="round" fill="none">
-          <path d="M2 8 q 6 -4 12 -5" stroke={rim} strokeWidth="2.8" />
-          <path d="M8 10.5 q 6 -4 12 -5" stroke={rim} strokeWidth="2.8" />
-          <path d="M2 8 q 6 -4 12 -5" stroke="#ffffff" strokeWidth="1.4" />
-          <path d="M8 10.5 q 6 -4 12 -5" stroke="#ffffff" strokeWidth="1.4" />
+          <path d="M2 8 q 6 -4 12 -5" stroke={rim} strokeWidth="2.4" />
+          <path d="M8 10.5 q 6 -4 12 -5" stroke={rim} strokeWidth="2.4" />
+          <path d="M2 8 q 6 -4 12 -5" stroke={COLOURS.fibre} strokeWidth="1.2" />
+          <path d="M8 10.5 q 6 -4 12 -5" stroke={COLOURS.fibre} strokeWidth="1.2" />
         </g>
       )}
     </svg>
