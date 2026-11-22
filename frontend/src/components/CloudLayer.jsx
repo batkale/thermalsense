@@ -18,16 +18,21 @@ import { LAYER_BUILT } from './CompareLayer.jsx';
 // and a cloud-top height. From those the layer draws its own clouds on a
 // lattice anchored to the map:
 //
-//   low tops   (< CLOUD_LOW_TOP_M)   puffs, lit on top, shaded underneath,
-//                                    casting a soft shadow. Low is all the
+//   low tops   (< CLOUD_LOW_TOP_M)   heaped cloud: a dome and smaller turrets
+//                                    per node, each a soft shaded lobe, with a
+//                                    soft shadow on the ground. Low is all the
 //                                    products say: cumulus, stratocumulus and
 //                                    fog look alike to them
-//   mid tops                         a flat translucent layer
-//   high tops  (>= CLOUD_HIGH_TOP_M) a thin veil with cirrus streaks, on top
+//   mid tops                         a smooth translucent sheet, faintly
+//                                    dappled, with a fainter, longer shadow
+//   high tops  (>= CLOUD_HIGH_TOP_M) a thin veil with tapering cirrus fibres
 //
-// Drawn the way the map draws its own marks — flat light shapes with a thin
-// dark rim, in the app's ice-white and navy — and, like them, not themed: the
-// map is satellite imagery in both modes (see the head of index.css).
+// Seen from above the way the base imagery is, and lit the way map relief is
+// conventionally lit, from the north-west: bright up and to the left, a
+// blue-grey far side, shadows down and to the right. No outline — edges are
+// feathered, so a cloud sits in the photograph rather than on it. Muted, not
+// paper-white, so a deck does not outshine the imagery around it. Not themed:
+// the map is satellite imagery in both modes (see the head of index.css).
 //
 // Observed, never forecast: the frame is ~20-30 min old when it arrives and
 // does not move with the forecast slider; the sidebar says so. It belongs to
@@ -41,17 +46,18 @@ const REQUEST_DEBOUNCE_MS = 250;
 // 30-megapixel canvas for a layer of soft shapes.
 const MAX_RENDER_PIXELS = 6_000_000;
 
-// The app's ice-white (--text-title) for lit cloud, a blue-grey underneath,
-// and its navy (--bg-app) for rims and ground shadow.
-const COLOURS = {
-  body:     '#f2f7fb',
-  shade:    '#b4c6d6',
-  rim:      'rgba(8, 18, 27, 0.55)',
-  layer:    '#d6e2ec',
-  layerRim: 'rgba(8, 18, 27, 0.35)',
-  veil:     '#e9f1f8',
-  streak:   '#ffffff',
-  shadow:   '#08121b',
+// Cloud runs from near-white where the sun meets it to a cool grey on its far
+// side — only just blue, or the heaps read as cotton wool; the ground shadow
+// is the app's navy (--bg-app). InfoPanel's key draws its glyphs from these.
+export const COLOURS = {
+  lit:    '#f7f9fb',
+  body:   '#e7ecf0',
+  shade:  '#c2ccd5',
+  deep:   '#8e9ba8',
+  sheet:  '#d9e0e6',
+  veil:   '#eef2f6',
+  fibre:  '#f7f9fb',
+  shadow: '#08121b',
 };
 
 // ---- frame time -------------------------------------------------------------
@@ -199,6 +205,70 @@ function sampleTop(data, fx, fy) {
   return data.top[yi * data.w + xi];
 }
 
+// Two sprites, drawn once and stamped thousands of times: far cheaper than a
+// gradient per shape, and they need no canvas filter, so the shading survives
+// in a browser without one.
+let SPRITES = null;
+function sprites() {
+  if (SPRITES) return SPRITES;
+  const R = 64;
+  const blank = () => {
+    const c = document.createElement('canvas');
+    c.width = c.height = 2 * R;
+    return c;
+  };
+
+  // A turret seen from above: lit across from the north-west, grey on the
+  // far side, a soft highlight where it bulges, the edge feathered. A shading
+  // that darkened every edge would turn each lobe into a ball; this one
+  // leaves the sunward edge bright. Overlapping, the far side of one lobe
+  // against the lit side of the next is what draws the folds of a heap.
+  const lobe = blank();
+  const l = lobe.getContext('2d');
+  const tone = l.createLinearGradient(R * 0.25, R * 0.2, R * 1.75, R * 1.8);
+  tone.addColorStop(0, COLOURS.lit);
+  tone.addColorStop(0.45, COLOURS.body);
+  tone.addColorStop(0.78, COLOURS.shade);
+  tone.addColorStop(1, COLOURS.deep);
+  l.fillStyle = tone;
+  l.fillRect(0, 0, 2 * R, 2 * R);
+  const bulge = l.createRadialGradient(R * 0.7, R * 0.66, 0, R * 0.7, R * 0.66, R * 0.6);
+  bulge.addColorStop(0, 'rgba(255,255,255,0.7)');
+  bulge.addColorStop(1, 'rgba(255,255,255,0)');
+  l.fillStyle = bulge;
+  l.fillRect(0, 0, 2 * R, 2 * R);
+  l.globalCompositeOperation = 'destination-in';
+  const edge = l.createRadialGradient(R, R, 0, R, R, R);
+  edge.addColorStop(0, '#000');
+  edge.addColorStop(0.66, '#000');
+  edge.addColorStop(1, 'rgba(0,0,0,0)');
+  l.fillStyle = edge;
+  l.fillRect(0, 0, 2 * R, 2 * R);
+
+  // A soft white disc, for sheets and veils: tinted after it is laid down.
+  const disc = blank();
+  const d = disc.getContext('2d');
+  const soft = d.createRadialGradient(R, R, 0, R, R, R);
+  soft.addColorStop(0, '#fff');
+  soft.addColorStop(0.45, '#fff');
+  soft.addColorStop(1, 'rgba(255,255,255,0)');
+  d.fillStyle = soft;
+  d.fillRect(0, 0, 2 * R, 2 * R);
+
+  SPRITES = { lobe, disc };
+  return SPRITES;
+}
+
+/** A tapering fibre from (x0, y0) to (x1, y1): pointed ends, `w` thick mid-way. */
+function fibre(path, x0, y0, x1, y1, bow, w) {
+  const len = Math.hypot(x1 - x0, y1 - y0) || 1;
+  const nx = -(y1 - y0) / len, ny = (x1 - x0) / len;
+  const cx = (x0 + x1) / 2 + nx * bow, cy = (y0 + y1) / 2 + ny * bow;
+  path.moveTo(x0, y0);
+  path.quadraticCurveTo(cx + nx * w, cy + ny * w, x1, y1);
+  path.quadraticCurveTo(cx - nx * w, cy - ny * w, x0, y0);
+}
+
 /**
  * Draw the clouds for one view into a fresh canvas.
  *
@@ -212,8 +282,12 @@ function illustrate(map, data, { width, height, origin, zoom, dpr }) {
   const nw = map.project(L.latLng(data.nw), zoom);
   const se = map.project(L.latLng(data.se), zoom);
   const sx = data.w / (se.x - nw.x), sy = data.h / (se.y - nw.y);
+  const { lobe, disc } = sprites();
 
-  const low = new Path2D(), mid = new Path2D(), high = new Path2D(), streaks = new Path2D();
+  const lobes = [], lowShadow = new Path2D();
+  const sheets = [], dapples = [], midShadow = new Path2D();
+  const veils = [], fibres = new Path2D();
+  const VEIL_ANG = -0.35;
   const j0 = Math.floor((origin.y - 2 * S) / rowH), j1 = Math.ceil((origin.y + height + 2 * S) / rowH);
   const i0 = Math.floor((origin.x - 2 * S) / S), i1 = Math.ceil((origin.x + width + 2 * S) / S);
   for (let j = j0; j <= j1; j++) {
@@ -230,28 +304,50 @@ function illustrate(map, data, { width, height, origin, zoom, dpr }) {
       const r = S * (0.45 + 0.4 * cover) * (0.85 + 0.3 * a);
       const top = sampleTop(data, fx, fy);
       if (Number.isNaN(top) || top < CLOUD_LOW_TOP_M) {
-        // A dome and two lower lobes, so a lone puff is still a cloud and not
-        // a ball; side by side, the lobes merge into a scalloped edge.
-        const flip = c > 0.5 ? 1 : -1;
-        for (const [dx, dy, k] of [[0, 0, 1], [-0.78 * flip, 0.3, 0.68], [0.82 * flip, 0.34, 0.6]]) {
-          const px = x + dx * r, py = y + dy * r, pr = r * k;
-          low.moveTo(px + pr, py);
-          low.arc(px, py, pr, 0, 2 * Math.PI);
+        // A dome and six smaller turrets round it, each at its own stable
+        // angle and size: alone it reads as a heap, and side by side the
+        // turrets knit into a lumpy deck rather than a row of balls.
+        lobes.push([x, y, r]);
+        lowShadow.moveTo(x + r, y);
+        lowShadow.arc(x, y, r, 0, 2 * Math.PI);
+        for (let k = 0; k < 6; k++) {
+          const ang = 2 * Math.PI * (k / 6 + 0.16 * hash(i, j, 10 + k));
+          const dist = r * (0.5 + 0.45 * hash(i, j, 20 + k));
+          const pr = r * (0.28 + 0.42 * hash(i, j, 30 + k));
+          const px = x + Math.cos(ang) * dist, py = y + Math.sin(ang) * dist * 0.85;
+          lobes.push([px, py, pr]);
+          lowShadow.moveTo(px + pr, py);
+          lowShadow.arc(px, py, pr, 0, 2 * Math.PI);
         }
       } else if (top < CLOUD_HIGH_TOP_M) {
-        mid.moveTo(x + r * 1.4, y);
-        mid.ellipse(x, y, r * 1.4, r * 0.75, 0, 0, 2 * Math.PI);
+        sheets.push([x, y, r * 1.6, r * 0.95]);
+        midShadow.moveTo(x + r * 1.3, y);
+        midShadow.ellipse(x, y, r * 1.3, r * 0.75, 0, 0, 2 * Math.PI);
+        // A faint dapple of small rolls, as altocumulus has from above.
+        for (let k = 0; k < 2; k++) {
+          dapples.push([
+            x + (hash(i, j, 40 + k) - 0.5) * 1.6 * r,
+            y + (hash(i, j, 50 + k) - 0.5) * 0.9 * r,
+            r * (0.3 + 0.2 * hash(i, j, 60 + k)),
+          ]);
+        }
       } else {
-        high.moveTo(x + r * 1.5 * Math.cos(-0.35), y + r * 1.5 * Math.sin(-0.35));
-        high.ellipse(x, y, r * 1.5, r * 0.7, -0.35, 0, 2 * Math.PI);
-        if (b > 0.35) {
-          // A cirrus streak: a shallow arc along the veil's grain.
-          const len = S * (1.2 + 0.8 * cover);
-          const ang = -0.35 + (c - 0.5) * 0.5;
-          const ux = Math.cos(ang) * len / 2, uy = Math.sin(ang) * len / 2;
-          const bow = (a - 0.5) * 0.5 * len;
-          streaks.moveTo(x - ux, y - uy);
-          streaks.quadraticCurveTo(x - uy * bow / len * 2, y + ux * bow / len * 2, x + ux, y + uy);
+        veils.push([x, y, r * 1.8, r * 0.8]);
+        if (b > 0.5) {
+          // Cirrus: a fibre or two along the veil's grain, long, thin,
+          // pointed at both ends and never quite parallel. Sparse on purpose:
+          // any denser and it reads as hatching.
+          const n = c > 0.7 ? 2 : 1;
+          for (let k = 0; k < n; k++) {
+            const len = S * (1.6 + 1.2 * cover) * (0.7 + 0.6 * hash(i, j, 70 + k));
+            const ang = VEIL_ANG + (hash(i, j, 80 + k) - 0.5) * 0.3;
+            const off = (k - (n - 1) / 2) * S * 0.3 + (hash(i, j, 90 + k) - 0.5) * S * 0.2;
+            const ox = x - Math.sin(VEIL_ANG) * off, oy = y + Math.cos(VEIL_ANG) * off;
+            const ux = Math.cos(ang) * len / 2, uy = Math.sin(ang) * len / 2;
+            fibre(fibres, ox - ux, oy - uy, ox + ux, oy + uy,
+                  (hash(i, j, 100 + k) - 0.5) * 0.3 * len,
+                  0.5 + 0.8 * hash(i, j, 110 + k));
+          }
         }
       }
     }
@@ -265,64 +361,93 @@ function illustrate(map, data, { width, height, origin, zoom, dpr }) {
     ctx.scale(dpr, dpr);
     return ctx;
   };
-  const o = make(), t = make(), bd = make();
-  const put = (ctx, alpha) => {
+  const o = make(), t = make(), u = make();
+  const clear = (ctx = t) => {
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    ctx.restore();
+  };
+  const put = (alpha, { blur = 0, dx = 0, dy = 0 } = {}) => {
+    o.save();
+    if (blur) o.filter = `blur(${blur}px)`;
     o.globalAlpha = alpha;
-    o.drawImage(ctx.canvas, 0, 0, ctx.canvas.width, ctx.canvas.height, 0, 0, width, height);
-    o.globalAlpha = 1;
+    o.drawImage(t.canvas, 0, 0, t.canvas.width, t.canvas.height, dx, dy, width, height);
+    o.restore();
+  };
+  const tint = (colour) => {
+    t.save();
+    t.globalCompositeOperation = 'source-in';
+    t.fillStyle = colour;
+    t.fillRect(0, 0, width, height);
+    t.restore();
+  };
+  const stamp = (img, x, y, rx, ry, ang = 0) => {
+    if (ang) {
+      t.save();
+      t.translate(x, y);
+      t.rotate(ang);
+      t.drawImage(img, -rx, -ry, 2 * rx, 2 * ry);
+      t.restore();
+    } else {
+      t.drawImage(img, x - rx, y - ry, 2 * rx, 2 * ry);
+    }
   };
 
-  // Shadows on the ground, down and to the right of their cloud: soft, so
-  // they read as shade rather than as a second, darker cloud.
+  // Shadows on the ground, down and to the right of their cloud. The higher
+  // the cloud, the further away and the fainter its shadow. Cirrus casts
+  // next to none.
   t.fillStyle = COLOURS.shadow;
-  t.fill(low);
-  t.fill(mid);
-  o.save();
-  o.filter = `blur(${Math.round(S * 0.3)}px)`;
-  o.globalAlpha = 0.3;
-  o.drawImage(t.canvas, 0, 0, t.canvas.width, t.canvas.height, S * 0.35, S * 0.5, width, height);
-  o.restore();
+  t.fill(lowShadow);
+  put(0.38, { blur: Math.round(S * 0.3), dx: S * 0.42, dy: S * 0.58 });
+  clear();
+  t.fill(midShadow);
+  put(0.14, { blur: Math.round(S * 0.5), dx: S * 0.6, dy: S * 0.85 });
 
-  // Cumulus. The body is the union of the puffs in the shade colour, then the
-  // same puffs nudged up and to the left in the lit colour, kept only where
-  // they cover the first: a lit top and a shaded rim underneath. Under it, the
-  // puffs stroked twice as wide as the rim should be — the body covers the
-  // inner half and every arc inside the union, leaving one outline round the
-  // outside, like the dark edge on the map's other marks.
-  bd.fillStyle = COLOURS.shade;
-  bd.fill(low);
-  bd.save();
-  bd.globalCompositeOperation = 'source-atop';
-  bd.translate(-S * 0.14, -S * 0.2);
-  bd.fillStyle = COLOURS.body;
-  bd.fill(low);
-  bd.restore();
-  t.clearRect(0, 0, width, height);
-  t.lineWidth = 2.4;
-  t.strokeStyle = COLOURS.rim;
-  t.stroke(low);
-  t.drawImage(bd.canvas, 0, 0, bd.canvas.width, bd.canvas.height, 0, 0, width, height);
-  put(t, 0.95);
+  // Heaped cloud, smallest lobes first, so every node's dome lies over its
+  // own turrets and its neighbours'.
+  clear();
+  lobes.sort((p, q) => p[2] - q[2]);
+  for (const [x, y, r] of lobes) stamp(lobe, x, y, r * 1.25, r * 1.25);
+  // The heap's own far side: the band along its south-east edge — the heap
+  // less itself moved north-west — blurred into a gradient and laid only on
+  // the cloud. Each lobe is shaded on its own; this shades the whole heap.
+  u.fillStyle = COLOURS.deep;
+  u.fill(lowShadow);
+  u.save();
+  u.globalCompositeOperation = 'destination-out';
+  u.translate(-S * 0.3, -S * 0.36);
+  u.fill(lowShadow);
+  u.restore();
+  t.save();
+  t.globalCompositeOperation = 'source-atop';
+  t.filter = `blur(${Math.round(S * 0.22)}px)`;
+  t.globalAlpha = 0.42;
+  t.drawImage(u.canvas, 0, 0, u.canvas.width, u.canvas.height, 0, 0, width, height);
+  t.restore();
+  put(0.92);
 
-  // Layer cloud, above the cumulus: flat and translucent, with a fainter rim.
-  t.clearRect(0, 0, width, height);
-  t.lineWidth = 2;
-  t.strokeStyle = COLOURS.layerRim;
-  t.stroke(mid);
-  t.fillStyle = COLOURS.layer;
-  t.fill(mid);
-  put(t, 0.62);
+  // Layer cloud, above the heaps: one smooth sheet — opaque inside the
+  // scratch canvas so overlaps do not band — then laid down translucent.
+  clear();
+  for (const [x, y, rx, ry] of sheets) stamp(disc, x, y, rx, ry);
+  tint(COLOURS.sheet);
+  t.save();
+  t.globalCompositeOperation = 'source-atop';
+  t.globalAlpha = 0.4;
+  for (const [x, y, r] of dapples) stamp(lobe, x, y, r * 1.25, r * 1.25);
+  t.restore();
+  put(0.58);
 
-  // High cloud last, over everything below it: a thin veil and its streaks.
-  o.globalAlpha = 0.32;
-  o.fillStyle = COLOURS.veil;
-  o.fill(high);
-  o.globalAlpha = 0.75;
-  o.strokeStyle = COLOURS.streak;
-  o.lineWidth = 1.6;
-  o.lineCap = 'round';
-  o.stroke(streaks);
-  o.globalAlpha = 1;
+  // High cloud last, over everything below it: a thin veil and its fibres.
+  clear();
+  for (const [x, y, rx, ry] of veils) stamp(disc, x, y, rx, ry, VEIL_ANG);
+  tint(COLOURS.veil);
+  put(0.24);
+  clear();
+  t.fillStyle = COLOURS.fibre;
+  t.fill(fibres);
+  put(0.5, { blur: 0.9 });
   return o.canvas;
 }
 

@@ -964,11 +964,19 @@ legend). MSG at 0°, 15 min, ~3 km at nadir, infrared, so it works at night,
 which GeoColour did not. Its disc ends near ±75° longitude: no clouds are
 drawn over the Americas, which means unknown, not clear. The illustration is
 a lattice of `CLOUD_PUFF_PX` anchored in world pixels (so it does not shimmer
-on a pan): each cloudy node becomes a three-lobed puff for low tops, a flat
-translucent ellipse for mid tops, and a veil with cirrus streaks for high
-tops, with a soft navy ground shadow — flat light shapes with a thin dark rim,
-like the map's other marks, and like them not themed. Observed, never
-forecast; the sidebar says so when the slider is ahead. Traps:
+on a pan): each cloudy node becomes a heap (a dome and six turrets) for low
+tops, a soft translucent sheet with a faint dapple for mid tops, and a veil
+with tapering cirrus fibres for high tops. Since 22 Nov 2026 they are drawn
+as seen from above and lit from the north-west, the hillshade convention:
+shaded lobe sprites, the heap's south-east edge darkened as a whole, feathered
+edges and no outline, and a soft navy ground shadow that falls further and
+fainter the higher the cloud. The first version was flat shapes with a thin
+dark rim, like the map's other marks; on satellite imagery it read as
+stickers. Colours are muted rather than paper-white so a deck does not
+outshine the imagery, and are not themed. The sidebar key draws from the same
+`COLOURS` and keeps a faint rim, or a white heap vanishes on the light
+sidebar. Observed, never forecast; the sidebar says so when the slider is
+ahead. Traps:
 - **Always send `time=`.** Without it the server answers "latest" with
   `max-age=604800`, and a test request came back a sunlit scene during the
   Turkish night — a cached render, not the current frame. The newest time is

@@ -124,8 +124,9 @@ export const CLOUD_NATIVE_M = 3000;
 // redraws from data already in hand instead of leaving a blank edge.
 export const CLOUD_MARGIN = 0.3;
 // Spacing of the illustration's lattice, in screen pixels. Each node that is
-// cloudy becomes one puff; overlapping puffs make the scalloped outline.
-export const CLOUD_PUFF_PX = 18;
+// cloudy becomes one heap; overlapping heaps make the lumpy outline. 18 read
+// as a field of popcorn once the heaps were shaded; 15 reads as texture.
+export const CLOUD_PUFF_PX = 15;
 // Cloud-top bands, metres above sea level: below LOW the cloud is drawn as
 // cumulus puffs, from HIGH up as a cirrus veil with streaks, between as a
 // flat layer. A thick high top (a storm) is drawn as a veil too — the two
