@@ -29,8 +29,20 @@ services:
     # sat at ~450 MB anon at rest and peaked at 593 MB during the fill-in. The
     # DB pages the app reads are charged to this cgroup too, so the cap is also
     # how much of the DB it may keep cached.
-    mem_limit: 1536m
-    memswap_limit: 1536m
+    #
+    # 1536m -> 2560m on 23 Nov 2026. At 1536m the cgroup sat at its cap (it
+    # had hit it 40,238 times in 24 h) with 758 MB anon, leaving ~690 MB for a
+    # 5.0 GB DB: of the 7.6 GB it read from disk that day, 6.2 GB were
+    # refaults — pages it had cached, dropped for room, and read again. The
+    # host meanwhile had 2.4 GB available. The same change spends ~450 MB more
+    # anon on terrain caches (DEM_RAW_CACHE_MB, TERRAIN_HIRES_CACHE), so the
+    # budget at the new cap is ~1.2 GB anon + ~1.35 GB of DB cache. Worst case
+    # for the host — the app holding all 2.5 GB as anon, which only a leak
+    # does — leaves 3,905 - 2,560 - ~40 (Caddy) = ~1.3 GB for the host's own
+    # ~750 MB and the image build, plus its 2 GB of swap. Page cache charged
+    # here is still reclaimed under host pressure; only anon is pinned.
+    mem_limit: 2560m
+    memswap_limit: 2560m
     # Deliberately not published to the host: all traffic goes through Caddy,
     # so there is no plaintext path that bypasses TLS. --forwarded-allow-ips in
     # the Dockerfile depends on this staying `expose` and never becoming `ports`.

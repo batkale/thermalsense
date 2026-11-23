@@ -100,6 +100,27 @@ async def test_status_survives_a_broken_section(monkeypatch):
     assert "rows" in out["buffer"]
     assert "requests" in out["terrain_api"]
     assert isinstance(out["disk_free_gb"], float)
+    # Linux reports numbers, anywhere else an error inside the section.
+    assert isinstance(out["memory_mb"], dict) and out["memory_mb"]
+
+
+def test_memory_stats_reads_the_process_and_its_cgroup(tmp_path):
+    proc = tmp_path / "status"
+    proc.write_text("Name:\tuvicorn\nVmHWM:\t  938292 kB\nVmRSS:\t  876820 kB\n"
+                    "RssAnon:\t  775828 kB\nRssFile:\t  100992 kB\n")
+    cg = tmp_path / "cg"
+    cg.mkdir()
+    (cg / "memory.current").write_text("1613701120\n")
+    (cg / "memory.max").write_text("1610612736\n")
+    (cg / "memory.stat").write_text("anon 794447872\nfile 724434944\n"
+                                    "workingset_refault_file 1628409\n")
+    (cg / "memory.events").write_text("low 0\nhigh 0\nmax 40238\noom 0\noom_kill 0\n")
+    out = main._memory_stats(str(proc), cg)
+    assert out["vmrss"] == 856 and out["vmhwm"] == 916 and out["rssanon"] == 758
+    assert out["cgroup"] == {"current": 1539, "max": 1536, "anon": 758, "file": 691,
+                             "refault_file": 1628409, "at_max": 40238, "oom_kill": 0}
+    (cg / "memory.max").write_text("max\n")
+    assert main._memory_stats(str(proc), cg)["cgroup"]["max"] is None
 
 
 # ---------------------------------------------------------------------------
