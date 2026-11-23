@@ -11,7 +11,7 @@ traffic. The model trains itself online from the Open Glider Network (OGN) APRS
 feed — every circling, climbing glider is a positive label.
 
 Live deployment: `https://thermalsense-tr.polandcentral.cloudapp.azure.com`
-(Azure VM, 2 vCPU / 3.9 GB RAM, app container capped at 2.5 GB — see
+(Azure VM, 2 vCPU / 3.9 GB RAM, app container capped at 3.5 GB — see
 [DEPLOY.md](DEPLOY.md); the limits below were first set for an 896 MB box).
 **Merging to `main` deploys it:** cron on the VM runs
 [deploy/auto-deploy.sh](deploy/auto-deploy.sh) every five minutes, with a
@@ -1003,9 +1003,9 @@ The deployment target is 2 vCPU / 896 MB, and most odd-looking choices come from
   `min(32, cpu_count+4)` threads, each spawning its own OpenMP pool.
 - `XGB_FIT_THREADS=1` (the background job yields cores), `XGB_PREDICT_THREADS`
   takes all of them.
-- `mem_limit: 2560m` on the app service — a blast radius, not a target. It
-  was 700m from the 896 MB box until 19 Nov 2026, then 1536m until 23 Nov;
-  see the note at the end of this section.
+- `mem_limit: 3584m` on the app service. It was 700m from the 896 MB box
+  until 19 Nov 2026, then 1536m until 23 Nov; see the note at the end of this
+  section. At 3584m it is no longer a blast radius for the host — see there.
 - **Retention is now eviction, not deletion.** `_archive_job` writes every
   completed day to `ARCHIVE_DIR` as Parquet before `_purge_job` deletes it, and
   `purge_old_beacons` refuses to delete past the unbroken archived prefix — an
@@ -1076,7 +1076,13 @@ The deployment target is 2 vCPU / 896 MB, and most odd-looking choices come from
   the same blocks decoded would need 1 GB; `TERRAIN_HIRES_CACHE` 16 → 64
   rebuilds 34–43% fewer grids (128 would add 4–9% for 83 MB more).
   `TERRAIN_GRID_CACHE` stays 64: a miss reads a 1 KB file. `mem_limit` went
-  to 2560m to hold both: ~1.2 GB anon plus ~1.35 GB of DB cache. Check it
+  to **3584m** by the owner's decision (2560m was proposed): ~1.2 GB anon,
+  the rest DB cache. **That cap no longer protects the host:** it leaves
+  ~280 MB against the host's own ~750 MB, so anon growth — a leak, a runaway
+  job — would push sshd and the Azure agent into swap before the cgroup's
+  OOM killer fires, which is the 18 Sep outage. Page cache alone cannot do
+  that; the kernel reclaims it. If `memory_mb.cgroup.anon` climbs past
+  ~2 GB, go back to 2560m (host keeps ~1.3 GB). Check it
   held with `/training/status` → `terrain.copernicus.blocks` (downloads
   today), `terrain.cached.dem` and `memory_mb` (process RSS, cgroup
   anon/file, refaults, times at max), which exist for exactly this — the
