@@ -61,6 +61,11 @@ TERRAIN_POINT_CACHE = int(os.getenv("TERRAIN_POINT_CACHE", "200000"))
 # rebuilt from the Copernicus blocks (dem_client's LRU) in well under a second,
 # and keeping one on disk per centre would be ~2 GB a day at ~2,900 new centres.
 TERRAIN_HIRES_CACHE = int(os.getenv("TERRAIN_HIRES_CACHE", "16"))
+# Relief grids for the map's 3D view (terrain_client.fetch_relief_grid): the
+# scan patch read from Copernicus every RELIEF_STEP degrees, 101 x 101 float32
+# = 40 KB each, so 32 is ~1.3 MB.  Display only: nothing trains on them.
+RELIEF_STEP           = 0.001
+TERRAIN_RELIEF_CACHE  = int(os.getenv("TERRAIN_RELIEF_CACHE", "32"))
 # How long one retrain cycle may spend filling the full-resolution columns into
 # buffer rows collected before they existed.  Fits wait until it is done, so the
 # first wider model is judged on complete rows; ~33k rows take a few cycles.

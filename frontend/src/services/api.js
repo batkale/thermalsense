@@ -14,6 +14,20 @@ export async function fetchPrediction(lat, lon, forecastH = 0, alt = null) {
   return res.json(); // { heatmap: float[], thermal_base: int, cape: float }
 }
 
+/**
+ * The scan patch's real relief for the 3D view: ~100 m Copernicus samples over
+ * the same snapped centre and radius as the heatmap, south-west first.
+ * { grid_lat, grid_lon, radius, rows, cols, elevation: int[], source, filled }.
+ * Throws on 503 (no terrain) and on a backend too old to have the endpoint;
+ * the caller then draws the 121 samples /predict sent.
+ */
+export async function fetchRelief(lat, lon, signal) {
+  const params = new URLSearchParams({ lat, lon });
+  const res = await fetch(`${API_BASE}/terrain/relief?${params}`, { signal });
+  if (!res.ok) throw new Error(`Relief failed: ${res.statusText}`);
+  return res.json();
+}
+
 export async function fetchElevation(lat, lon) {
   const params = new URLSearchParams({ lat, lon });
   const res = await fetch(`${API_BASE}/elevation?${params}`);

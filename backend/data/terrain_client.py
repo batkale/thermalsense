@@ -8,7 +8,8 @@ import numpy as np
 from pathlib import Path
 from scipy.ndimage import zoom as ndimage_zoom
 from config import (SRTM_BASE, GRID_RES, TERRAIN_RES, GRID_RADIUS, DATA_DIR, TERRAIN_SOURCE,
-                    TERRAIN_GRID_CACHE, TERRAIN_POINT_CACHE, TERRAIN_HIRES_CACHE)
+                    TERRAIN_GRID_CACHE, TERRAIN_POINT_CACHE, TERRAIN_HIRES_CACHE,
+                    RELIEF_STEP, TERRAIN_RELIEF_CACHE)
 from data import dem_client
 
 log = logging.getLogger(__name__)
@@ -41,6 +42,10 @@ _grid_cache: "OrderedDict[tuple[float, float, float], np.ndarray]" = OrderedDict
 # Full-resolution terrain columns per grid, same key.  Bounded by
 # TERRAIN_HIRES_CACHE and memory-only — see config.py.
 _hires_cache: "OrderedDict[tuple[float, float, float], np.ndarray]" = OrderedDict()
+
+# Relief grids for the 3D view, same centre key plus the step.  Bounded by
+# TERRAIN_RELIEF_CACHE, memory only: a miss re-reads blocks dem_client holds.
+_relief_cache: "OrderedDict[tuple, tuple[np.ndarray, str, int]]" = OrderedDict()
 
 
 def _recall(cache: dict, key):
@@ -361,7 +366,8 @@ def source_usage() -> dict:
             "cached": {"grids": len(_grid_cache), "grids_max": TERRAIN_GRID_CACHE,
                        "points": len(_elev_cache), "points_max": TERRAIN_POINT_CACHE,
                        "points_unsaved": len(_point_unsaved),
-                       "hires_grids": len(_hires_cache), "hires_grids_max": TERRAIN_HIRES_CACHE}}
+                       "hires_grids": len(_hires_cache), "hires_grids_max": TERRAIN_HIRES_CACHE,
+                       "relief_grids": len(_relief_cache), "relief_grids_max": TERRAIN_RELIEF_CACHE}}
 
 
 async def _get_with_retry(client: httpx.AsyncClient, url: str, max_retries: int = 3) -> httpx.Response:
@@ -686,4 +692,66 @@ async def fetch_hires_grid(lat: float, lon: float, radius: float = GRID_RADIUS,
         log.warning(f"[terrain] full-resolution read failed ({exc}) — columns left unknown")
         return np.full((shape[0] * shape[1], len(ht.COLUMNS)), np.nan, dtype=np.float32)
     _remember(_hires_cache, key, out, TERRAIN_HIRES_CACHE)
+    return out
+
+
+async def fetch_relief_grid(lat: float, lon: float, radius: float = GRID_RADIUS,
+                            step: float = RELIEF_STEP) -> tuple[np.ndarray, str, int] | None:
+    """
+    The scan patch's real relief for the map's 3D view: (elevation, source, filled).
+
+    elevation is (n, n) float32 metres every `step` degrees across the same
+    snapped patch fetch_elevation_grid covers, row-major from the south-west
+    corner like the heatmap, both edges included.  Display only: nothing trains
+    on it, and nothing on it reaches the feature matrix.
+
+    source says what the surface is, because the two look nothing alike in 3D:
+      copernicus — every point read at its own GLO-30 pixel, unsmoothed;
+      lattice    — the grid the model's original columns read (TERRAIN_RES
+                   samples, bilinear between them), every k-th point.  Used
+                   when Copernicus is not the terrain source or its read failed.
+    filled counts Copernicus points with no tile (open sea) taken from the
+    lattice instead.  None when neither is available; the client then draws the
+    121 samples /predict already sent.  Only a Copernicus answer is cached, so a
+    transient failure is retried rather than pinned.
+    """
+    k = round(step / GRID_RES)
+    if k < 1 or abs(k * GRID_RES - step) > 1e-12 or round(2 * radius / step) * step != 2 * radius:
+        raise ValueError(f"relief step {step} does not sit on the {GRID_RES} grid")
+    clat, clon = snap_grid_centre(lat, lon)
+    key = (clat, clon, radius, step)
+    hit = _recall(_relief_cache, key)
+    if hit is not None:
+        return hit
+    n = round(2 * radius / step) + 1
+    lats = clat - radius + np.arange(n) * step
+    lons = clon - radius + np.arange(n) * step
+
+    elev = None
+    if TERRAIN_SOURCE == "copernicus":
+        try:
+            window = await dem_client.load_window(lats[0], lats[-1], lons[0], lons[-1])
+            la, lo = np.meshgrid(lats, lons, indexing="ij")
+            elev = await asyncio.to_thread(dem_client.sample_window, window, la, lo)
+            known = int(np.isfinite(elev).sum())
+            dem_client._tick(points=known, missing=elev.size - known)
+        except Exception as exc:
+            log.warning(f"[terrain] relief read failed ({exc}) — falling back to the lattice")
+            elev = None
+
+    holes = None if elev is None else ~np.isfinite(elev)
+    lattice = None
+    if elev is None or holes.any():
+        fine = await fetch_elevation_grid(lat, lon, radius, strict=True)
+        if fine is not None and fine.shape == grid_shape(radius):
+            lattice = fine[::k, ::k].astype(np.float32)
+    if elev is None:
+        return None if lattice is None else (lattice, "lattice", 0)
+    filled = int(holes.sum())
+    if filled:
+        if lattice is None:
+            return None
+        elev = np.where(holes, lattice, elev)
+    out = (np.asarray(elev, dtype=np.float32), "copernicus", filled)
+    _remember(_relief_cache, key, out, TERRAIN_RELIEF_CACHE)
     return out

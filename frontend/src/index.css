@@ -204,6 +204,157 @@ button { font-family: inherit; }
    clears Leaflet's attribution, which wraps to three lines (50px) on a map
    narrower than ~800px. */
 .map-note.low { top: auto; bottom: 64px; }
+/* 3D view: below its toolbar (reset, help) rather than across it. */
+.map-note.in3d { top: 56px; }
+
+/* ── 2D / 3D switch, over the map's top-right corner. Above the 3D view (1000)
+   and the scan note (1001), so it is always the way back. ── */
+.view-toggle {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 1002;
+  display: flex;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-bubble);
+  overflow: hidden;
+}
+.view-toggle button,
+.view3d-btn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 640;
+  min-width: 44px;
+  min-height: 32px;
+  padding: 0 12px;
+  cursor: pointer;
+}
+.view-toggle button + button { border-left: 1px solid var(--border); }
+.view-toggle button[aria-pressed="true"] { background: var(--bg-active); color: var(--text-title); }
+.view-toggle button:hover:not([aria-pressed="true"]),
+.view3d-btn:hover:not(:disabled) { background: var(--bg-surface-hover); color: var(--text-primary); }
+
+/* ── 3D view: covers the map; the Leaflet map stays mounted underneath ── */
+.view3d {
+  position: absolute;
+  inset: 0;
+  z-index: 1000;
+  overflow: hidden;
+  background: #0b1726;   /* the night sky, until the scene draws its own */
+  cursor: grab;
+}
+.view3d:active { cursor: grabbing; }
+.view3d-gl, .view3d-gl canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
+}
+.view3d-tools {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 140px);
+}
+.view3d-btn {
+  flex-shrink: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-bubble);
+  font-size: 12px;
+}
+.view3d-btn:disabled { opacity: 0.5; cursor: default; }
+.view3d-help {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.35;
+}
+/* Caption over the attribution, stacked rather than offset: the credit wraps
+   to one line on a desktop and four on a phone. */
+.view3d-foot {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  pointer-events: none;
+}
+.view3d-foot > * { pointer-events: auto; }
+.view3d-caption {
+  margin-left: 12px;
+  max-width: min(390px, calc(100% - 24px));
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-bubble);
+  color: var(--text-body);
+  font-size: 12px;
+  line-height: 1.45;
+  cursor: auto;
+}
+.view3d-caption summary {
+  padding: 8px 12px;
+  color: var(--text-title);
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.view3d-caption ul { margin: 0; padding: 0 12px 10px 28px; }
+.view3d-caption li + li { margin-top: 2px; }
+.view3d-caption li.warn { color: var(--warn); }
+.view3d-status, .view3d-empty {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  max-width: min(420px, calc(100% - 32px));
+  padding: 10px 16px;
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-bubble);
+  font-size: 13px;
+  text-align: center;
+  pointer-events: none;
+}
+/* Leaflet's attribution control, copied: the same credit in the same place. */
+.view3d-attrib {
+  align-self: flex-end;
+  max-width: 72%;
+  padding: 2px 6px;
+  background: rgba(255, 255, 255, 0.8);
+  color: #333;
+  font-size: 10px;
+  line-height: 1.35;
+  cursor: auto;
+}
+@media (max-width: 900px) {
+  .view3d-help { display: none; }
+}
+@media (max-width: 720px) {
+  .view3d-attrib { max-width: 100%; font-size: 9px; }
+}
 
 /* ── Top bar ── */
 .top-bar {
