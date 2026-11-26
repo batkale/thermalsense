@@ -461,6 +461,8 @@ async def training_status():
         # Which source is carrying terrain and today's work on each.  With
         # Copernicus primary, the API figure above is only the fallback traffic.
         "terrain": terrain_client.source_usage(),
+        # Off by default (ENABLE_LANDCOVER); empty then, but the bound shows.
+        "landcover": landcover_client.cache_status(),
         "disk_free_gb": round(await asyncio.to_thread(_free_disk_gb), 1),
     }
 

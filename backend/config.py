@@ -61,6 +61,11 @@ TERRAIN_POINT_CACHE = int(os.getenv("TERRAIN_POINT_CACHE", "200000"))
 # rebuilt from the Copernicus blocks (dem_client's LRU) in well under a second,
 # and keeping one on disk per centre would be ~2 GB a day at ~2,900 new centres.
 TERRAIN_HIRES_CACHE = int(os.getenv("TERRAIN_HIRES_CACHE", "16"))
+# Land-cover (heat, albedo) stacks per grid centre (landcover_client), on the
+# coarse terrain lattice: 2 x 11 x 11 float64, ~2 KB each, so 256 is ~0.5 MB.
+# Unbounded, ~2,900 new centres a day would add ~6 MB a day for as long as the
+# process lived.  A miss reads one small .npy from disk.
+LANDCOVER_GRID_CACHE = int(os.getenv("LANDCOVER_GRID_CACHE", "256"))
 # How long one retrain cycle may spend filling the full-resolution columns into
 # buffer rows collected before they existed.  Fits wait until it is done, so the
 # first wider model is judged on complete rows; ~33k rows take a few cycles.
