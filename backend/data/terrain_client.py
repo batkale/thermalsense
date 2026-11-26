@@ -357,9 +357,11 @@ def api_usage() -> dict:
 def source_usage() -> dict:
     """Which source serves terrain, with today's work for each.
 
-    `cached` is what this process holds against its two bounds.  Nothing reported
+    `cached` is what this process holds against its bounds.  Nothing reported
     these while they had no bound, and the growth was found from kernel OOM
-    records instead of from here.
+    records instead of from here.  `dem.raw_hits` counts block reads since start
+    that the compressed tier answered — each one a download the old 8-block
+    cache would have made again.
     """
     return {"source": TERRAIN_SOURCE, "api": api_usage(),
             "copernicus": dem_client.usage() if TERRAIN_SOURCE == "copernicus" else None,
@@ -367,6 +369,7 @@ def source_usage() -> dict:
                        "points": len(_elev_cache), "points_max": TERRAIN_POINT_CACHE,
                        "points_unsaved": len(_point_unsaved),
                        "hires_grids": len(_hires_cache), "hires_grids_max": TERRAIN_HIRES_CACHE,
+                       "dem": dem_client.cached(),
                        "relief_grids": len(_relief_cache), "relief_grids_max": TERRAIN_RELIEF_CACHE}}
 
 

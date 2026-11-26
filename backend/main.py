@@ -92,6 +92,38 @@ def _free_disk_gb() -> float:
     return shutil.disk_usage(DATA_DIR).free / 2**30
 
 
+def _memory_stats(proc: str = "/proc/self/status", cg: Path = Path("/sys/fs/cgroup")) -> dict:
+    """
+    This process and its container against the cap, in MB, for /training/status.
+
+    The limits in config.py were sized from `free -m` and the kernel log over
+    ssh; this is the same reading without the ssh.  `anon` is what a leak
+    grows and cannot be reclaimed (the container has no swap); `file` is the
+    page cache the cgroup is charged for, mostly the beacon DB, which the
+    kernel drops first.  `refault_file` counts pages read back after being
+    dropped — what a tight cap costs.  Linux only; elsewhere an error.
+    """
+    mb = lambda b: round(int(b) / 2**20)
+    out: dict = {}
+    with open(proc) as f:
+        for line in f:
+            k, _, v = line.partition(":")
+            if k in ("VmRSS", "VmHWM", "RssAnon"):
+                out[k.lower()] = round(int(v.split()[0]) / 1024)
+    if (cg / "memory.current").exists():
+        cur = (cg / "memory.current").read_text().strip()
+        cap = (cg / "memory.max").read_text().strip()
+        stat = dict(l.split() for l in (cg / "memory.stat").read_text().splitlines())
+        events = dict(l.split() for l in (cg / "memory.events").read_text().splitlines())
+        out["cgroup"] = {
+            "current": mb(cur), "max": None if cap == "max" else mb(cap),
+            "anon": mb(stat.get("anon", 0)), "file": mb(stat.get("file", 0)),
+            "refault_file": int(stat.get("workingset_refault_file", 0)),
+            "at_max": int(events.get("max", 0)), "oom_kill": int(events.get("oom_kill", 0)),
+        }
+    return out
+
+
 # Two rounds, then stop and escalate.  Each round is a multi-million-row delete
 # on a box that is already in trouble, and on a database created before
 # auto_vacuum=INCREMENTAL the freed pages never return to the filesystem — so a
@@ -462,6 +494,7 @@ async def training_status():
         # Copernicus primary, the API figure above is only the fallback traffic.
         "terrain": terrain_client.source_usage(),
         "disk_free_gb": round(await asyncio.to_thread(_free_disk_gb), 1),
+        "memory_mb": await section(_memory_stats),
     }
 
 def _apply_ogn_fusion(

@@ -11,8 +11,11 @@ which an API is not.
 Each tile is ~40 MB but is never downloaded whole.  A COG is split into
 1024x1024 compressed blocks with their byte offsets in the header, so a lookup
 costs one header read per tile (cached) and one range request per block it
-touches (a small LRU of decoded blocks is kept).  A 0.1 degree prediction grid
-at 0.01 degree spacing usually lands in one or two blocks.
+touches.  Blocks are kept in two tiers: a small LRU of decoded arrays (4 MB
+each) and behind it the compressed bodies as served (~2.2 MB), bounded by
+DEM_RAW_CACHE_MB, which turn a repeat visit into an ~18 ms decode instead of a
+download.  A 0.1 degree prediction grid at 0.01 degree spacing usually lands
+in one or two blocks.
 
 Full resolution is read on purpose, not an overview.  Overview pixels are
 averages, which would smooth slopes relative to the SRTM point samples the
@@ -33,22 +36,70 @@ from datetime import datetime, timezone
 import httpx
 import numpy as np
 
-from config import COPERNICUS_DEM_BASE
+from config import COPERNICUS_DEM_BASE, DEM_RAW_CACHE_MB
 from data import cog
 
 log = logging.getLogger(__name__)
 
 _HEADER_BYTES = 65536        # all four IFDs plus their offset arrays fit in ~2 KB
-_BLOCK_CACHE_SIZE = 8        # decoded blocks are 4 MB each — 32 MB on a 1 GiB box
+_BLOCK_CACHE_SIZE = 8        # decoded blocks are 4 MB each — the arrays one grid is working on
+
+
+class _ByteLRU:
+    """
+    Compressed block bodies, least recently used out first, bounded by bytes.
+
+    The second tier behind the decoded LRU (see DEM_RAW_CACHE_MB).  Bytes, not
+    a count, because a block's size swings with the ground: 0.7 to 2.8 MB
+    (5th to 95th percentile of 2,592 blocks read for the evaluation runs),
+    median 2.3 MB — flat ground compresses, mountains do not.
+    """
+
+    def __init__(self, limit_bytes: int):
+        self.limit = limit_bytes
+        self.size = 0
+        self.hits = 0
+        self._d: "OrderedDict[tuple[str, int], bytes]" = OrderedDict()
+
+    def __len__(self) -> int:
+        return len(self._d)
+
+    def get(self, key):
+        body = self._d.get(key)
+        if body is not None:
+            self._d.move_to_end(key)
+            self.hits += 1
+        return body
+
+    def put(self, key, body: bytes) -> None:
+        if len(body) > self.limit:
+            return
+        old = self._d.pop(key, None)
+        if old is not None:
+            self.size -= len(old)
+        self._d[key] = body
+        self.size += len(body)
+        while self.size > self.limit:
+            _, dropped = self._d.popitem(last=False)
+            self.size -= len(dropped)
+
 
 _headers: dict[str, dict | None] = {}
 _blocks: "OrderedDict[tuple[str, int], np.ndarray]" = OrderedDict()
+_raw = _ByteLRU(DEM_RAW_CACHE_MB * 1024 * 1024)
 _lock: asyncio.Lock | None = None
 _client: httpx.AsyncClient | None = None
 
 # Today's work, for /training/status.  Not a quota — there is none — but the
 # number that shows the source is actually carrying the load.
 _usage = {"day": "", "points": 0, "blocks": 0, "bytes": 0, "missing": 0, "errors": 0}
+
+
+def cached() -> dict:
+    """What the two block tiers hold now, for /training/status."""
+    return {"blocks_decoded": len(_blocks), "blocks_decoded_max": _BLOCK_CACHE_SIZE,
+            "blocks_raw": len(_raw), "raw_mb": round(_raw.size / 2**20, 1),
+            "raw_mb_max": round(_raw.limit / 2**20), "raw_hits": _raw.hits}
 
 
 def _get_lock() -> asyncio.Lock:
@@ -167,12 +218,21 @@ async def _block(name: str, meta: dict, idx: int) -> np.ndarray:
     if key in _blocks:
         _blocks.move_to_end(key)
         return _blocks[key]
-    start, length = meta["offsets"][idx], meta["counts"][idx]
-    r = await _get_client().get(tile_url(name), headers={"Range": f"bytes={start}-{start + length - 1}"})
-    r.raise_for_status()
-    arr = cog.decode_block(r.content, meta["tile_w"], meta["tile_h"], meta["bits"],
+    body = _raw.get(key)
+    fetched = body is None
+    if fetched:
+        start, length = meta["offsets"][idx], meta["counts"][idx]
+        r = await _get_client().get(tile_url(name),
+                                    headers={"Range": f"bytes={start}-{start + length - 1}"})
+        r.raise_for_status()
+        body = r.content
+    arr = cog.decode_block(body, meta["tile_w"], meta["tile_h"], meta["bits"],
                            meta["sample_format"], meta["predictor"])
-    _tick(blocks=1, bytes=len(r.content))
+    if fetched:
+        # Kept only once it decodes: a truncated body cached here would fail
+        # every later read of the block instead of being fetched again.
+        _tick(blocks=1, bytes=len(body))
+        _raw.put(key, body)
     _blocks[key] = arr
     while len(_blocks) > _BLOCK_CACHE_SIZE:
         _blocks.popitem(last=False)

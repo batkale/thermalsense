@@ -57,10 +57,25 @@ TERRAIN_SOURCE    = os.getenv("TERRAIN_SOURCE", "copernicus").strip().lower()
 TERRAIN_GRID_CACHE  = int(os.getenv("TERRAIN_GRID_CACHE", "64"))
 TERRAIN_POINT_CACHE = int(os.getenv("TERRAIN_POINT_CACHE", "200000"))
 # Full-resolution terrain columns (pipeline/hires_terrain.py) per grid centre:
-# 201 x 201 x 8 float32 = 1.3 MB each, so 16 is ~21 MB.  Memory only — a grid is
-# rebuilt from the Copernicus blocks (dem_client's LRU) in well under a second,
+# 201 x 201 x 8 float32 = 1.3 MB each, so 64 is ~83 MB.  Memory only — a grid is
+# rebuilt from the Copernicus blocks (dem_client's LRU) in 0.3-0.9 s of CPU,
 # and keeping one on disk per centre would be ~2 GB a day at ~2,900 new centres.
-TERRAIN_HIRES_CACHE = int(os.getenv("TERRAIN_HIRES_CACHE", "16"))
+#
+# 16 until 23 Nov 2026, sized for the 1 GiB box.  The live sampler visits up to
+# 60 grids a cycle, so 16 was emptied every five minutes and every grid was
+# rebuilt every cycle.  Replaying three archive days through the sampler and
+# the ledger (21 Sep, 4 Oct, 5 Nov): 64 rebuilds 34-43% fewer grids than 16;
+# 128 only 4-9% fewer again, for another 83 MB.
+TERRAIN_HIRES_CACHE = int(os.getenv("TERRAIN_HIRES_CACHE", "64"))
+# Compressed Copernicus blocks kept in memory, in MB (dem_client._raw).  A block
+# is ~2.2 MB as served and 4.2 MB decoded; decoding one again costs ~18 ms,
+# downloading it again ~0.4 s.  Measured 23 Nov 2026: the node had downloaded
+# 15,716 blocks (31 GB) by 19:37 UTC, because the decoded LRU of 8 holds less
+# than one cycle's worth — a busy day's sites touch ~100-170 blocks, and every
+# five minutes the sampler came back to the same ones.  Replaying the same
+# three days (evaluation/cache_replay.py): 384 MB (~170 blocks) downloads
+# 84-89% fewer; 256 decoded blocks would have needed 1 GB for 88-91%.
+DEM_RAW_CACHE_MB = int(os.getenv("DEM_RAW_CACHE_MB", "384"))
 # Relief grids for the map's 3D view (terrain_client.fetch_relief_grid): the
 # scan patch read from Copernicus every RELIEF_STEP degrees, 101 x 101 float32
 # = 40 KB each, so 32 is ~1.3 MB.  Display only: nothing trains on them.
