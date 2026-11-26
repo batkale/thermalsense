@@ -1056,6 +1056,35 @@ async def point_elevation(lat: float, lon: float):
     return {"elevation": elev}
 
 
+@app.get("/terrain/relief")
+async def terrain_relief(lat: Annotated[float, Query(ge=-90, le=90)],
+                         lon: Annotated[float, Query(ge=-180, le=180)]):
+    """
+    The real relief of the patch /predict scans at (lat, lon), for the map's 3D view.
+
+    Same snapped centre and radius as the heatmap, sampled every RELIEF_STEP
+    (~100 m) rather than at the 121 points the model's original columns read,
+    because a surface built from those is a set of kilometre-wide planes.
+    Row-major from the south-west corner, both edges included, like heatmap.
+    source is "copernicus" (each point at its own GLO-30 pixel) or "lattice"
+    (the interpolated grid the model reads, when Copernicus is unavailable);
+    filled counts points with no Copernicus tile taken from the lattice.
+    Display only — nothing trains on it.  503 when neither source answers, and
+    the client then draws the samples /predict already sent.
+    """
+    out = await terrain_client.fetch_relief_grid(lat, lon)
+    if out is None:
+        raise HTTPException(status_code=503, detail="terrain unavailable")
+    elev, source, filled = out
+    grid_lat, grid_lon = snap_grid_centre(lat, lon)
+    return {
+        "grid_lat": grid_lat, "grid_lon": grid_lon, "radius": GRID_RADIUS,
+        "rows": int(elev.shape[0]), "cols": int(elev.shape[1]),
+        "elevation": np.rint(elev).astype(int).ravel().tolist(),
+        "source": source, "filled": filled,
+    }
+
+
 @app.get("/ogn/track/{glider_id}")
 async def glider_track(glider_id: str):
     """Return the last 8 hours of positions for a single glider."""

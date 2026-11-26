@@ -5,6 +5,7 @@ import { MapContainer, TileLayer, useMap, useMapEvents } from 'react-leaflet';
 import { MAP_CENTER, MAP_ZOOM, PREDICT_RADIUS, SOARING_AC_TYPES } from '../config.js';
 import { displayPosition } from '../services/deadReckon.js';
 import { nearLng, unwrapNear } from '../services/worldWrap.js';
+import { thermalColor } from '../services/thermalColor.js';
 import { RawDataCanvas, CompareControl, LAYER_BUILT } from './CompareLayer.jsx';
 import { CloudCanvas } from './CloudLayer.jsx';
 
@@ -24,31 +25,8 @@ const _PALETTE = (() => {
   return p;
 })();
 
-// -----------------------------------------------------------------------------
-// Colour scale: transparent → blue-green → yellow → orange-red
-// -----------------------------------------------------------------------------
-// The floor and the opacity are set by what the model actually returns, not by
-// the 0-1 range it could. Measured on the live site (15 Nov 2026, ten daytime
-// forecast grids at four sites): the median cell sat between 3.5% and 25%, and
-// no grid peaked above 56%. Against that the old 5% floor left
-// holes — one grid drew 932 of its 40,401 cells — and 15% opacity over
-// satellite imagery made the rest a tint nobody could see, so a completed scan
-// looked like no scan. Only an exact zero is skipped now, which is what the
-// night guard sends; a low probability is drawn, in the "low" colour.
-function thermalColor(p) {
-  if (p < 0.005) return null;
-  const a = 0.34 + p * 0.40;
-  if (p < 0.35) {
-    const t = p / 0.35;
-    return `rgba(20, ${Math.round(120 + t * 135)}, 255, ${a})`;
-  }
-  if (p < 0.65) {
-    const t = (p - 0.35) / 0.30;
-    return `rgba(${Math.round(20 + t * 235)}, 255, ${Math.round(255 - t * 255)}, ${a})`;
-  }
-  const t = (p - 0.65) / 0.35;
-  return `rgba(255, ${Math.round(255 - t * 230)}, 0, ${a})`;
-}
+// The heatmap's colour scale lives in services/thermalColor.js, shared with
+// the 3D view so a cell and the column standing on it are the same colour.
 
 // -----------------------------------------------------------------------------
 // Glider icon — top-down silhouette drawn with canvas 2D primitives
