@@ -91,6 +91,7 @@ local `cache/terrain-copernicus/points.json` held 200 entries, all
 | [frontend/src/hooks/useBackend.js](frontend/src/hooks/useBackend.js) | Prediction fetch, WebSocket lifecycle, viewport declaration, glider paths |
 | [frontend/src/components/ThermalMap.jsx](frontend/src/components/ThermalMap.jsx) | Leaflet map, heatmap canvas, glider markers and tracks |
 | [frontend/src/components/CompareLayer.jsx](frontend/src/components/CompareLayer.jsx) | Raw data / product comparison: the before/after divider, the raw-inputs canvas and the two caption cards |
+| [frontend/src/components/Thermal3D.jsx](frontend/src/components/Thermal3D.jsx), [frontend/src/services/thermal3d.js](frontend/src/services/thermal3d.js) | The 3D view of one scan (2B/3B switch, `?view=3d`): renderer, camera, picking and caption in the component; terrain, ground texture, thermal columns, ceiling, labels and aircraft as plain three.js builders in the service. Lazy-loaded, so three.js is its own chunk |
 | [frontend/src/i18n/strings.js](frontend/src/i18n/strings.js) | TR/EN dictionaries — must stay in key parity |
 | [frontend/about.html](frontend/about.html), [frontend/src/landing/](frontend/src/landing/) | Landing page at `/about`, written as a scrolling pre-seed pitch about low-altitude fixed-wing UAVs (civil / dual-use framing): a second page of the same Vite build, not a route in the app. Own stylesheet and own TR/EN dictionary (`landing/strings.js`); language and theme come from the app's two providers, so both are one choice across the two pages |
 | [DEPLOY.md](DEPLOY.md) | Hosting rationale, sizing, TLS, operating runbook |
@@ -703,6 +704,7 @@ Breaking any of these has taken the app down or silently corrupted results befor
 | `GET /ogn/glider/{id}` | One aircraft by **exact** id, ignoring the viewport. `{"glider": null}` when it is gone — not a 404 |
 | `GET /thermals/active` | Clusters of circling gliders |
 | `GET /elevation?lat=&lon=` | Single SRTM point |
+| `GET /terrain/relief?lat=&lon=` | The scan patch's elevation every `RELIEF_STEP` (0.001°, ~100 m), 101 × 101, same snapped centre and row order as `heatmap`, for the 3D view. `source` is `copernicus` or `lattice` (the model's interpolated grid, when Copernicus cannot answer); `filled` counts sea points taken from the lattice. 503 when neither answers. Display only |
 | `GET /weather?lat=&lon=&forecast_h=` | Sky and local clock at one point, no model run — for the pinned glider card. Same cached meteo call as `/predict` |
 | `GET /healthz` | `{status, model_loaded}` |
 | `POST /train` | Admin. Background retrain |
@@ -831,6 +833,42 @@ dragging redraws nothing — which matters when one layer is a 40,401-cell grid.
   container and is never clipped. It drops to the bottom edge while the
   comparison is on, because the caption cards hang from the top of the divider
   and the divider starts at the centre — where the note otherwise sits.
+
+**The 3D view draws one scan, and keeps measured and drawn apart** (added
+26 Nov 2026; the 2B/3B switch on the map, or `?view=3d`). The scan patch is a
+block of real relief (`/terrain/relief`; at İnönü 818–1,383 m, one DEM block,
+0.58 s cold) under the same Esri imagery and the heatmap painted exactly as
+in 2D (`services/thermalColor.js` is the one colour scale). Over it: a column
+from each hotspot to the thermal top, a sheet at that top, and the live
+aircraft at reported altitude with their trails. The Leaflet map stays
+mounted underneath, so the viewport the socket streams and the 2D view a user
+left are both kept.
+- **The columns are an illustration, and the caption says so.** The model
+  predicts a probability per cell, not a thermal's width or lean. Hotspots
+  are 8-cell blocks that are local maxima, in the top 15% of blocks and at
+  least half the peak, at least max(900 m, 0.8 × top) apart; half the peak
+  alone admitted every bump of the flat 11–28% İnönü grid. Position is
+  relative, colour and opacity are the absolute probability. The lean is the
+  10 m wind at an assumed 2 m/s climb (`CLIMB_MS`).
+- **Every height is drawn ×1.5** (`VERTICAL_SCALE`) — terrain, ceiling and
+  aircraft alike, so nothing sinks into a raised hill. The caption states it.
+- **The same rules as the 2D icons:** the icon may be dead-reckoned, the
+  trail and the line to the ground never are. An aircraft is a flat
+  silhouette (heading from above) plus a camera-facing dot, because a flat
+  shape vanishes edge-on.
+- **A click on the terrain scans there, a click on an aircraft pins it**, and
+  in 3D the search box scans the place found (it only moved the hidden map).
+  Turning on the comparison or the cloud layer returns to 2D: both are
+  Leaflet-only. Choosing 3D turns the comparison off.
+- **Without `/terrain/relief` it still works:** it draws the 121 samples
+  `/predict` sent, filled to 51 × 51, and the caption says "interpolated
+  between 1 km samples". Imagery that fails leaves shaded relief.
+- Light is the sun at `target_at` (`sunPosition`), so the slopes it lights
+  are the ones the model's sun-angle column rewards; at night the sky goes
+  dark and no columns are drawn. The view carries the imagery and Copernicus
+  credit itself, since it covers Leaflet's attribution control.
+- `renderer.forceContextLoss()` on unmount is load-bearing: every 2D → 3D
+  switch makes a new WebGL context, and browsers stop at about sixteen.
 
 **The landing page (`/about`) is a second page, and it quotes this file.**
 `vite.config.js` lists `index.html` and `about.html` as build inputs, and
@@ -1058,7 +1096,8 @@ The deployment target is 2 vCPU / 896 MB, and most odd-looking choices come from
   records and the file is rewritten only when it passes twice the bound.
   Measured on a copy of the node's cache: point cache 196 → 56 MB, a flush
   1.0 s → 0.13 ms, start-up load 0.95 → 0.18 s. Sizes are under
-  `terrain.cached` in `/training/status`. The full-resolution grids
+  `terrain.cached` in `/training/status`, beside the 3D view's relief grids
+  (`TERRAIN_RELIEF_CACHE`, 32 × 40 KB). The full-resolution grids
   (`_hires_cache`, `TERRAIN_HIRES_CACHE` 64 × ~1.3 MB) are bounded and
   reported there too, and memory-only on purpose: one per centre on disk would
   be ~2 GB a day. The old `points.json` is imported

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { Component, lazy, Suspense, useState, useCallback, useEffect, useRef } from 'react';
 import ThermalMap        from './components/ThermalMap.jsx';
 import InfoPanel         from './components/InfoPanel.jsx';
 import WeatherBar        from './components/WeatherBar.jsx';
@@ -16,6 +16,23 @@ import { ADMIN_TOKEN, HOME_SCAN, HOME_UTC_OFFSET_H, HOME_DAY_HOURS, FORECAST_STE
 // Retrain is an operator action: always available in dev, in production only
 // when an admin token is configured for the bundle.
 const CAN_RETRAIN = import.meta.env.DEV || Boolean(ADMIN_TOKEN);
+
+// The 3D view carries three.js (~600 KB), so it is its own chunk and is only
+// fetched the first time someone switches to it.
+const Thermal3D = lazy(() => import('./components/Thermal3D.jsx'));
+
+/**
+ * Keeps a 3D view that fails — its chunk not loading, or the scene throwing —
+ * inside the map's own box, with a way back, instead of unmounting the app.
+ */
+class ViewBoundary extends Component {
+  constructor(props) { super(props); this.state = { failed: false }; }
+  static getDerivedStateFromError() { return { failed: true }; }
+  render() {
+    if (this.state.failed) return <div className="view3d"><div className="view3d-empty">{this.props.message}</div></div>;
+    return this.props.children;
+  }
+}
 
 /**
  * Hours ahead for the opening scan: 0 by day at HOME_SCAN, otherwise the
@@ -38,6 +55,11 @@ export default function App() {
   const [retrainMsgKey, setRetrainMsgKey] = useState('');
   const [showAirborneOnly, setShowAirborneOnly] = useState(false);
   const [showOgnHeatmap,   setShowOgnHeatmap]   = useState(true);
+  // 2D map or 3D model of the scan. ?view=3d opens straight into 3D, for the
+  // same reason ?compare=1 exists — it is a view people link to.
+  const [view, setView] = useState(
+    () => (new URLSearchParams(window.location.search).get('view') === '3d' ? '3d' : '2d')
+  );
   // Before/after divider across the map: raw inputs on one side, what is built
   // from them on the other. ?compare=1 opens straight into it, for the same
   // reason ?panel=training exists — it is a view people link to.
@@ -58,9 +80,20 @@ export default function App() {
   const handleCloudStatus = useCallback(
     s => setCloudStatus(prev => (s === 'loading' && prev === 'ok' ? prev : s)), []
   );
+  // The comparison and the cloud layer are drawn on the 2D map only, so
+  // turning either on brings the 2D map back, and 3D turns the comparison off.
   const toggleClouds = useCallback(on => {
     setShowClouds(on);
     setCloudStatus(null);
+    if (on) setView('2d');
+  }, []);
+  const toggleCompare = useCallback(on => {
+    setCompare(on);
+    if (on) setView('2d');
+  }, []);
+  const chooseView = useCallback(v => {
+    setView(v);
+    if (v === '3d') setCompare(false);
   }, []);
   const [flyTarget, setFlyTarget] = useState(null);
   const [pinnedId, setPinnedId] = useState(null);
@@ -116,6 +149,24 @@ export default function App() {
     return () => clearTimeout(id);
   }, [forecastH, predict]);
 
+
+  // Pinning a glider, from either view: its flight so far is only drawn for
+  // the pinned one, so it is only fetched here — see seedTrack. The scan moves
+  // to it, at its own altitude.
+  const handleGliderClick = useCallback(g => {
+    setPinnedId(g.id);
+    seedTrack(g.id);
+    locationRef.current = { lat: g.lat, lon: g.lon, alt: g.alt };
+    predict(g.lat, g.lon, forecastH, g.alt);
+  }, [seedTrack, predict, forecastH]);
+
+  // A search moves the 2D map there. The 3D view shows only the scanned patch,
+  // so there a search that only moved the hidden map would do nothing visible:
+  // it scans the place instead, and the 2D map still flies to it underneath.
+  const handleSearch = useCallback(target => {
+    setFlyTarget(target);
+    if (view === '3d') handleMapClick(target.lat, target.lon);
+  }, [view, handleMapClick]);
 
   const handleRetrain = useCallback(async () => {
     setRetrainMsgKey('');
@@ -182,14 +233,7 @@ export default function App() {
             activeThermals={activeThermals}
             showOgnHeatmap={showOgnHeatmap}
             onMapClick={handleMapClick}
-            onGliderClick={g => {
-              setPinnedId(g.id);
-              // The flight so far is only drawn for the pinned glider, so it is
-              // only fetched here — see seedTrack.
-              seedTrack(g.id);
-              locationRef.current = { lat: g.lat, lon: g.lon, alt: g.alt };
-              predict(g.lat, g.lon, forecastH, g.alt);
-            }}
+            onGliderClick={handleGliderClick}
             onViewportChange={setViewport}
             pinnedId={pinnedId}
             flyTarget={flyTarget}
@@ -201,13 +245,40 @@ export default function App() {
             cloudTopTime={cloudFrame.topTime}
             onCloudStatus={handleCloudStatus}
           />
+          <div className="view-toggle" role="group" aria-label={t('viewToggle')}>
+            <button type="button" aria-pressed={view === '2d'} onClick={() => chooseView('2d')}>
+              {t('view2d')}
+            </button>
+            <button type="button" aria-pressed={view === '3d'} onClick={() => chooseView('3d')}>
+              {t('view3d')}
+            </button>
+          </div>
+          {view === '3d' && (
+            <ViewBoundary message={t('view3dFailed')}>
+              <Suspense fallback={<div className="view3d"><div className="view3d-status">{t('view3dLoading')}</div></div>}>
+                <Thermal3D
+                  heatmap={heatmap}
+                  gridMeta={gridMeta}
+                  rawInputs={rawInputs}
+                  weather={weather}
+                  predictAlt={predictAlt}
+                  noInsolation={noInsolation}
+                  gliders={visibleGliders}
+                  pinnedId={pinnedId}
+                  gliderPathsRef={gliderPathsRef}
+                  onMapClick={handleMapClick}
+                  onGliderClick={handleGliderClick}
+                />
+              </Suspense>
+            </ViewBoundary>
+          )}
           {/* With the comparison on, its two caption cards hang from the top of
               the divider — which starts at the centre, exactly where this note
               sits — so the note drops to the bottom edge instead of covering
               the labels that say which half is which. */}
           {mapNoteKey && (
             <div
-              className={`map-note${error && !loading ? ' error' : ''}${compare ? ' low' : ''}`}
+              className={`map-note${error && !loading ? ' error' : ''}${compare ? ' low' : ''}${view === '3d' ? ' in3d' : ''}`}
               role="status"
             >
               {t(mapNoteKey)}
@@ -216,7 +287,7 @@ export default function App() {
         </div>
 
         <aside className="sidebar">
-          <SearchBar onSelect={setFlyTarget} />
+          <SearchBar onSelect={handleSearch} />
 
           <InfoPanel
             gliders={visibleGliders}
@@ -231,7 +302,7 @@ export default function App() {
             showOgnHeatmap={showOgnHeatmap}
             onOgnHeatmapToggle={setShowOgnHeatmap}
             compare={compare}
-            onCompareToggle={setCompare}
+            onCompareToggle={toggleCompare}
             showClouds={showClouds}
             onCloudsToggle={toggleClouds}
             clouds={{ time: cloudFrame.time, failed: cloudFrame.failed, status: cloudStatus }}
