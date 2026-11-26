@@ -417,7 +417,7 @@ usable RAM, burstable CPU credits.
 |---|---|
 | Two concurrent predictions each saturate the cores and hold ~30 MB | `PREDICT_CONCURRENCY = 1` — a semaphore queues them. Everyone waits their turn; nobody is rejected and the box does not swap |
 | A background fit could starve serving | `XGB_FIT_THREADS = 1`, `XGB_PREDICT_THREADS` = all cores |
-| A leak or runaway `/seed` could take the box, including sshd | `mem_limit: 1536m` (700m until 19 Nov 2026, when the VM had long since grown to 3.9 GB) — a blast radius, not a target; the restart policy brings the container back, and ≥ 1.6 GB stays for the host's page cache |
+| A leak or runaway `/seed` could take the box, including sshd | `mem_limit: 3584m` (700m until 19 Nov 2026, when the VM had long since grown to 3.9 GB; 1536m until 23 Nov). At 3584m this no longer covers the host: an app that filled it with anon would leave ~280 MB against the host's ~750 MB. Watch `memory_mb.cgroup.anon` in `/training/status`; 2560m restores a ~1.3 GB margin |
 | A flood of cheap requests | uvicorn `--limit-concurrency 64` as a backstop |
 | Beacon DB grows ~1.4 GB/day | `BEACON_RETENTION_DAYS = 2` |
 | Disk could still fill | `_disk_guard()` shortens retention below 3 GB free, floored at 1 day, capped at 2 rounds |
