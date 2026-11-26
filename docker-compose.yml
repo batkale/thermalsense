@@ -29,8 +29,28 @@ services:
     # sat at ~450 MB anon at rest and peaked at 593 MB during the fill-in. The
     # DB pages the app reads are charged to this cgroup too, so the cap is also
     # how much of the DB it may keep cached.
-    mem_limit: 1536m
-    memswap_limit: 1536m
+    #
+    # Raised from 1536m on 23 Nov 2026. At 1536m the cgroup sat at its cap (it
+    # had hit it 40,238 times in 24 h) with 758 MB anon, leaving ~690 MB for a
+    # 5.0 GB DB: of the 7.6 GB it read from disk that day, 6.2 GB were
+    # refaults — pages it had cached, dropped for room, and read again. The
+    # host meanwhile had 2.4 GB available. The same change spends ~450 MB more
+    # anon on terrain caches (DEM_RAW_CACHE_MB, TERRAIN_HIRES_CACHE), so the
+    # budget is ~1.2 GB anon, and the rest of the cap is DB cache.
+    #
+    # 3584m, not the 2560m first proposed, by the owner's decision on 23 Nov
+    # 2026: up to ~2.3 GB of the 5 GB DB stays cached instead of ~1.35 GB.
+    # What it gives up: this cap no longer protects the host. 3,905 - 3,584 -
+    # ~40 (Caddy) leaves ~280 MB, less than the host's own ~750 MB (sshd,
+    # dockerd, the Azure agent), so an app that really filled the cap would
+    # push those into the 2 GB of swap first, before the cgroup's OOM killer
+    # fires — the 18 Sep 2026 outage. In normal running that does not happen:
+    # all but ~1.2 GB of the cap is page cache, which the kernel takes back
+    # under host pressure. It happens with anon growth: a leak (28 OOM kills
+    # 7-15 Nov were one) or a runaway job. Watch memory_mb.cgroup.anon in
+    # /training/status; if it climbs past ~2 GB, drop this back to 2560m.
+    mem_limit: 3584m
+    memswap_limit: 3584m
     # Deliberately not published to the host: all traffic goes through Caddy,
     # so there is no plaintext path that bypasses TLS. --forwarded-allow-ips in
     # the Dockerfile depends on this staying `expose` and never becoming `ports`.

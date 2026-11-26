@@ -11,7 +11,7 @@ traffic. The model trains itself online from the Open Glider Network (OGN) APRS
 feed — every circling, climbing glider is a positive label.
 
 Live deployment: `https://thermalsense-tr.polandcentral.cloudapp.azure.com`
-(Azure VM, 2 vCPU / 3.9 GB RAM, app container capped at 1.5 GB — see
+(Azure VM, 2 vCPU / 3.9 GB RAM, app container capped at 3.5 GB — see
 [DEPLOY.md](DEPLOY.md); the limits below were first set for an 896 MB box).
 **Merging to `main` deploys it:** cron on the VM runs
 [deploy/auto-deploy.sh](deploy/auto-deploy.sh) every five minutes, with a
@@ -1003,9 +1003,9 @@ The deployment target is 2 vCPU / 896 MB, and most odd-looking choices come from
   `min(32, cpu_count+4)` threads, each spawning its own OpenMP pool.
 - `XGB_FIT_THREADS=1` (the background job yields cores), `XGB_PREDICT_THREADS`
   takes all of them.
-- `mem_limit: 1536m` on the app service — a blast radius, not a target. It
-  was 700m from the 896 MB box until 19 Nov 2026; see the note at the end of
-  this section.
+- `mem_limit: 3584m` on the app service. It was 700m from the 896 MB box
+  until 19 Nov 2026, then 1536m until 23 Nov; see the note at the end of this
+  section. At 3584m it is no longer a blast radius for the host — see there.
 - **Retention is now eviction, not deletion.** `_archive_job` writes every
   completed day to `ARCHIVE_DIR` as Parquet before `_purge_job` deletes it, and
   `purge_old_beacons` refuses to delete past the unbroken archived prefix — an
@@ -1043,7 +1043,7 @@ The deployment target is 2 vCPU / 896 MB, and most odd-looking choices come from
   Measured on a copy of the node's cache: point cache 196 → 56 MB, a flush
   1.0 s → 0.13 ms, start-up load 0.95 → 0.18 s. Sizes are under
   `terrain.cached` in `/training/status`. The full-resolution grids
-  (`_hires_cache`, `TERRAIN_HIRES_CACHE` 16 × ~1.3 MB) are bounded and
+  (`_hires_cache`, `TERRAIN_HIRES_CACHE` 64 × ~1.3 MB) are bounded and
   reported there too, and memory-only on purpose: one per centre on disk would
   be ~2 GB a day. The old `points.json` is imported
   once and then left alone, because the previous image still reads it.
@@ -1059,9 +1059,42 @@ The deployment target is 2 vCPU / 896 MB, and most odd-looking choices come from
   restart), 593 MB cgroup peak during the terrain fill-in, Caddy 23 MB, the
   host's own processes ~750 MB, page cache 2.6 GB. At the new cap ≥ 1.6 GB of
   page cache is left for the beacon DB. Do not lift the cap entirely: the
-  18 Sep outage was the host starving, not the container. The other limits
-  (`_MAX_BUFFER`, retention, `PREDICT_CONCURRENCY`) have still not been
-  re-derived for the larger box.
+  18 Sep outage was the host starving, not the container.
+- **Re-derived for the 3.9 GB box on 23 Nov 2026.** Measured on the node, 24 h
+  after a restart: the cgroup sat at its 1536m cap (`memory.events` max
+  40,238) with 758 MB anon and ~690 MB of page cache for a 5.0 GB DB; of
+  7.6 GB read from disk that day 6.2 GB were refaults — pages cached,
+  dropped for room, read again — while the host had 2.4 GB available. And the
+  DEM reader had downloaded 15,716 blocks (31 GB) by 19:37 UTC: its 8 decoded
+  blocks (32 MB, sized for 1 GiB) held less than one cycle, and the sampler
+  comes back to the same sites every five minutes. Replaying three archive
+  days (21 Sep, 4 Oct, 5 Nov) through the sampler and the ledger
+  (`python -m evaluation.cache_replay <day> ...`) reproduced that count
+  (16,554 for 4 Oct) and sized the fix: a second tier of
+  *compressed* block bodies (`dem_client._raw`, `DEM_RAW_CACHE_MB` 384,
+  ~170 blocks at ~2.2 MB; a decode is ~18 ms) downloads 84–89% fewer, where
+  the same blocks decoded would need 1 GB; `TERRAIN_HIRES_CACHE` 16 → 64
+  rebuilds 34–43% fewer grids (128 would add 4–9% for 83 MB more).
+  `TERRAIN_GRID_CACHE` stays 64: a miss reads a 1 KB file. `mem_limit` went
+  to **3584m** by the owner's decision (2560m was proposed): ~1.2 GB anon,
+  the rest DB cache. **That cap no longer protects the host:** it leaves
+  ~280 MB against the host's own ~750 MB, so anon growth — a leak, a runaway
+  job — would push sshd and the Azure agent into swap before the cgroup's
+  OOM killer fires, which is the 18 Sep outage. Page cache alone cannot do
+  that; the kernel reclaims it. If `memory_mb.cgroup.anon` climbs past
+  ~2 GB, go back to 2560m (host keeps ~1.3 GB). Check it
+  held with `/training/status` → `terrain.copernicus.blocks` (downloads
+  today), `terrain.cached.dem` and `memory_mb` (process RSS, cgroup
+  anon/file, refaults, times at max), which exist for exactly this — the
+  first re-derivation needed ssh and the kernel's own files.
+  **Looked at and left alone:** `_MAX_BUFFER` (91k of 200k
+  rows used), `BEACON_RETENTION_DAYS` (the archive holds the rest; a longer
+  window only grows the DB the cache cannot hold), `PREDICT_CONCURRENCY`
+  (CPU-bound on 2 cores, RAM does not help), `NIGHTLY_SEED_LIMIT` (it binds —
+  2,103 rows scanned — but its wall clock, 20 of 30 min, binds next, so
+  re-measure the seed's duration with the warmer caches before raising it),
+  `MAX_SAMPLE_GRIDS` (binds at 60, but it costs Open-Meteo calls and time,
+  not RAM).
 
 **Upstream ceilings:** Copernicus DEM has no key and no quota (the terrain
 default); OpenTopoData 1000 calls/day and 1 req/s, now only the fallback — as

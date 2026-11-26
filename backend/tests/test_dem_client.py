@@ -157,6 +157,7 @@ def s3(monkeypatch):
     monkeypatch.setattr(dc, "_get_client", lambda: client)
     monkeypatch.setattr(dc, "_headers", {})
     monkeypatch.setattr(dc, "_blocks", dc.OrderedDict())
+    monkeypatch.setattr(dc, "_raw", dc._ByteLRU(64 * 2**20))
     monkeypatch.setattr(dc, "_lock", None)
     return data, served
 
@@ -177,6 +178,56 @@ async def test_each_block_is_downloaded_once(s3):
     first = served["requests"]                                  # header + one block
     await dc.fetch_elevations(pts)
     assert first == 2 and served["requests"] == first
+
+
+async def test_a_block_dropped_from_the_decoded_tier_is_not_downloaded_again(s3, monkeypatch):
+    """The decoded LRU holds a handful of 4 MB arrays; the compressed tier
+    behind it is what stops a repeat visit costing a download.  Same pixels
+    either way."""
+    data, served = s3
+    monkeypatch.setattr(dc, "_BLOCK_CACHE_SIZE", 1)
+    pts = [(39.99, 30.01), (39.01, 30.99)]                      # blocks 0 and 3
+    first = await dc.fetch_elevations(pts)
+    downloads = served["requests"]                              # header + two blocks
+    again = await dc.fetch_elevations(pts)                      # block 0 left the decoded tier
+    assert downloads == 3 and served["requests"] == downloads
+    assert first == again and again[(39.99, 30.01)] == data[0, 0]
+    assert dc._raw.hits >= 1 and len(dc._blocks) == 1
+
+
+def test_compressed_tier_is_bounded_by_bytes_oldest_out():
+    lru = dc._ByteLRU(10)
+    lru.put("a", b"1234")
+    lru.put("b", b"1234")
+    assert lru.get("a") == b"1234"                              # a is now the newest
+    lru.put("c", b"1234")                                       # 12 bytes > 10: b goes
+    assert lru.get("b") is None and lru.get("a") and lru.get("c")
+    assert lru.size == 8 and len(lru) == 2
+    lru.put("huge", b"x" * 11)                                  # larger than the bound: not kept
+    assert lru.get("huge") is None and lru.size == 8
+    lru.put("a", b"12")                                         # replacing re-counts the size
+    assert lru.size == 6
+
+
+async def test_a_body_that_does_not_decode_is_not_kept(s3, monkeypatch):
+    """Otherwise one truncated response would fail every later read of the
+    block instead of being fetched again."""
+    _, served = s3
+    real = dc.cog.decode_block
+    calls = {"n": 0}
+
+    def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ValueError("truncated")
+        return real(*a, **k)
+
+    monkeypatch.setattr(dc.cog, "decode_block", flaky)
+    with pytest.raises(ValueError):
+        await dc._block(dc.tile_name(39, 30), await dc._header(dc.tile_name(39, 30)), 0)
+    assert len(dc._raw) == 0
+    await dc.fetch_elevations([(39.99, 30.01)])
+    assert len(dc._raw) == 1
 
 
 async def test_array_reader_matches_the_point_reader(s3):
