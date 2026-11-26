@@ -7,12 +7,21 @@ import { DownloadIcon } from './Icons.jsx';
  * (one Polygon per grid cell) and triggers a file download.
  * Compatible with XCSoar / SkyDemon custom overlay import.
  */
-export default function ExportButton({ heatmap, gridMeta, thermalBase, cape }) {
+export default function ExportButton({ heatmap, gridMeta, thermalBase, predictAlt, cape }) {
   const { t } = useLang();
   const disabled = !heatmap || !gridMeta;
 
   function handleExport() {
     const { lat, lon, rows, cols, radius } = gridMeta;
+    // The thermal base is a height above the ground (thermal_top_agl). Every
+    // altitude on screen names its reference, so the export does too, and
+    // carries the MSL figure the info panel shows beside it: the same base over
+    // the grid's mean terrain (amsl - agl of the prediction altitude). Null
+    // means no estimate, never 0 m, which is a real one (saturated air).
+    const baseAgl = thermalBase ?? null;
+    const baseMsl = baseAgl != null && predictAlt != null
+      ? Math.round(baseAgl + predictAlt.amsl - predictAlt.agl)
+      : null;
     // rows-1 gaps between rows of sample points, not rows — see config.js.
     const latStep = (2 * radius) / (rows - 1);
     const lonStep = (2 * radius) / (cols - 1);
@@ -39,8 +48,9 @@ export default function ExportButton({ heatmap, gridMeta, thermalBase, cape }) {
         },
         properties: {
           thermal_probability: Math.round(prob * 1000) / 1000,
-          thermal_base_m:      thermalBase,
-          cape_j_per_kg:       Math.round(cape),
+          thermal_base_agl_m:  baseAgl,
+          thermal_base_msl_m:  baseMsl,
+          cape_j_per_kg:       cape != null ? Math.round(cape) : null,
         },
       };
     }).filter(f => f.properties.thermal_probability > 0.05); // drop empty cells
