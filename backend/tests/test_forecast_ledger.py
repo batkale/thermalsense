@@ -306,3 +306,103 @@ async def test_issue_job_records_one_forecast_per_horizon(monkeypatch):
     con.close()
     assert [(r[0], r[1]) for r in rows] == [("Inonu", 15), ("Inonu", 120)]
     assert rows[0][2] > 0 and rows[1][2] == 0
+
+
+# --- scoring from the Parquet archive -----------------------------------------
+#
+# A forecast left unscored past the hot DB's retention (the app down, the job
+# behind) used to score no_observation_data.  The window is now read from the
+# archive whenever every day it touches is archived.
+
+def _archived(tmp_path, beacons):
+    """Archive `beacons` as their day, and leave a hot DB that starts later."""
+    pytest.importorskip("pyarrow")
+    from data import archive
+    src, root = tmp_path / "src.db", tmp_path / "archive"
+    _beacon_db(src, beacons)
+    archive.export_day(src, root, TGT.date())
+    bpath = tmp_path / "beacons.db"
+    _beacon_db(bpath, [_b(TGT + timedelta(days=1), "later", 0.0, 0.0, 0.0, False)])
+    return bpath, root
+
+
+def _score_cold(tmp_path, beacons, root=None, bpath=None):
+    lpath = tmp_path / "ledger.db"
+    con = ledger.connect(lpath)
+    fid = _record(con, _prediction())
+    con.close()
+    if root is None:
+        bpath, root = _archived(tmp_path, beacons)
+    ledger.score_due(lpath, bpath, SOARING_AC_TYPES, _label_for,
+                     _POSITIVE_MIN_VARIO, _NEGATIVE_MAX_VARIO,
+                     now=TGT + timedelta(days=2), archive_root=root)
+    return ledger.forecast_detail(lpath, fid)["outcome"]
+
+
+CLIMB_NE = [_early(TGT)] + [
+    _b(TGT + timedelta(seconds=s), "g1", NE[0], NE[1], 2.5, True) for s in range(0, 120, 4)
+] + [_b(TGT, "g2", SW[0], SW[1], -1.5, False),
+     _b(TGT, "tow", NE[0], NE[1], 3.0, True)[:-1] + (1,),       # under tow: ignored
+     _b(TGT + timedelta(minutes=25), "late", SW[0], SW[1], 2.5, True)]
+
+
+def test_a_purged_window_is_scored_from_the_archive(tmp_path):
+    out = _score_cold(tmp_path, CLIMB_NE)
+    assert out["status"] == "supported"
+    assert out["metrics"]["observed_from"] == "archive"
+    assert out["metrics"]["n_pos"] == 1 and out["metrics"]["pos_hot"] == 1
+
+
+def test_archive_and_hot_db_score_the_same_beacons_alike(tmp_path):
+    (tmp_path / "hot").mkdir()
+    (tmp_path / "cold").mkdir()
+    _, hot = _score(tmp_path / "hot", CLIMB_NE)
+    cold = _score_cold(tmp_path / "cold", CLIMB_NE)
+    assert (cold["status"], cold["reason"]) == (hot["outcome"]["status"], hot["outcome"]["reason"])
+    assert {k: v for k, v in cold["metrics"].items() if k != "observed_from"} \
+        == hot["outcome"]["metrics"]
+
+
+def test_a_feed_outage_in_the_archive_is_still_an_outage(tmp_path):
+    out = _score_cold(tmp_path, [_early(TGT)])
+    assert (out["status"], out["reason"]) == ("excluded", "feed_outage")
+
+
+def test_a_day_neither_source_holds_is_no_observation_data(tmp_path):
+    pytest.importorskip("pyarrow")
+    bpath = tmp_path / "beacons.db"
+    _beacon_db(bpath, [_b(TGT + timedelta(days=1), "later", 0.0, 0.0, 0.0, False)])
+    root = tmp_path / "archive"
+    root.mkdir()
+    out = _score_cold(tmp_path, [], root=root, bpath=bpath)
+    assert (out["status"], out["reason"]) == ("excluded", "no_observation_data")
+
+
+def test_an_unreadable_archive_day_is_excluded_not_retried(tmp_path):
+    from data import archive
+    bpath, root = _archived(tmp_path, CLIMB_NE)
+    archive.day_path(root, TGT.date()).write_bytes(b"not parquet")
+    out = _score_cold(tmp_path, [], root=root, bpath=bpath)
+    assert (out["status"], out["reason"]) == ("excluded", "archive_unreadable")
+
+
+def test_window_beacons_reads_each_window_and_spans_midnight(tmp_path):
+    """Windows read together still answer separately, across a day boundary."""
+    pytest.importorskip("pyarrow")
+    from data import archive
+    midnight = datetime(2026, 7, 2, tzinfo=timezone.utc)
+    rows = [_b(midnight - timedelta(minutes=3), "a", 46.0, 10.0, 2.5, True),
+            _b(midnight + timedelta(minutes=3), "b", 46.0, 10.0, -1.5, False),
+            _b(midnight + timedelta(hours=2), "c", 46.0, 10.0, 0.5, False)]   # ambiguous
+    src, root = tmp_path / "src.db", tmp_path / "archive"
+    _beacon_db(src, rows)
+    for d in (midnight.date() - timedelta(days=1), midnight.date()):
+        archive.export_day(src, root, d)
+    w1 = (midnight - timedelta(minutes=10), midnight + timedelta(minutes=10))
+    w2 = (midnight + timedelta(hours=2) - timedelta(minutes=10),
+          midnight + timedelta(hours=2) + timedelta(minutes=10))
+    assert archive.covers(root, *w1)
+    (alive1, b1), (alive2, b2) = archive.window_beacons(
+        root, [w1, w2], SOARING_AC_TYPES, _POSITIVE_MIN_VARIO, _NEGATIVE_MAX_VARIO)
+    assert alive1 and [r[0] for r in b1] == ["a", "b"]
+    assert alive2 and b2 == []           # the feed was alive; nothing labelable

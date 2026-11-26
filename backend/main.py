@@ -276,7 +276,7 @@ async def _ledger_score_job() -> None:
     try:
         res = await asyncio.to_thread(
             ledger.score_due, LEDGER_DB_PATH, DB_PATH, SOARING_AC_TYPES, _label_for,
-            _POSITIVE_MIN_VARIO, _NEGATIVE_MAX_VARIO)
+            _POSITIVE_MIN_VARIO, _NEGATIVE_MAX_VARIO, archive_root=ARCHIVE_DIR)
         if res.get("scored"):
             log.info(f"[ledger] scored {res}")
     except Exception as exc:

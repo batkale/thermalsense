@@ -32,7 +32,8 @@ The cycle
    * ``unverifiable``  not enough soaring traffic to say either way
    * ``excluded``      the forecast or the observation is not fit to judge:
                        synthetic weather, a feed outage, or the beacons for the
-                       window are no longer in the hot DB
+                       window are in neither the hot DB nor the Parquet archive
+                       (a window the hot DB has purged is read from the archive)
 
    Nobody flying somewhere is not evidence of no thermal, which is why
    ``unverifiable`` exists and why it is reported, not dropped.
@@ -67,6 +68,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
+
+from data import archive
 
 log = logging.getLogger(__name__)
 
@@ -415,13 +418,44 @@ def _fc_dict(row) -> dict:
     return d
 
 
+def _archive_observations(archive_root, windows: dict[str, tuple[datetime, datetime]],
+                          soaring_types, pos_min_vario: float, neg_max_vario: float,
+                          ) -> dict[str, tuple[bool, list[tuple]] | None]:
+    """(alive, beacons) per target from the Parquet archive; None if unreadable.
+
+    Grouped by the target's UTC day, so a backlog after an outage reads each
+    day once and holds one day's labelable beacons at a time.
+    """
+    by_day: dict = {}
+    for target, w in windows.items():
+        by_day.setdefault(w[0].astimezone(timezone.utc).date(), []).append(target)
+    out: dict[str, tuple[bool, list[tuple]] | None] = {}
+    for day, targets in sorted(by_day.items()):
+        try:
+            res = archive.window_beacons(archive_root, [windows[t] for t in targets],
+                                         soaring_types, pos_min_vario, neg_max_vario)
+            out.update(zip(targets, res))
+        except Exception as exc:
+            log.warning(f"[ledger] archive unreadable for {day}: {exc}")
+            out.update((t, None) for t in targets)
+    return out
+
+
 def score_due(ledger_path, beacon_db_path, soaring_types, label_for,
               pos_min_vario: float, neg_max_vario: float,
-              now: datetime | None = None, limit: int = 500) -> dict:
+              now: datetime | None = None, limit: int = 500,
+              archive_root=None) -> dict:
     """Score every forecast whose window has closed.  Sync: run in a thread.
 
     Forecasts sharing a target time share one beacon query, so the hot DB is
     read once per window rather than once per site and horizon.
+
+    A window the hot DB no longer holds is read from the Parquet archive at
+    `archive_root` when every day it touches is archived, so a forecast left
+    unscored past the retention window (the app down, the job behind) is still
+    judged.  Only a window neither holds is `no_observation_data`.  A window
+    the archive cannot read is `archive_unreadable`, final like every outcome:
+    left unscored it would come back first in every batch and hold up the rest.
     """
     now = now or datetime.now(timezone.utc)
     closed_before = _iso(now - timedelta(minutes=MATCH_WINDOW_MIN + SETTLE_MIN))
@@ -447,16 +481,46 @@ def score_due(ledger_path, beacon_db_path, soaring_types, label_for,
             bcon = sqlite3.connect(f"file:{beacon_db_path}?mode=ro", uri=True, timeout=30)
             first = bcon.execute("SELECT MIN(ts) FROM beacons").fetchone()[0]
             hot_first = first
+
+        def _window(target):
+            t = datetime.fromisoformat(target)
+            return (t - timedelta(minutes=MATCH_WINDOW_MIN),
+                    t + timedelta(minutes=MATCH_WINDOW_MIN))
+
+        def _hot_covers(t0: str) -> bool:
+            return bcon is not None and hot_first is not None and hot_first <= t0
+
         try:
+            # Windows the hot DB has already purged, read from the archive in
+            # one pass per day before the loop.
+            cold: dict[str, tuple[bool, list[tuple]] | None] = {}
+            if archive_root is not None and archive.available():
+                days = archive.archived_days(archive_root)
+                wanted = {}
+                for target in by_target:
+                    w = _window(target)
+                    if (not _hot_covers(_iso(w[0]))
+                            and archive.covers(archive_root, *w, days=days)):
+                        wanted[target] = w
+                if wanted:
+                    cold = _archive_observations(archive_root, wanted, soaring_types,
+                                                 pos_min_vario, neg_max_vario)
             placeholders = ",".join("?" * len(soaring_types))
             labelable = (f"((circling = 1 AND vario > {pos_min_vario}) OR "
                          f"(circling = 0 AND vario < {neg_max_vario}))")
             for target, fcs in by_target.items():
-                t = datetime.fromisoformat(target)
-                t0 = _iso(t - timedelta(minutes=MATCH_WINDOW_MIN))
-                t1 = _iso(t + timedelta(minutes=MATCH_WINDOW_MIN))
-                beacons, reason = [], None
-                if bcon is None or hot_first is None or hot_first > t0:
+                w = _window(target)
+                t0, t1 = _iso(w[0]), _iso(w[1])
+                beacons, reason, source = [], None, None
+                if target in cold:
+                    source = "archive"
+                    if cold[target] is None:
+                        reason = "archive_unreadable"
+                    else:
+                        alive, beacons = cold[target]
+                        if not alive:
+                            reason = "feed_outage"
+                elif not _hot_covers(t0):
                     reason = "no_observation_data"
                 else:
                     alive = bcon.execute("SELECT 1 FROM beacons WHERE ts >= ? AND ts <= ? "
@@ -476,6 +540,8 @@ def score_due(ledger_path, beacon_db_path, soaring_types, label_for,
                         grids = _load_grids(con, fc["id"])
                         units = build_units(fc, grids, beacons, label_for) if grids else []
                         status, why, metrics = score_forecast(fc, grids, units)
+                        if source:
+                            metrics = {**metrics, "observed_from": source}
                     con.execute(
                         "INSERT INTO outcomes (forecast_id, scored_at, rules_version, "
                         "status, reason, metrics) VALUES (?,?,?,?,?,?)",
