@@ -55,13 +55,13 @@ docker compose up -d --build
 
 There is no lint or typecheck step configured. `pytest.ini` sets
 `asyncio_mode = auto`, so async tests need no decorator.
-`test_meteo_client.py::test_hour_index_falls_back_when_stamp_absent` fails
-whenever the suite runs between 00:00 and 03:00 UTC: it drops the first
-three hours of a day's array and then looks for the current hour in it. That
-is the test, not a regression.
+`test_meteo_client.py`'s hour-index tests build their arrays relative to the
+current hour. Until 26 Nov 2026 one dropped the first three hours of a UTC day
+and then looked for the current hour, so it failed every night from 00:00 to
+03:00 UTC.
 
-`tests/conftest.py` points the model, buffer, beacon DB, archive and terrain
-cache paths at each test's `tmp_path` (autouse). Keep it that way: before it, a
+`tests/conftest.py` points the model, buffer, beacon DB, archive, terrain and
+land-cover cache paths at each test's `tmp_path` (autouse). Keep it that way: before it, a
 run replaced the real `training_buffer.npz` with 3 stub rows — the buffer
 committed from 17 Sep to 30 Sep 2026 was that file — and wrote into a local
 `ogn_history.db`. The terrain cache was the same story until 16 Nov 2026: the
@@ -687,8 +687,11 @@ Breaking any of these has taken the app down or silently corrupted results befor
   and the invented 500 W/m² carried night rows past `_MIN_SOLAR_GHI`. The
   sampler is strict now, and `load()` drops rows matching
   `meteo_client.is_fallback_row` (seven columns at once; no genuine row matched
-  more than two). **`/predict` still shows the fallback as if it were a
-  forecast** — deliberate for an offline demo, but nothing on screen says so.
+  more than two). **`/predict` still serves a map built on the fallback** —
+  deliberate for an offline demo. Since the ledger (PR #8) the response
+  carries `meteo_fallback`, and the map note (`meteoFallbackMap`) says the
+  weather is default values, so trust the terrain ranking, not the percentages.
+  The weather bar's figures themselves are not marked.
 
 ## API
 
@@ -956,9 +959,22 @@ ledger does, by recording forecasts before their time and checking them after.
   never those of `supported` forecasts — they are the gallery.
 - **Read a single `supported` with care:** one climb lands in the top 20% by
   chance one time in five. The claim is the per-horizon summary, not examples.
-- **Known gap:** scoring reads the hot DB only. If the app is down past
-  `BEACON_RETENTION_DAYS`, those forecasts score `no_observation_data`; reading
-  the Parquet archive instead is the obvious next step.
+- **A window the hot DB has purged is read from the Parquet archive** (since
+  26 Nov 2026; `archive.window_beacons`). Before that, a forecast left unscored
+  past `BEACON_RETENTION_DAYS` (the app down, the job behind) scored
+  `no_observation_data`. Now it scores against the archive whenever every UTC
+  day its window touches is archived, with the same filters as the SQL query,
+  and its metrics carry `observed_from: "archive"`. Windows are read one day
+  at a time: whether the feed was alive comes from streaming the timestamps,
+  and only labelable soaring rows are kept in memory. Only a window that
+  neither source holds is `no_observation_data`, which includes the days
+  missing from the archive. A day file the archive cannot read gives
+  `archive_unreadable`. That outcome is final like every other: left
+  unscored, those forecasts would come first in every 500-forecast batch and
+  hold up the rest. The archive keeps lat, lon, alt and vario as float32. A
+  parity test pins the two sources to the same outcome on the same beacons,
+  but a vario within float32 rounding of a threshold could still be labelled
+  differently. Rules are unchanged, so `RULES_VERSION` stays 1.
 
 **Sky and local clock** (`weather.condition`, `is_day`, `utc_offset_s`,
 `timezone` in `/predict`, and `/weather`): `weathercode` and `is_day` ride in
@@ -1173,7 +1189,9 @@ separate x and y pixel sizes.
   thermal base is AGL (`thermal_top_agl` is a height above the surface, in
   50 m steps) with its MSL equivalent over the grid's mean terrain. Two bare "m" figures side by side
   read as comparable and were not — the mentor review asked exactly this.
-  The GeoJSON export's `thermal_base_m` is still AGL and still unlabelled.
+  The GeoJSON export does the same: `thermal_base_agl_m` and
+  `thermal_base_msl_m` (renamed from the unlabelled `thermal_base_m` on
+  26 Nov 2026). Either is `null` when there is no estimate.
 - Map labels come from Esri's `Reference/World_Boundaries_and_Places` layer,
   not CARTO. Requested without a key, CARTO's `voyager_only_labels` tiles now
   return no labels and "API KEY REQUIRED" across each one (seen 15 Nov 2026),
@@ -1183,9 +1201,12 @@ separate x and y pixel sizes.
 - `ENABLE_LANDCOVER` is off by default. The plumbing is complete and tested, but
   measured through `evaluation/` the change moves the within-group score by −0.04
   to +0.02 depending only on the CV fold seed. Flipping it on requires a retrain
-  — the columns change meaning, not width. **Bound its cache first:**
-  `landcover_client._grid_cache` is still a plain dict that keeps one stack per
-  grid centre forever, the same shape as the terrain leak of Nov 2026.
+  — the columns change meaning, not width. Its grid cache is bounded
+  (`LANDCOVER_GRID_CACHE`, 256 stacks of ~2 KB, least recently used first,
+  since 26 Nov 2026) and reported under `landcover` in `/training/status`.
+  Before that it kept one stack per grid centre forever, the shape of the
+  terrain leak of Nov 2026, though at ~2 KB a stack, not 316 KB. Its disk copy
+  is still one small `.npy` per centre, kept forever.
 
 ## Housekeeping
 

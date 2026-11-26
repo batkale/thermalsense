@@ -33,7 +33,9 @@ import numpy as np
 
 from data import cog
 
-from config import GRID_RADIUS, TERRAIN_RES, DATA_DIR, WORLDCOVER_BASE
+from config import (
+    GRID_RADIUS, TERRAIN_RES, DATA_DIR, WORLDCOVER_BASE, LANDCOVER_GRID_CACHE,
+)
 
 log = logging.getLogger(__name__)
 
@@ -72,8 +74,16 @@ _CACHE_DIR = DATA_DIR / "cache" / "landcover"
 # Parsed COG directories, keyed by tile name. Small (a few KB) and reused by
 # every grid inside the same 3-degree tile.
 _cog_cache: dict[str, list[dict] | None] = {}
-# Extracted class grids, keyed like the terrain grid cache.
+# Extracted (heat, albedo) stacks, keyed like the terrain grid cache and bounded
+# the same way: least recently used first, at LANDCOVER_GRID_CACHE.  It was a
+# plain dict holding every centre ever asked about, the shape of the terrain
+# leak behind the November 2026 OOM kills.  The disk copy is what persists.
 _grid_cache: dict[tuple[float, float, float], np.ndarray] = {}
+
+
+def cache_status() -> dict:
+    """What this process holds against its bound, for /training/status."""
+    return {"grids": len(_grid_cache), "grids_max": LANDCOVER_GRID_CACHE}
 
 _client: httpx.AsyncClient | None = None
 
@@ -262,15 +272,15 @@ async def fetch_landcover_props(lat: float, lon: float,
     neutral defaults rather than an error, so a caller always gets a usable
     grid.
     """
-    from data.terrain_client import snap_grid_centre
+    from data.terrain_client import snap_grid_centre, _recall, _remember
 
     clat, clon = snap_grid_centre(lat, lon)
     if shape is None:
         n = round((2 * radius) / TERRAIN_RES) + 1
         shape = (n, n)
     key = (clat, clon, radius)
-    if key in _grid_cache:
-        stack = _grid_cache[key]
+    stack = _recall(_grid_cache, key)
+    if stack is not None:
         return stack[0], stack[1]
 
     path = _grid_path(key)
@@ -278,7 +288,7 @@ async def fetch_landcover_props(lat: float, lon: float,
         try:
             stack = np.load(path)
             if stack.shape == (2, *shape):
-                _grid_cache[key] = stack
+                _remember(_grid_cache, key, stack, LANDCOVER_GRID_CACHE)
                 return stack[0], stack[1]
         except Exception as exc:
             log.warning(f"[landcover] cached grid {path.name} unreadable ({exc})")
@@ -323,7 +333,7 @@ async def fetch_landcover_props(lat: float, lon: float,
         except Exception as exc:
             log.warning(f"[landcover] read failed for {name} ({exc}) — using defaults")
 
-    _grid_cache[key] = stack
+    _remember(_grid_cache, key, stack, LANDCOVER_GRID_CACHE)
     try:
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
         np.save(path, stack)

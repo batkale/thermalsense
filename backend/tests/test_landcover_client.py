@@ -179,3 +179,34 @@ def test_pick_level_takes_the_finest_within_the_target():
     levels = _parse_ifds(_synthetic_cog())
     assert _pick_level(levels, 0.0015) == 0     # only level 0 is fine enough
     assert _pick_level(levels, 0.005) == 1      # both qualify; prefer the cheaper
+
+
+# --- grid cache bound ---------------------------------------------------------
+
+async def test_grid_cache_holds_no_more_than_its_bound(monkeypatch):
+    """
+    One stack per grid centre used to be kept forever, the shape of the terrain
+    leak of Nov 2026.  The bound keeps the most recently used, and a read counts
+    as use.  Over sea the header is missing, so no request is made.
+    """
+    from data import landcover_client as lc
+
+    async def no_tile(name):
+        return None
+
+    monkeypatch.setattr(lc, "_fetch_header", no_tile)
+    monkeypatch.setattr(lc, "LANDCOVER_GRID_CACHE", 3)
+    centres = [(10.0 + i, 20.0) for i in range(5)]
+    for lat, lon in centres[:3]:
+        await lc.fetch_landcover_props(lat, lon)
+    await lc.fetch_landcover_props(*centres[0])        # read: now the newest
+    for lat, lon in centres[3:]:
+        await lc.fetch_landcover_props(lat, lon)
+
+    assert lc.cache_status() == {"grids": 3, "grids_max": 3}
+    kept = {round(k[0]) for k in lc._grid_cache}
+    assert kept == {10, 13, 14}                       # 11 and 12 aged out
+
+    # An evicted centre comes back from disk, unchanged.
+    heat, albedo = await lc.fetch_landcover_props(*centres[1])
+    assert heat.shape == albedo.shape and np.all(heat == DEFAULT_PROPS[0])

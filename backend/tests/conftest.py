@@ -38,6 +38,14 @@ def _terrain_cache_in_tmp(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _landcover_cache_in_tmp(tmp_path, monkeypatch):
+    """The land-cover grid cache, on disk and in memory, likewise per test."""
+    from data import landcover_client as lc
+    monkeypatch.setattr(lc, "_CACHE_DIR", tmp_path / lc._CACHE_DIR.name)
+    monkeypatch.setattr(lc, "_grid_cache", {})
+
+
+@pytest.fixture(autouse=True)
 def _model_files_in_tmp(tmp_path, monkeypatch):
     """
     Point every model and buffer write at the test's own tmp_path.

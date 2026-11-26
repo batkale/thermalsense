@@ -393,6 +393,100 @@ def training_rows(root: Path, since: date, until: date, ac_types,
     ))
 
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _us(t: datetime) -> int:
+    """Microseconds since the epoch, exact (no float on the way)."""
+    return (t.astimezone(timezone.utc) - _EPOCH) // timedelta(microseconds=1)
+
+
+def _days_between(t0: datetime, t1: datetime) -> list[date]:
+    d, last = t0.astimezone(timezone.utc).date(), t1.astimezone(timezone.utc).date()
+    out = []
+    while d <= last:
+        out.append(d)
+        d += timedelta(days=1)
+    return out
+
+
+def covers(root: Path, t0: datetime, t1: datetime,
+           days: set[date] | None = None) -> bool:
+    """True when every UTC day the window [t0, t1] touches is archived."""
+    days = archived_days(root) if days is None else days
+    return all(d in days for d in _days_between(t0, t1))
+
+
+def window_beacons(root: Path, windows: list[tuple[datetime, datetime]], ac_types,
+                   positive_min_vario: float, negative_max_vario: float,
+                   ) -> list[tuple[bool, list[tuple]]]:
+    """
+    For each (t0, t1) window, inclusive: was the feed alive, and its labelable
+    soaring beacons as (id, lat, lon, alt, vario, circling).
+
+    The forecast ledger's answer for windows the hot DB no longer holds — the
+    same filters as its SQL query (soaring types, untowed, labelable by the
+    same two vario thresholds), so a forecast scores the same from either
+    source but for the archive's float32 coordinates and vario.
+
+    Windows are read together, so a backlog after an outage costs one scan of
+    the days it spans, not one per window.  A day is sorted by (id, ts), so
+    row-group statistics cannot skip on time: every row of the span is
+    decoded.  Two things keep that within the RAM budget.  Whether the feed
+    was alive needs only the timestamps, and those are streamed batch by
+    batch, never materialised.  Beacons are materialised only after the
+    labelable and soaring filters push into the scan.
+    """
+    if not windows:
+        return []
+    pa, _ = _pa()
+    import numpy as np
+    import pyarrow.dataset as ds
+
+    root = Path(root)
+    lo = min(t0 for t0, _ in windows)
+    hi = max(t1 for _, t1 in windows)
+    days = _days_between(lo, hi)
+    ts_type = pa.timestamp("us", tz="UTC")
+    span = ((ds.field("date") >= days[0].isoformat())
+            & (ds.field("date") <= days[-1].isoformat())
+            & (ds.field("ts") >= pa.scalar(lo.astimezone(timezone.utc), type=ts_type))
+            & (ds.field("ts") <= pa.scalar(hi.astimezone(timezone.utc), type=ts_type)))
+    starts = np.array([_us(t0) for t0, _ in windows], dtype=np.int64)
+    ends = np.array([_us(t1) for _, t1 in windows], dtype=np.int64)
+
+    dataset = ds.dataset(str(root), format="parquet", partitioning="hive")
+
+    alive = np.zeros(len(windows), dtype=bool)
+    for batch in dataset.scanner(columns=["ts"], filter=span).to_batches():
+        if batch.num_rows == 0:
+            continue
+        ts = np.sort(batch.column(0).cast(pa.int64()).to_numpy())
+        alive |= np.searchsorted(ts, ends, "right") > np.searchsorted(ts, starts, "left")
+        if alive.all():
+            break
+
+    labelable = (((ds.field("circling") == 1)
+                  & (ds.field("vario") > positive_min_vario))
+                 | ((ds.field("circling") == 0)
+                    & (ds.field("vario") < negative_max_vario)))
+    filt = (span & (ds.field("under_tow") == 0)
+            & ds.field("ac_type").isin(list(ac_types)) & labelable)
+    names = ["id", "lat", "lon", "alt", "vario", "circling"]
+    table = dataset.to_table(columns=["ts", *names], filter=filt)
+    ts = table.column("ts").cast(pa.int64()).to_numpy()
+    order = np.argsort(ts, kind="stable")
+    ts = ts[order]
+    cols = [table.column(n).to_numpy(zero_copy_only=False)[order] for n in names]
+
+    out = []
+    for k, (s, e) in enumerate(zip(starts, ends)):
+        i0, i1 = np.searchsorted(ts, s, "left"), np.searchsorted(ts, e, "right")
+        rows = list(zip(*(c[i0:i1].tolist() for c in cols))) if i1 > i0 else []
+        out.append((bool(alive[k]), rows))
+    return out
+
+
 def stats(root: Path) -> dict:
     """Size and coverage, for /healthz and the operator."""
     days = sorted(archived_days(root))

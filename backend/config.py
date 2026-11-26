@@ -81,6 +81,11 @@ DEM_RAW_CACHE_MB = int(os.getenv("DEM_RAW_CACHE_MB", "384"))
 # = 40 KB each, so 32 is ~1.3 MB.  Display only: nothing trains on them.
 RELIEF_STEP           = 0.001
 TERRAIN_RELIEF_CACHE  = int(os.getenv("TERRAIN_RELIEF_CACHE", "32"))
+# Land-cover (heat, albedo) stacks per grid centre (landcover_client), on the
+# coarse terrain lattice: 2 x 11 x 11 float64, ~2 KB each, so 256 is ~0.5 MB.
+# Unbounded, ~2,900 new centres a day would add ~6 MB a day for as long as the
+# process lived.  A miss reads one small .npy from disk.
+LANDCOVER_GRID_CACHE = int(os.getenv("LANDCOVER_GRID_CACHE", "256"))
 # How long one retrain cycle may spend filling the full-resolution columns into
 # buffer rows collected before they existed.  Fits wait until it is done, so the
 # first wider model is judged on complete rows; ~33k rows take a few cycles.

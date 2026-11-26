@@ -319,10 +319,11 @@ export default function App() {
             heatmap={heatmap}
             gridMeta={gridMeta}
             thermalBase={weather?.thermal_base}
+            predictAlt={predictAlt}
             cape={weather?.cape}
           />
 
-          {loading && <div className="status loading">{t('fetchingPrediction')}</div>}
+          {loading &&<div className="status loading">{t('fetchingPrediction')}</div>}
           {error   && <div className="status error"><AlertIcon /> {t(error)}</div>}
           {!loading && !error && !heatmap && <div className="status hint">{t('clickMapToPredict')}</div>}
 

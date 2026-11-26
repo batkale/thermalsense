@@ -308,7 +308,7 @@ async def _ledger_score_job() -> None:
     try:
         res = await asyncio.to_thread(
             ledger.score_due, LEDGER_DB_PATH, DB_PATH, SOARING_AC_TYPES, _label_for,
-            _POSITIVE_MIN_VARIO, _NEGATIVE_MAX_VARIO)
+            _POSITIVE_MIN_VARIO, _NEGATIVE_MAX_VARIO, archive_root=ARCHIVE_DIR)
         if res.get("scored"):
             log.info(f"[ledger] scored {res}")
     except Exception as exc:
@@ -493,6 +493,8 @@ async def training_status():
         # Which source is carrying terrain and today's work on each.  With
         # Copernicus primary, the API figure above is only the fallback traffic.
         "terrain": terrain_client.source_usage(),
+        # Off by default (ENABLE_LANDCOVER); empty then, but the bound shows.
+        "landcover": landcover_client.cache_status(),
         "disk_free_gb": round(await asyncio.to_thread(_free_disk_gb), 1),
         "memory_mb": await section(_memory_stats),
     }
