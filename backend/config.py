@@ -300,6 +300,18 @@ NIGHTLY_SEED_LIMIT = int(os.getenv("NIGHTLY_SEED_LIMIT", "2000"))
 PRIORITY_BBOX = (35.8, 42.2, 25.6, 44.9)      # lat_min, lat_max, lon_min, lon_max
 PRIORITY_SEED_LIMIT = int(os.getenv("PRIORITY_SEED_LIMIT", "2000"))
 
+# One-time Türkiye catch-up (since 27 Nov 2026).  The rows earlier worldwide
+# seeds sampled past are still on disk, and the manual
+# POST /seed?priority_only=true that would take them needs someone to send the
+# admin key from a shell -- it never got sent.  So the first nightly seed after
+# this shipped takes them itself: every labelable row in the box over
+# PRIORITY_CATCHUP_DAYS (hot DB and archive; the archive began 21 Oct 2026),
+# and that night's ordinary seed skips the box so nothing is taken twice.  The
+# marker records the result and makes it once only, whatever the outcome: a
+# second pass would add the same rows again.  Delete it to run it again.
+PRIORITY_CATCHUP_DAYS = float(os.getenv("PRIORITY_CATCHUP_DAYS", "60"))
+PRIORITY_CATCHUP_MARKER = DATA_DIR / "data" / "priority_catchup.json"
+
 # Wall-clock ceiling for one seed run.  The live sampler has had
 # SAMPLE_TIME_BUDGET_S since the quota work; the seed had no deadline at all,
 # which is the asymmetry that took the box down on 18 Sep 2026 — it stopped only

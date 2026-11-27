@@ -1249,6 +1249,7 @@ class ThermalModel:
         limit: int = 5000,
         reset: bool = False,
         priority_only: bool = False,
+        include_priority: bool = True,
     ) -> dict:
         """
         Backfill the training buffer from the historical beacons DB.
@@ -1257,7 +1258,8 @@ class ThermalModel:
         from `limit`: every labelable one up to PRIORITY_SEED_LIMIT per source
         (hot DB, archive), then the worldwide sample of `limit`, which skips the
         box.  priority_only=True takes the box alone -- the one-off backfill of
-        the Turkish rows earlier seeds sampled past.
+        the Turkish rows earlier seeds sampled past.  include_priority=False
+        skips the box altogether, for the night the catch-up has just taken it.
 
         Groups beacons into (0.5° lat × 0.5° lon × UTC hour) buckets so that
         historical meteo is fetched once per bucket rather than once per beacon.
@@ -1373,15 +1375,20 @@ class ThermalModel:
                     "buffer_total": len(self._buffer_X),
                 }
             base_args = (cutoff, *soaring_ids)
-            pri_total, pri_rows = _strided(
+            take_box = include_priority or priority_only
+            pri_total, pri_rows = (_strided(
                 con, f"{where} AND {in_box}", (*base_args, *box_args), PRIORITY_SEED_LIMIT)
+                if take_box else (0, []))
             if priority_only:
                 total, rows = 0, []
             else:
                 total, rows = _strided(
                     con, f"{where} AND NOT {in_box}", (*base_args, *box_args), limit)
             total += pri_total
-            if total == 0:
+            # An empty hot DB is only the end when there is no archive to read:
+            # two quiet November days left it without a single Turkish row, and
+            # returning here then skipped every archived day a backfill asked for.
+            if total == 0 and not archive_days:
                 log.warning(
                     "[seed] no untowed classified soaring beacons in the window — "
                     "history predates aircraft-type or aerotow filtering; let the "
@@ -1422,7 +1429,7 @@ class ThermalModel:
                     ARCHIVE_DIR, older[0], older[-1], sorted(SOARING_AC_TYPES),
                     _POSITIVE_MIN_VARIO, _NEGATIVE_MAX_VARIO, PRIORITY_SEED_LIMIT,
                     bbox=PRIORITY_BBOX,
-                )
+                ) if take_box else []
                 cold = [] if priority_only else _archive.training_rows(
                     ARCHIVE_DIR, older[0], older[-1], sorted(SOARING_AC_TYPES),
                     _POSITIVE_MIN_VARIO, _NEGATIVE_MAX_VARIO, limit,

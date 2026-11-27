@@ -482,6 +482,9 @@ async def training_status():
         },
         "buffer": await section(model.training_summary),
         "last_seed": model.last_seed,
+        # The one-time Türkiye catch-up (PRIORITY_CATCHUP_DAYS): pending, or
+        # what it found and added.  last_seed is overwritten by the next run.
+        "priority_catchup": await section(_priority_catchup_status),
         "archive": await section(
             lambda: archive.stats(ARCHIVE_DIR) if archive.available()
             else {"error": "pyarrow not installed"}),
@@ -1169,10 +1172,12 @@ async def trigger_train(background_tasks: BackgroundTasks):
 
 
 async def _seed_job(days_back: float | None, limit: int, reset: bool = False,
-                    priority_only: bool = False) -> None:
+                    priority_only: bool = False, include_priority: bool = True) -> dict | None:
+    """Run one seed and fit on it.  Returns its result, or None if it timed out
+    or raised -- the one-time Türkiye catch-up records which."""
     async with _training_lock:
         log.info(f"[seed] starting — days_back={days_back}, limit={limit}, reset={reset}, "
-                 f"priority_only={priority_only}")
+                 f"priority_only={priority_only}, include_priority={include_priority}")
         try:
             # Terrain is the bottleneck: ~1 unique 0.1-degree cell per beacon at the
             # SRTM API's 1 req/s cap, so a few thousand beacons runs well past an
@@ -1180,21 +1185,22 @@ async def _seed_job(days_back: float | None, limit: int, reset: bool = False,
             # generous — it is a background job with a lock, not a request.
             result = await asyncio.wait_for(
                 model.seed_from_history(days_back=days_back, limit=limit, reset=reset,
-                                        priority_only=priority_only),
+                                        priority_only=priority_only,
+                                        include_priority=include_priority),
                 timeout=SEED_TIMEOUT,
             )
         except asyncio.TimeoutError:
             log.warning(f"[seed] timed out after {SEED_TIMEOUT}s — nothing saved")
-            return
+            return None
         except Exception as exc:
             log.error(f"[seed] failed: {exc}")
-            return
+            return None
 
         # seed_from_history swallows per-beacon errors, so a run can "succeed"
         # having added nothing at all.  Surface that instead of fitting on nothing.
         if not result or result.get("added", 0) == 0:
             log.error(f"[seed] added no samples — not fitting. result={result}")
-            return
+            return result
         log.info(f"[seed] {result}")
         # Kept for /training/status: a nightly job nobody can see the result of
         # is indistinguishable from one that is not running.
@@ -1208,6 +1214,44 @@ async def _seed_job(days_back: float | None, limit: int, reset: bool = False,
             await model.retrain()
         except Exception as exc:
             log.error(f"[seed] post-seed retrain failed: {exc}")
+        return result
+
+
+def _priority_catchup_status() -> dict:
+    """The one-time Türkiye catch-up: not yet run, or what it did."""
+    import config as _cfg
+    marker = Path(_cfg.PRIORITY_CATCHUP_MARKER)
+    if not marker.exists():
+        return {"done": False, "runs": "with the next nightly seed, 02:00 UTC"}
+    return {"done": True, **json.loads(marker.read_text(encoding="utf-8"))}
+
+
+async def _priority_catchup_once() -> bool:
+    """
+    Take every Türkiye row still on disk, once (see PRIORITY_CATCHUP_DAYS).
+
+    Returns True when it ran tonight, so the ordinary seed that follows skips
+    the box.  The marker is written whatever the outcome -- a run that failed
+    halfway may already have added rows, and running it again would add them
+    twice -- and /training/status shows it.
+    """
+    import config as _cfg
+    marker = Path(_cfg.PRIORITY_CATCHUP_MARKER)
+    if marker.exists():
+        return False
+    log.info(f"[seed] one-time Türkiye catch-up over {_cfg.PRIORITY_CATCHUP_DAYS:g} days")
+    result = await _seed_job(days_back=_cfg.PRIORITY_CATCHUP_DAYS, limit=0,
+                             reset=False, priority_only=True)
+    record = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+              "days_back": _cfg.PRIORITY_CATCHUP_DAYS,
+              "outcome": "completed" if result is not None else "failed or timed out",
+              **(result or {})}
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    tmp = marker.with_name(marker.name + ".tmp")
+    tmp.write_text(json.dumps(record, indent=1, default=str), encoding="utf-8")
+    tmp.replace(marker)
+    log.info(f"[seed] Türkiye catch-up recorded: {record}")
+    return True
 
 
 async def _nightly_seed_job() -> None:
@@ -1225,7 +1269,9 @@ async def _nightly_seed_job() -> None:
     when no European daylight sampling is competing for the meteo allowance.
     """
     log.info("[seed] nightly run starting")
-    await _seed_job(days_back=1, limit=NIGHTLY_SEED_LIMIT, reset=False)
+    caught_up = await _priority_catchup_once()
+    await _seed_job(days_back=1, limit=NIGHTLY_SEED_LIMIT, reset=False,
+                    include_priority=not caught_up)
 
 
 @app.post("/seed", dependencies=[Depends(_require_admin)])

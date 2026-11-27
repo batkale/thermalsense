@@ -116,6 +116,14 @@ def _todo_in_tmp(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _catchup_marker_in_tmp(tmp_path, monkeypatch):
+    """And the one-time Türkiye catch-up's marker: a test that runs the nightly
+    job must not mark the real catch-up as done, or it would never run."""
+    import config
+    monkeypatch.setattr(config, "PRIORITY_CATCHUP_MARKER", tmp_path / "priority_catchup.json")
+
+
+@pytest.fixture(autouse=True)
 def _ledger_in_tmp(tmp_path, monkeypatch):
     """And the forecast ledger, so no test writes into a real one."""
     import config

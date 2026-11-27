@@ -538,16 +538,21 @@ async def test_one_matrix_per_grid_not_per_beacon(tmp_path, monkeypatch):
 async def test_nightly_seed_reads_yesterday(tmp_path, monkeypatch):
     """One day back, appending rather than resetting: the live sampler's rows
     from the same day are still worth keeping."""
+    import config
     import main
 
     calls = {}
 
-    async def fake_seed_job(days_back, limit, reset=False):
-        calls.update(days_back=days_back, limit=limit, reset=reset)
+    async def fake_seed_job(days_back, limit, reset=False, **kw):
+        calls.update(days_back=days_back, limit=limit, reset=reset, **kw)
 
+    # An ordinary night: the one-time Türkiye catch-up has already run
+    # (test_priority_region covers the night it runs).
+    config.PRIORITY_CATCHUP_MARKER.write_text("{}", encoding="utf-8")
     monkeypatch.setattr(main, "_seed_job", fake_seed_job)
     await main._nightly_seed_job()
-    assert calls == {"days_back": 1, "limit": main.NIGHTLY_SEED_LIMIT, "reset": False}
+    assert calls == {"days_back": 1, "limit": main.NIGHTLY_SEED_LIMIT, "reset": False,
+                     "include_priority": True}
 
 
 # ---------------------------------------------------------------------------

@@ -184,6 +184,90 @@ async def test_the_priority_cap_holds(seed_env, monkeypatch):
     assert out["priority_rows"] == 2
 
 
+async def test_the_catch_up_night_seeds_the_world_without_the_box(seed_env):
+    m = tm.ThermalModel()
+    out = await m.seed_from_history(days_back=1, limit=5, reset=True, include_priority=False)
+    assert out["priority_rows"] == 0
+    assert out["rows_scanned"] == 5 and _turkish_rows(m) == 0
+
+
+async def test_an_empty_hot_db_still_reads_the_archive(tmp_path, monkeypatch, seed_env):
+    """Two quiet days left the hot DB without a Turkish row, and the seed used to
+    return there -- before reading a single archived day."""
+    hot = tmp_path / "hot.db"
+    con = sqlite3.connect(hot)
+    con.execute("""CREATE TABLE beacons (ts TEXT, id TEXT, lat REAL, lon REAL,
+                   alt REAL, vario REAL, circling INT, is_tow INT,
+                   ac_type INT, under_tow INT)""")
+    con.execute("INSERT INTO beacons VALUES (?,?,?,?,?,?,?,?,?,?)",     # one unlabelable row
+                (datetime.now(timezone.utc).isoformat(), "X", 46.0, 11.0, 2000.0, 0.0, 0, 0, 7, 0))
+    con.commit()
+    con.close()
+    monkeypatch.setattr(config, "DB_PATH", hot)
+
+    day = (datetime.now(timezone.utc) - timedelta(days=3)).date()
+    src = tmp_path / "src.db"
+    _beacon_db(src, n_europe=0)
+    with sqlite3.connect(src) as c:                       # move the Turkish rows to that day
+        c.execute("UPDATE beacons SET ts = ?", (datetime(day.year, day.month, day.day, 11, 10,
+                                                         tzinfo=timezone.utc).isoformat(),))
+    archive.export_day(src, config.ARCHIVE_DIR, day)
+
+    m = tm.ThermalModel()
+    out = await m.seed_from_history(days_back=30, limit=0, reset=True, priority_only=True)
+    assert out["priority_rows"] == 4 and out["priority_added"] == 4
+
+
+# ---------------------------------------------------------------------------
+# The one-time catch-up in the nightly job
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def nightly(monkeypatch):
+    import main
+    calls = []
+
+    async def fake_seed_job(days_back, limit, reset=False, priority_only=False,
+                            include_priority=True):
+        calls.append(dict(days_back=days_back, priority_only=priority_only,
+                          include_priority=include_priority))
+        return calls_result[0]
+
+    calls_result = [{"added": 7, "priority_rows": 9, "priority_added": 7}]
+    monkeypatch.setattr(main, "_seed_job", fake_seed_job)
+    return main, calls, calls_result
+
+
+async def test_the_catch_up_runs_once_and_that_night_skips_the_box(nightly):
+    main, calls, _ = nightly
+    assert main._priority_catchup_status()["done"] is False
+
+    await main._nightly_seed_job()
+    assert calls == [
+        dict(days_back=config.PRIORITY_CATCHUP_DAYS, priority_only=True, include_priority=True),
+        dict(days_back=1, priority_only=False, include_priority=False),
+    ]
+    status = main._priority_catchup_status()
+    assert status["done"] is True and status["outcome"] == "completed"
+    assert status["priority_added"] == 7
+
+    calls.clear()
+    await main._nightly_seed_job()                        # the next night: an ordinary seed
+    assert calls == [dict(days_back=1, priority_only=False, include_priority=True)]
+
+
+async def test_a_failed_catch_up_is_recorded_and_not_repeated(nightly):
+    """A run that died halfway may already have added rows; a second would add
+    them twice.  It is recorded for a person to look at instead."""
+    main, calls, result = nightly
+    result[0] = None
+    await main._nightly_seed_job()
+    assert main._priority_catchup_status()["outcome"] == "failed or timed out"
+    calls.clear()
+    await main._nightly_seed_job()
+    assert [c["priority_only"] for c in calls] == [False]
+
+
 # ---------------------------------------------------------------------------
 # The archive
 # ---------------------------------------------------------------------------
