@@ -300,6 +300,20 @@ Breaking any of these has taken the app down or silently corrupted results befor
   - **Backfill:** `POST /seed?priority_only=true` takes the box alone, the
     one-off backfill of what earlier seeds sampled past. `last_seed` reports
     `priority_rows` and `priority_added`.
+  - **It runs itself, once** (since 27 Nov 2026). Nobody managed to send that
+    POST with the admin key from a shell in six days, so the first nightly
+    seed after the change does it: `_priority_catchup_once` seeds the box over
+    `PRIORITY_CATCHUP_DAYS` (60; the VM's archive begins 21 Oct), and that
+    night's ordinary seed runs with `include_priority=False` so nothing is
+    taken twice. The marker `/data/data/priority_catchup.json` holds the
+    result and makes it once only, whatever the outcome: a run that died
+    halfway may already have added rows. `/training/status` shows it as
+    `priority_catchup`. Delete the marker to run it again.
+  - **An empty hot DB no longer ends the seed early.** It returned "no rows"
+    whenever the hot DB had nothing labelable in its window, before reading a
+    single archived day. Two quiet November days leave the hot DB with no
+    Turkish row at all, so every Türkiye backfill would have found nothing.
+    It now returns early only when there is no archive either.
 
   **This is not much data, and the feed cannot give more.** Measured on the
   52-day archive (17 Aug–5 Nov): OGN heard 143 soaring aircraft over Türkiye
