@@ -1202,6 +1202,11 @@ button { font-family: inherit; }
 .tp-regions th + th, .tp-regions td + td { text-align: right; }
 /* The home market, so it is found at a glance even when its row is all zeros. */
 .tp-regions tr.home td { color: var(--text-title); font-weight: 600; background: var(--bg-surface); }
+/* Daily score: a delta is green or red only when its interval clears zero. */
+.tp-regions td.ok  { color: var(--ok); }
+.tp-regions td.bad { color: var(--danger); }
+.tp-regions td .tp-ci { display: block; font-size: 10px; color: var(--text-muted); }
+.tp-regions td.tp-reason { text-align: left; color: var(--text-muted); }
 
 /* ---- Narrow screens ----
    The desktop layout put a fixed 256 px column beside the map, which on a

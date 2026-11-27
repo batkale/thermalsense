@@ -252,6 +252,34 @@ def test_summary_reports_hit_rate_against_chance(tmp_path):
     assert row["within_persistence"]["value"] == 0.5
 
 
+def test_a_past_now_bounds_the_summary_to_its_own_day(tmp_path):
+    """The daily score history asks for one finished UTC day at a time, so a
+    past `now` must not count targets after it — and a target at exactly
+    midnight belongs to one day, not both."""
+    from datetime import date
+    from models import score_history as sh
+
+    lpath = tmp_path / "ledger.db"
+    con = ledger.connect(lpath)
+    _record(con, _prediction())                                   # 1 Jul 12:00
+    for target in (datetime(2026, 7, 2, 0, 0, tzinfo=timezone.utc),
+                   datetime(2026, 7, 2, 12, 0, tzinfo=timezone.utc)):
+        p = _prediction()
+        p["issued_at"], p["target_at"] = target - timedelta(minutes=120), target
+        _record(con, p)
+    con.close()
+
+    def issued(day):
+        s = ledger.horizon_summary(lpath, days=1, boot=50, now=sh.ledger_window_end(day))
+        return sum(h["issued"] for h in s["horizons"])
+
+    assert issued(date(2026, 7, 1)) == 1
+    assert issued(date(2026, 7, 2)) == 2
+    # Without a `now`, still everything from the window start on, as before.
+    assert sum(h["issued"] for h in
+               ledger.horizon_summary(lpath, days=3650, boot=50)["horizons"]) == 3
+
+
 def test_examples_carry_their_denominator(tmp_path):
     _score(tmp_path, [_early(TGT), _b(TGT, "g1", NE[0], NE[1], 2.5, True)])
     ex = ledger.examples(tmp_path / "ledger.db", "supported")

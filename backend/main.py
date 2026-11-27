@@ -19,6 +19,7 @@ from pipeline.feature_engineering import build_feature_matrix
 from models.thermal_model import (ThermalModel, _MIN_SOLAR_GHI, _label_for,
                                   _POSITIVE_MIN_VARIO, _NEGATIVE_MAX_VARIO)
 from data import forecast_ledger as ledger
+from models import score_history
 from data.ogn_client      import SOARING_AC_TYPES
 from config import (UPDATE_INTERVAL, WS_FRAME_INTERVAL, GRID_RES, GRID_RADIUS, CORS_ORIGINS, ADMIN_TOKEN,
                     STATIC_DIR, DATA_DIR, BEACON_RETENTION_DAYS, PREDICT_CONCURRENCY,
@@ -27,7 +28,9 @@ from config import (UPDATE_INTERVAL, WS_FRAME_INTERVAL, GRID_RES, GRID_RADIUS, C
                     ENABLE_NIGHTLY_SEED, LIVE_FUSION_TAU_MIN, LIVE_FUSION_MAX_MIN,
                     ENABLE_FORECAST_LEDGER, LEDGER_DB_PATH, LEDGER_ISSUE_EVERY_MIN,
                     LEDGER_HORIZONS_MIN, LEDGER_FIXED_SITES, LEDGER_DYNAMIC_SITES,
-                    LEDGER_MIN_AIRCRAFT, LEDGER_METEO_CEILING, LEDGER_GRID_KEEP_DAYS)
+                    LEDGER_MIN_AIRCRAFT, LEDGER_METEO_CEILING, LEDGER_GRID_KEEP_DAYS,
+                    ENABLE_SCORE_HISTORY, SCORE_SNAPSHOT_DIR, SCORE_HISTORY_PATH,
+                    SCORE_COMPARE_DAYS, SCORE_SNAPSHOT_KEEP_DAYS, XGB_FIT_THREADS)
 from pathlib import Path
 import shutil
 
@@ -330,6 +333,62 @@ async def _ledger_prune_job() -> None:
         log.warning(f"[ledger] prune failed: {exc}")
 
 
+async def _score_snapshot_job() -> None:
+    """Copy the serving model as the one that will be scored on the coming day."""
+    now = datetime.now(timezone.utc)
+    # Fires at 23:55 with a grace that ends before midnight.  Past it, a fit
+    # could already have seen the new day's first rows, so the copy is skipped.
+    if now.hour != 23:
+        log.warning(f"[score] snapshot fired at {now:%H:%M} UTC, not 23:xx — skipped")
+        return
+    clf = model.model
+    if clf is None:
+        log.info("[score] no model in service — no snapshot tonight")
+        return
+    day = (now + timedelta(hours=1)).date()
+    rows, labels = list(model._buffer_X), list(model._buffer_y)
+    try:
+        meta = await asyncio.to_thread(
+            score_history.take_snapshot, clf, rows, labels, day, SCORE_SNAPSHOT_DIR,
+            SCORE_SNAPSHOT_KEEP_DAYS, model._saved_bench_score(), now)
+        log.info(f"[score] snapshot for {day}: {meta['width']}-column model beside "
+                 f"{meta['rows']} rows over {meta['days']} days")
+    except Exception as exc:
+        log.warning(f"[score] snapshot failed: {exc}")
+
+
+def _ledger_day(day):
+    end = score_history.ledger_window_end(day)
+    return score_history.compact_ledger(
+        ledger.horizon_summary(LEDGER_DB_PATH, days=1, now=end))
+
+
+async def _score_history_job() -> None:
+    """Score each finished day with the copy taken before it (see score_history)."""
+    # Wait out a nightly seed still adding yesterday's rows; the lock is held
+    # only for the copy, so a retrain cycle is not held up by the scoring.
+    async with _training_lock:
+        rows, labels = list(model._buffer_X), list(model._buffer_y)
+    today = datetime.now(timezone.utc).date()
+    try:
+        recs = await asyncio.to_thread(
+            score_history.run_daily, rows, labels, today, SCORE_SNAPSHOT_DIR,
+            SCORE_HISTORY_PATH, model._score_served, model._terrain_multiplier,
+            SCORE_COMPARE_DAYS, _ledger_day if ENABLE_FORECAST_LEDGER else None,
+            XGB_FIT_THREADS)
+    except Exception as exc:
+        log.warning(f"[score] daily scoring failed: {exc}")
+        return
+    for r in recs:
+        m = r.get("model") or {}
+        deltas = ", ".join(f"vs {c['days_older']} d older {c['delta']['point']:+.3f} "
+                           f"[{c['delta']['lo']:+.3f}, {c['delta']['hi']:+.3f}]"
+                           for c in r.get("compare", []) if c["delta"]["point"] is not None)
+        log.info(f"[score] {r['day']}: {r['rows']} rows, {r['groups']} groups, "
+                 f"model {m.get('score')}" + (f", {deltas}" if deltas else "")
+                 + (f" — {r['reason']}" if r.get("reason") else ""))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     start_ogn_stream()
@@ -371,6 +430,24 @@ async def lifespan(app: FastAPI):
         scheduler.add_job(
             _ledger_prune_job, CronTrigger(hour=3, minute=30, timezone="UTC"),
             id="ledger-prune", misfire_grace_time=3600, coalesce=True,
+        )
+    if ENABLE_SCORE_HISTORY:
+        # 23:55 so the copy has seen nothing of the next day; the grace ends
+        # before midnight for the same reason.  Scoring at 03:00 lets the
+        # 02:00 nightly seed add yesterday's rows first, and once shortly after
+        # start so a restart over 03:00 does not cost a day.
+        scheduler.add_job(
+            _score_snapshot_job, CronTrigger(hour=23, minute=55, timezone="UTC"),
+            id="score-snapshot", misfire_grace_time=240, coalesce=True,
+        )
+        scheduler.add_job(
+            _score_history_job, CronTrigger(hour=3, minute=0, timezone="UTC"),
+            id="score-history", misfire_grace_time=3600, coalesce=True,
+        )
+        scheduler.add_job(
+            _score_history_job, "date",
+            run_date=datetime.now(timezone.utc) + timedelta(minutes=10),
+            id="score-history-catch-up",
         )
     scheduler.start()
     yield
@@ -501,6 +578,19 @@ async def training_status():
         "disk_free_gb": round(await asyncio.to_thread(_free_disk_gb), 1),
         "memory_mb": await section(_memory_stats),
     }
+
+@app.get("/training/history")
+async def training_history(days: Annotated[int, Query(ge=1, le=400)] = 60):
+    """
+    One record per finished day: the model as it stood before that day, scored
+    on it, beside the copies from SCORE_COMPARE_DAYS earlier and terrain alone.
+    The paired deltas are the claim; a day's own score is not comparable with
+    another day's, because days differ in difficulty.
+    """
+    records = await asyncio.to_thread(score_history.read_history, SCORE_HISTORY_PATH, days)
+    snapshots = await asyncio.to_thread(score_history.snapshot_days, SCORE_SNAPSHOT_DIR)
+    return {"enabled": ENABLE_SCORE_HISTORY, "compare_days": SCORE_COMPARE_DAYS,
+            "snapshots": snapshots, "days": records}
 
 def _apply_ogn_fusion(
     heatmap: list[float],

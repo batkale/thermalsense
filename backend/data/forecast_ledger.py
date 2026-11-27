@@ -615,18 +615,24 @@ def horizon_summary(ledger_path, days: float = 30, boot: int = 1000,
     Intervals are 95% bootstrap over forecasts, never over units, because the
     units of one forecast share its weather and are not independent.
     """
+    explicit = now is not None
     now = now or datetime.now(timezone.utc)
     since = _iso(now - timedelta(days=days))
+    # A `now` passed in bounds the window above too (inclusive), so a past one
+    # scores exactly that window: the daily score history asks for one finished
+    # UTC day at a time.  Without one, `issued` keeps counting forecasts still
+    # waiting for their target, as /verification/summary always has.
+    until = _iso(now) if explicit else "9999"
     rng = np.random.default_rng(seed)
     con = connect(ledger_path)
     try:
         rows = con.execute(
             """SELECT f.horizon_min, o.status, o.reason, o.metrics
                FROM forecasts f JOIN outcomes o ON o.forecast_id = f.id
-               WHERE f.target_at >= ?""", (since,)).fetchall()
+               WHERE f.target_at >= ? AND f.target_at <= ?""", (since, until)).fetchall()
         issued = dict(con.execute(
             "SELECT horizon_min, COUNT(*) FROM forecasts WHERE target_at >= ? "
-            "GROUP BY horizon_min", (since,)).fetchall())
+            "AND target_at <= ? GROUP BY horizon_min", (since, until)).fetchall())
     finally:
         con.close()
 

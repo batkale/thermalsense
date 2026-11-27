@@ -97,3 +97,11 @@ export async function fetchTrainingStatus() {
   if (!res.ok) throw new Error(`Training status failed: ${res.statusText}`);
   return res.json();
 }
+
+// One record per finished day: the model as it stood before that day, scored
+// on it beside older copies. Changes once a day, so it is fetched once per open.
+export async function fetchTrainingHistory(days = 30) {
+  const res = await fetch(`${API_BASE}/training/history?days=${days}`);
+  if (!res.ok) throw new Error(`Training history failed: ${res.statusText}`);
+  return res.json();
+}
